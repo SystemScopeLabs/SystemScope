@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Run even if this commit already has a successful mutants run
+        description: Run even if nothing mutated changed since the last successful scheduled run
         type: boolean
         default: false
       shard_count:
@@ -20,7 +20,7 @@ on:
         default: ""
 permissions:
   contents: read
-  # The gate reads earlier scheduled runs to skip a commit already explored.
+  # The gate reads earlier scheduled runs to skip when nothing mutated changed.
   actions: read
 concurrency:
   group: mutants
@@ -35,12 +35,17 @@ jobs:
       shard_count: ${{ steps.decide.outputs.shard_count }}
       shards: ${{ steps.decide.outputs.shards }}
     steps:
+      - uses: actions/checkout@v4
+        with: { path: systemscope, fetch-depth: 0 }
       - id: decide
+        working-directory: systemscope
         env:
           GH_TOKEN: ${{ github.token }}
           FORCE: ${{ inputs.force }}
           SHARD_COUNT: ${{ inputs.shard_count || '20' }}
           SHARD: ${{ inputs.shard }}
+          # What the run mutates, and what decides which mutants exist.
+          WATCHED: runtime components elf reference Cargo.lock .cargo/mutants.toml
         run: |
           case "$SHARD_COUNT" in ''|*[!0-9]*|0) echo "::error::shard_count must be a positive integer"; exit 1 ;; esac
           if [ -z "$SHARD" ]; then
@@ -50,13 +55,18 @@ jobs:
             if [ "$SHARD" -ge "$SHARD_COUNT" ]; then echo "::error::shard must be below shard_count"; exit 1; fi
             shards="[$SHARD]"
           fi
+          # Skip when nothing watched changed since the last successful scheduled run on
+          # this branch. A skipped run counts too: nothing changed before it either.
           run=true
           if [ "$FORCE" != true ]; then
-            done=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants.yml \
-              --commit "$GITHUB_SHA" --event schedule --status success --json databaseId --jq length)
-            if [ "$done" -gt 0 ]; then
+            last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants.yml \
+              --branch "$GITHUB_REF_NAME" --event schedule --status success --limit 1 \
+              --json headSha --jq '.[0].headSha // empty')
+            # shellcheck disable=SC2086 # WATCHED is a list of paths
+            if [ -n "$last" ] && git cat-file -e "$last^{commit}" 2>/dev/null \
+              && git diff --quiet "$last" HEAD -- $WATCHED; then
               run=false
-              echo "Commit $GITHUB_SHA already has a successful mutants run; skipping." >> "$GITHUB_STEP_SUMMARY"
+              echo "Nothing mutated changed since ${last:0:7}, the last successful scheduled run; skipping." >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
           {
@@ -72,6 +82,8 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
+      # Leave runner slots for pull request CI.
+      max-parallel: 10
       matrix:
         shard: ${{ fromJSON(needs.gate.outputs.shards) }}
     defaults:
@@ -106,12 +118,14 @@ jobs:
           # A memory-hungry mutant is killed inside this cgroup instead of taking the
           # whole runner down; the mutant is then recorded as a failed test. OOMPolicy=continue
           # keeps systemd from stopping the whole scope, cargo-mutants included, after that kill.
+          # A mutant's tests finish in about 70 s at most, so a 180 s timeout stops a runaway
+          # one well before the automatic timeout (about 600 s) would.
           status=0
           sudo -E env "PATH=$PATH" "HOME=$HOME" \
             systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
               -p MemoryMax=12G -p MemorySwapMax=0 -p OOMPolicy=continue \
             cargo mutants --workspace --in-place --no-shuffle \
-              --shard "$SHARD" --sharding round-robin || status=$?
+              --shard "$SHARD" --sharding round-robin --timeout 180 || status=$?
           kill "$monitor"
           free -m; df -h /
           # 0: all caught; 2: missed mutants; 3: timeouts. Both are findings, shown by
