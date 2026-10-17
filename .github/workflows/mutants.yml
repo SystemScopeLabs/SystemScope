@@ -1,31 +1,85 @@
 name: Mutants
-
-# Nightly and on demand only: exploratory, never a PR gate.
+# Weekly and on demand only: exploratory, never a PR gate. Missed and timed-out mutants
+# are reported in the summary; the run fails only when a tool, a baseline, or a runner
+# fails, or when a shard leaves no mutants.out behind.
 on:
   schedule:
-    - cron: "0 18 * * *"
+    # Saturday 18:17 UTC (Sunday 03:17 KST); off the hour, where scheduled runs queue.
+    - cron: "17 18 * * 6"
   workflow_dispatch:
-
+    inputs:
+      force:
+        description: Run even if this commit already has a successful mutants run
+        type: boolean
+        default: false
+      shard_count:
+        description: Number of shards (every shard of one run uses the same count)
+        default: "20"
+      shard:
+        description: Run only this shard index (0-based); empty runs all shards
+        default: ""
 permissions:
   contents: read
-
+  # The gate reads earlier scheduled runs to skip a commit already explored.
+  actions: read
+concurrency:
+  group: mutants
+  cancel-in-progress: false
 env:
   CARGO_TERM_COLOR: always
-
-defaults:
-  run:
-    working-directory: systemscope
-
 jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      shard_count: ${{ steps.decide.outputs.shard_count }}
+      shards: ${{ steps.decide.outputs.shards }}
+    steps:
+      - id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+          SHARD_COUNT: ${{ inputs.shard_count || '20' }}
+          SHARD: ${{ inputs.shard }}
+        run: |
+          case "$SHARD_COUNT" in ''|*[!0-9]*|0) echo "::error::shard_count must be a positive integer"; exit 1 ;; esac
+          if [ -z "$SHARD" ]; then
+            shards=$(jq -cn --argjson n "$SHARD_COUNT" '[range($n)]')
+          else
+            case "$SHARD" in *[!0-9]*) echo "::error::shard must be an integer"; exit 1 ;; esac
+            if [ "$SHARD" -ge "$SHARD_COUNT" ]; then echo "::error::shard must be below shard_count"; exit 1; fi
+            shards="[$SHARD]"
+          fi
+          run=true
+          if [ "$FORCE" != true ]; then
+            done=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants.yml \
+              --commit "$GITHUB_SHA" --event schedule --status success --json databaseId --jq length)
+            if [ "$done" -gt 0 ]; then
+              run=false
+              echo "Commit $GITHUB_SHA already has a successful mutants run; skipping." >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          {
+            echo "run=$run"
+            echo "shard_count=$SHARD_COUNT"
+            echo "shards=$shards"
+          } >> "$GITHUB_OUTPUT"
+
   mutants:
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.gate.outputs.shards) }}
+    defaults:
+      run:
+        working-directory: systemscope
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
+        with: { path: systemscope }
       - uses: actions/checkout@v4
         with:
           repository: SystemScopeLabs/contracts
@@ -36,14 +90,87 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: systemscope
+          save-if: ${{ strategy.job-index == 0 }}
       - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants,cargo-nextest
-      # The checkout is disposable, so mutate it in place.
-      # Mutate only this repository; contracts has its own nightly run.
-      - run: cargo mutants --workspace --in-place --no-shuffle
+        with: { tool: "cargo-mutants,cargo-nextest" }
+      - name: Run cargo-mutants shard ${{ matrix.shard }}/${{ needs.gate.outputs.shard_count }}
+        env:
+          SHARD: ${{ matrix.shard }}/${{ needs.gate.outputs.shard_count }}
+        run: |
+          # Log memory and disk every five minutes: the job log streams live, so it
+          # survives a runner that dies before the upload step.
+          ( while sleep 300; do
+              echo "::group::resources $(date -u +%H:%M:%S)"; free -m; df -h /; echo "::endgroup::"
+            done ) &
+          monitor=$!
+          # A memory-hungry mutant is killed inside this cgroup instead of taking the
+          # whole runner down; the mutant is then recorded as a failed test.
+          status=0
+          sudo -E env "PATH=$PATH" "HOME=$HOME" \
+            systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
+              -p MemoryMax=12G -p MemorySwapMax=0 \
+            cargo mutants --workspace --in-place --no-shuffle \
+              --shard "$SHARD" --sharding round-robin || status=$?
+          kill "$monitor"
+          free -m; df -h /
+          # 0: all caught; 2: missed mutants; 3: timeouts. Both are findings, shown by
+          # the summary job. 1 (usage), 4 (baseline failed), and anything else fail.
+          case "$status" in
+            0|2|3) echo "cargo-mutants exited $status" ;;
+            *) echo "::error::cargo-mutants exited $status"; exit 1 ;;
+          esac
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: mutants.out
+          name: mutants.out-${{ matrix.shard }}
           path: systemscope/mutants.out
+          if-no-files-found: ignore
+
+  summary:
+    needs: [gate, mutants]
+    if: always() && needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants.out-*
+          path: shards
+      - name: Summarize shards
+        env:
+          SHARDS: ${{ needs.gate.outputs.shards }}
+          SHARD_COUNT: ${{ needs.gate.outputs.shard_count }}
+        run: |
+          mkdir -p shards
+          failed=0
+          {
+            echo "## Mutants at ${GITHUB_SHA:0:7}, $(jq length <<<"$SHARDS") of $SHARD_COUNT shards"
+            echo
+            echo "| Shard | Caught | Missed | Timeout | Unviable |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          count() { if [ -f "$1" ]; then grep -c . "$1" || true; else echo 0; fi; }
+          for k in $(jq -r '.[]' <<<"$SHARDS"); do
+            d="shards/mutants.out-$k"
+            if [ ! -f "$d/outcomes.json" ]; then
+              echo "::error::shard $k left no mutants.out"
+              echo "| $k | no mutants.out | | | |" >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+              continue
+            fi
+            echo "| $k | $(count "$d/caught.txt") | $(count "$d/missed.txt") | $(count "$d/timeout.txt") | $(count "$d/unviable.txt") |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          total() { cat shards/*/"$1".txt 2>/dev/null | grep -c . || true; }
+          {
+            echo "| **all** | $(total caught) | $(total missed) | $(total timeout) | $(total unviable) |"
+            echo
+            for kind in missed timeout; do
+              echo "<details><summary>$kind</summary>"
+              echo
+              echo '```'
+              cat shards/*/"$kind".txt 2>/dev/null | sort
+              echo '```'
+              echo "</details>"
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
