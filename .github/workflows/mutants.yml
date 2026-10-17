@@ -104,11 +104,12 @@ jobs:
             done ) &
           monitor=$!
           # A memory-hungry mutant is killed inside this cgroup instead of taking the
-          # whole runner down; the mutant is then recorded as a failed test.
+          # whole runner down; the mutant is then recorded as a failed test. OOMPolicy=continue
+          # keeps systemd from stopping the whole scope, cargo-mutants included, after that kill.
           status=0
           sudo -E env "PATH=$PATH" "HOME=$HOME" \
             systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
-              -p MemoryMax=12G -p MemorySwapMax=0 \
+              -p MemoryMax=12G -p MemorySwapMax=0 -p OOMPolicy=continue \
             cargo mutants --workspace --in-place --no-shuffle \
               --shard "$SHARD" --sharding round-robin || status=$?
           kill "$monitor"
