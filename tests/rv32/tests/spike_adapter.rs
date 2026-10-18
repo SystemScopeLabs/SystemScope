@@ -247,3 +247,45 @@ fn the_four_profiles_keep_the_existing_rules() {
         assert!(narrowed.not_compared.is_empty());
     }
 }
+
+#[test]
+fn a_campaign_case_agrees_or_writes_a_replaying_reproducer() {
+    use systemscope_rv32::spike::Event;
+    use systemscope_rv32::spike_adapter::{CAMPAIGN_SEEDS, SpikeCase, campaign_case};
+    assert_eq!(CAMPAIGN_SEEDS.start, progen::FIXED_SEEDS[63] + 1);
+    assert_eq!(CAMPAIGN_SEEDS.count(), 64);
+    let (image, tohost) = simple();
+    let case = SpikeCase {
+        image,
+        tohost,
+        inputs: [InputVariant::None, InputVariant::None],
+    };
+    let root = workspace_root();
+    let repro = "target/spike-campaign-test/simple.repro";
+    let _ = fs::remove_dir_all(root.join("target/spike-campaign-test"));
+    let events: Vec<Event> = systemscope_rv32::spike::parse_spike_log(&log(SIMPLE_LOG))
+        .unwrap()
+        .into_iter()
+        .map(machine)
+        .collect();
+    let n = campaign_case(&root, &case, &Source::Parsed(events.clone(), None), repro).unwrap();
+    assert_eq!(n, events.len() as u64);
+    assert!(!root.join(repro).exists());
+    // Spike's stream doctored at boundary 10.
+    let mut doctored = events;
+    let Event::Retire { mut retire, .. } = doctored[10].clone() else {
+        panic!()
+    };
+    retire.pc += 4;
+    doctored[10] = machine(retire);
+    let err = campaign_case(&root, &case, &Source::Parsed(doctored, None), repro).unwrap_err();
+    assert!(err.contains("at arch[10]"), "{err}");
+    assert!(err.ends_with(" replays"), "{err}");
+    assert!(
+        root.join(repro)
+            .join(systemscope_verify::bundle::MANIFEST)
+            .exists(),
+        "{err}"
+    );
+    let _ = fs::remove_dir_all(root.join("target/spike-campaign-test"));
+}

@@ -511,6 +511,8 @@ jobs:
         run: cargo xtask rv32-fixtures verify
       - name: M1-A3, M2 CSR, M3 privilege, and M3 Sv32 differential (40 rv32ui, 64 generated, 9 misaligned, 20 M2 CSR, 13 M3 privilege, 11 M3 Sv32)
         run: cargo xtask spike diff ~/spike
+      - name: M4 Spike campaign (generated seeds 64 to 127)
+        run: cargo xtask spike campaign ~/spike
       - name: Keep Spike's logs
         if: failure()
         uses: actions/upload-artifact@v7

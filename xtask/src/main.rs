@@ -88,6 +88,10 @@
 //!   generated ELFs to `target/spike-logs/progen`, `privgen`, and `vmgen`.
 //! - `spike random [<dir>]`: `verify`, then one generated program, for the seed in
 //!   `M1_PROGEN_SEED` (decimal or `0x` hex), against Spike. The nightly workflow runs it.
+//! - `spike campaign [<dir>]`: `verify`, then the Spike campaign (`docs/m4-design.md`
+//!   §25.3): the generated programs of seeds 64 to 127 against Spike through the M4 stream
+//!   compare. A divergence is minimized to `target/spike-logs/campaign/<program>.repro`,
+//!   replayed, and fails the task.
 //!
 //! - `act4 build [<cache-dir>]`: Linux x86_64 only, with git, curl, tar, xz, make, and a
 //!   host C compiler. Generates the ACT4 RV32I corpus with the pinned ACT4, Sail, and GCC
@@ -149,7 +153,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m4-expected bless | verify\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
-                     cargo xtask spike build | verify | diff | random [<dir>]\n       \
+                     cargo xtask spike build | verify | diff | random | campaign [<dir>]\n       \
                      cargo xtask act4 build [<cache-dir>] | install <out-dir> | check <out-dir> \
                      | verify | run";
 /// The golden file's name in an `m1-golden emit` directory.
@@ -1153,6 +1157,7 @@ fn spike_task(task: &str, dir: &Path) -> ExitCode {
         }
         "diff" => spike_diff(dir),
         "random" => spike_random(dir),
+        "campaign" => spike_campaign(dir),
         _ => {
             eprintln!("{USAGE}");
             ExitCode::FAILURE
@@ -1301,6 +1306,34 @@ fn print_diff_report(part_of: &str, what: &str, report: &DiffReport, expected: u
         Err(e) => {
             eprintln!("{part_of} fails ({what}): {e}");
             false
+        }
+    }
+}
+
+fn spike_campaign(dir: &Path) -> ExitCode {
+    if !spike_verify(dir) {
+        return ExitCode::FAILURE;
+    }
+    let seeds = spike_adapter::CAMPAIGN_SEEDS;
+    match spike_adapter::run_campaign(&root(), &spike_binary(dir), SPIKE_LOGS, seeds.clone()) {
+        Ok(found) => {
+            for (name, n) in &found {
+                println!("{name}: agrees, {n} observations compared");
+            }
+            let total: u64 = found.iter().map(|(_, n)| n).sum();
+            println!(
+                "M4 Spike campaign: seeds {seeds:?}, {} programs agree with Spike \
+                 {SPIKE_COMMIT}, {total} observations compared",
+                found.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(errors) => {
+            for e in &errors {
+                eprintln!("{e}");
+            }
+            eprintln!("M4 Spike campaign fails: {} programs", errors.len());
+            ExitCode::FAILURE
         }
     }
 }

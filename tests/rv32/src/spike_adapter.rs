@@ -621,6 +621,74 @@ pub const SK1_ELF: &str = "rv32ui-add.elf";
 /// boundary, so it starts exactly the report window before the divergence.
 pub const SK1_EVERY: u64 = 1;
 
+/// A case of SystemScope against Spike under the rv32ui profile: Spike the expected side,
+/// from its initial state, SystemScope the actual side, each with its input variant.
+#[derive(Clone, Debug)]
+pub struct SpikeCase {
+    /// The program's image.
+    pub image: LoadImage,
+    /// Its `tohost`.
+    pub tohost: u32,
+    /// Spike's and SystemScope's input variants.
+    pub inputs: [InputVariant; 2],
+}
+
+impl SpikeCase {
+    /// The scenario.
+    pub fn scenario(&self) -> Scenario {
+        scenario(Suite::Rv32ui, &self.image)
+    }
+
+    /// The plan.
+    pub fn plan(&self) -> Result<Plan, String> {
+        let spike = SpikeBackend::new(Suite::Rv32ui, Source::Log(String::new()), None);
+        let ours = systemscope(Suite::Rv32ui, &self.image, Some(self.tohost));
+        plan(&Suite::Rv32ui.profile(), &spike.support(), &ours.support())
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// Calls `f` with both sides: Spike reading its log from `source`, and SystemScope.
+    fn with_sides<T>(&self, source: &Source, f: impl FnOnce([Builder<'_>; 2]) -> T) -> T {
+        let tohost = Some(self.tohost);
+        let spike = || -> Box<dyn Backend> {
+            Box::new(SpikeBackend::new(Suite::Rv32ui, source.clone(), tohost))
+        };
+        let ours = || systemscope(Suite::Rv32ui, &self.image, tohost);
+        f([
+            Builder {
+                make: Make::Other(&spike),
+                config: Suite::Rv32ui.spike_config(),
+            },
+            Builder {
+                make: Make::Runtime(&ours),
+                config: config(),
+            },
+        ])
+    }
+
+    /// The reproducer, minimized with a SystemScope checkpoint every `every` boundaries;
+    /// Spike, which cannot restore, starts from its initial state (§17.2).
+    pub fn minimized(&self, source: &Source, every: u64) -> Result<Minimized, String> {
+        let (plan, scenario) = (self.plan()?, self.scenario());
+        self.with_sides(source, |sides| {
+            minimize(&plan, &scenario, sides, self.inputs.clone(), every).map_err(|e| e.to_string())
+        })
+    }
+
+    /// Replays `bundle` with Spike reading its log from `source`.
+    pub fn replay(&self, bundle: &Bundle, source: &Source) -> Result<VerificationResult, String> {
+        let (plan, scenario) = (self.plan()?, self.scenario());
+        self.with_sides(source, |sides| {
+            let case = Case {
+                plan: &plan,
+                scenario: &scenario,
+                sides,
+            };
+            replay(bundle, case).map_err(|e| format!("{e:?}"))
+        })
+    }
+}
+
 /// SK-1 (§25.1): `rv32ui-add` under the rv32ui Spike profile, Spike the expected side from
 /// its initial state, SystemScope the actual side with `x[rs1] ^= 1` after boundary
 /// `r − 1`, where `r` is the first retirement of an injective instruction. The expected
@@ -696,40 +764,24 @@ impl Sk1 {
         scenario(Suite::Rv32ui, &self.image)
     }
 
-    /// The plan.
-    pub fn plan(&self) -> Result<Plan, String> {
-        let spike = SpikeBackend::new(Suite::Rv32ui, Source::Log(String::new()), None);
-        let ours = systemscope(Suite::Rv32ui, &self.image, Some(self.tohost));
-        plan(&Suite::Rv32ui.profile(), &spike.support(), &ours.support())
-            .map_err(|e| format!("{e:?}"))
+    /// The case: SystemScope's side patched.
+    pub fn case(&self) -> SpikeCase {
+        SpikeCase {
+            image: self.image.clone(),
+            tohost: self.tohost,
+            inputs: self.inputs(),
+        }
     }
 
-    /// Calls `f` with both sides: Spike reading its log from `source`, and SystemScope.
-    fn with_sides<T>(&self, source: &Source, f: impl FnOnce([Builder<'_>; 2]) -> T) -> T {
-        let tohost = Some(self.tohost);
-        let spike = || -> Box<dyn Backend> {
-            Box::new(SpikeBackend::new(Suite::Rv32ui, source.clone(), tohost))
-        };
-        let ours = || systemscope(Suite::Rv32ui, &self.image, tohost);
-        f([
-            Builder {
-                make: Make::Other(&spike),
-                config: Suite::Rv32ui.spike_config(),
-            },
-            Builder {
-                make: Make::Runtime(&ours),
-                config: config(),
-            },
-        ])
+    /// The plan.
+    pub fn plan(&self) -> Result<Plan, String> {
+        self.case().plan()
     }
 
     /// The reproducer, minimized with a SystemScope checkpoint every `every` boundaries;
     /// Spike, which cannot restore, starts from its initial state (§17.2).
     pub fn minimized(&self, source: &Source, every: u64) -> Result<Minimized, String> {
-        let (plan, scenario) = (self.plan()?, self.scenario());
-        self.with_sides(source, |sides| {
-            minimize(&plan, &scenario, sides, self.inputs(), every).map_err(|e| e.to_string())
-        })
+        self.case().minimized(source, every)
     }
 
     /// Requires `result` to be the selector's divergence: `arch[r]`, `retire`, field
@@ -758,15 +810,7 @@ impl Sk1 {
 
     /// Replays `bundle` with Spike reading its log from `source`.
     pub fn replay(&self, bundle: &Bundle, source: &Source) -> Result<VerificationResult, String> {
-        let (plan, scenario) = (self.plan()?, self.scenario());
-        self.with_sides(source, |sides| {
-            let case = Case {
-                plan: &plan,
-                scenario: &scenario,
-                sides,
-            };
-            replay(bundle, case).map_err(|e| format!("{e:?}"))
-        })
+        self.case().replay(bundle, source)
     }
 }
 
@@ -807,4 +851,123 @@ pub fn run_sk1(root: &Path, spike: &Path, logs: &str) -> Result<String, String> 
         m.origins[1].map_or("0".to_owned(), |c| c.to_string()),
         dir.display()
     ))
+}
+
+/// The progen seeds of the Spike campaign (§25.3): the 64 after
+/// [`crate::progen::FIXED_SEEDS`].
+pub const CAMPAIGN_SEEDS: std::ops::Range<u64> = 64..128;
+
+/// The campaign's checkpoint density for a reproducer: every boundary, as SK-1's.
+pub const CAMPAIGN_EVERY: u64 = 1;
+
+/// One campaign program against Spike's stream from `source`: the observations compared
+/// when every stream agrees. Otherwise the case is minimized, written to `repro` under
+/// `root`, read back, and replayed, and the error names the reproducer.
+pub fn campaign_case(
+    root: &Path,
+    case: &SpikeCase,
+    source: &Source,
+    repro: &str,
+) -> Result<u64, String> {
+    let (plan, scenario) = (case.plan()?, case.scenario());
+    let mut spike = SpikeBackend::new(Suite::Rv32ui, source.clone(), Some(case.tohost));
+    let mut ours = systemscope(Suite::Rv32ui, &case.image, Some(case.tohost));
+    let found = locate(
+        &plan,
+        &scenario,
+        Side {
+            backend: &mut spike,
+            input: case.inputs[0].clone(),
+            config: Suite::Rv32ui.spike_config(),
+        },
+        Side {
+            backend: &mut ours,
+            input: case.inputs[1].clone(),
+            config: config(),
+        },
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let what = match &found.verdict {
+        Verdict::Compared(c) if c.failures.is_empty() && c.auxiliary.iter().all(|a| a.agrees()) => {
+            match &c.primary {
+                StreamResult::Agree { compared, .. } => return Ok(*compared),
+                StreamResult::Diverged { ordinal, .. } => format!("arch[{ordinal}]"),
+            }
+        }
+        other => format!("{other:?}"),
+    };
+    let m = case.minimized(source, CAMPAIGN_EVERY)?;
+    let dir = root.join(repro);
+    let _ = fs::remove_dir_all(&dir);
+    write_dir(&m.bundle, &dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let bundle = read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let replays = match case.replay(&bundle, source)? == m.result {
+        true => "replays",
+        false => "does not replay",
+    };
+    Err(format!(
+        "SystemScope diverges from Spike at {what}; the reproducer at {} {replays}",
+        dir.display()
+    ))
+}
+
+/// The Spike campaign (§25.3) against the Spike executable `spike`, run in `root` with its
+/// logs and reproducers under `logs/campaign`: each seed's program name and the
+/// observations compared, or every error.
+pub fn run_campaign(
+    root: &Path,
+    spike: &Path,
+    logs: &str,
+    seeds: impl IntoIterator<Item = u64>,
+) -> Result<Vec<(String, u64)>, Vec<String>> {
+    let mut ok = Vec::new();
+    let mut errors = Vec::new();
+    for seed in seeds {
+        let program = crate::progen::generate(seed);
+        let name = program.name.clone();
+        match campaign_program(root, spike, logs, &program) {
+            Ok(n) => ok.push((name, n)),
+            Err(e) => errors.push(format!("{name}: {e}")),
+        }
+    }
+    match errors.is_empty() {
+        true => Ok(ok),
+        false => Err(errors),
+    }
+}
+
+fn campaign_program(
+    root: &Path,
+    spike: &Path,
+    logs: &str,
+    program: &crate::progen::Program,
+) -> Result<u64, String> {
+    let name = &program.name;
+    let elf = format!("{logs}/campaign/{name}.elf");
+    let log = format!("{logs}/campaign/{name}.log");
+    let path = root.join(&elf);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    fs::write(&path, &program.elf).map_err(|e| format!("{elf}: {e}"))?;
+    let image = load(name, &program.elf)?;
+    let tohost = elf_symbol(&program.elf, "tohost").ok_or("no tohost symbol")?;
+    let source = Source::Run {
+        spike: spike.to_owned(),
+        root: root.to_owned(),
+        args: spike_args(image.entry, &elf, &log),
+        log,
+    };
+    let case = SpikeCase {
+        image,
+        tohost,
+        inputs: [InputVariant::None, InputVariant::None],
+    };
+    campaign_case(
+        root,
+        &case,
+        &source,
+        &format!("{logs}/campaign/{name}.repro"),
+    )
 }
