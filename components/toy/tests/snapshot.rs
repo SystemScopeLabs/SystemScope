@@ -520,6 +520,25 @@ fn restore_rejects_malformed_bytes() {
     let mut format = snapshot.clone();
     format[8] = 9;
     assert_eq!(restore_error(v, &format), RestoreError::FormatVersion(9));
+    // Rounding is one of two tags: the other one is a different session, anything else
+    // is not a snapshot.
+    let rounding = layout(&snapshot).domains + 4 + 3 * 8;
+    assert!(snapshot[rounding] <= 1);
+    let mut other = snapshot.clone();
+    other[rounding] ^= 1;
+    assert_eq!(
+        restore_error(v, &other),
+        RestoreError::SessionMismatch(SessionField::ClockDomains)
+    );
+    let mut bad = snapshot.clone();
+    bad[rounding] = 2;
+    assert_eq!(
+        restore_error(v, &bad),
+        RestoreError::Decode(DecodeError::InvalidTag {
+            what: "rounding",
+            tag: 2
+        })
+    );
 }
 
 #[test]
@@ -636,8 +655,12 @@ fn resume_trace_accepts_only_the_matching_prefix_once() {
 
 /// Byte offsets of the variable-position fields in a snapshot.
 struct Layout {
+    /// The first clock domain.
+    domains: usize,
     digest: usize,
     queue: usize,
+    /// The RNG state count, just before the states.
+    rng_count: usize,
     rngs: usize,
 }
 
@@ -649,7 +672,9 @@ fn layout(bytes: &[u8]) -> Layout {
         d.u64().unwrap();
     }
     d.str().unwrap();
-    for _ in 0..d.len().unwrap() {
+    let n = d.len().unwrap();
+    let domains = at(&d);
+    for _ in 0..n {
         d.raw(4 + 3 * 8 + 1).unwrap();
     }
     d.raw(32).unwrap();
@@ -666,12 +691,27 @@ fn layout(bytes: &[u8]) -> Layout {
     for _ in 0..n {
         CanonicalEvent::decode(&mut d).unwrap();
     }
+    let rng_count = at(&d);
     d.len().unwrap();
     Layout {
+        domains,
         digest,
         queue,
+        rng_count,
         rngs: at(&d),
     }
+}
+
+/// Offsets of the queued events in a snapshot, with each event.
+fn queued(bytes: &[u8]) -> Vec<(usize, CanonicalEvent)> {
+    let at = layout(bytes);
+    let mut d = Decoder::new(&bytes[at.queue..at.rng_count]);
+    let mut events = Vec::new();
+    while d.remaining() > 0 {
+        let offset = at.queue + (at.rng_count - at.queue - d.remaining());
+        events.push((offset, CanonicalEvent::decode(&mut d).unwrap()));
+    }
+    events
 }
 
 #[test]
@@ -693,6 +733,12 @@ fn restore_rejects_impossible_states() {
     let mut rng = fresh.clone();
     rng[at.rngs..at.rngs + 32].fill(0);
     assert_eq!(invalid(&rng), "all-zero RNG state");
+    // One RNG state short, with every component entry still present.
+    let mut short = fresh[..at.rng_count].to_vec();
+    let n = u32::from_le_bytes(fresh[at.rng_count..at.rngs].try_into().unwrap());
+    short.extend_from_slice(&(n - 1).to_le_bytes());
+    short.extend_from_slice(&fresh[at.rngs + 32..]);
+    assert_eq!(invalid(&short), "not one entry per component");
     // canonical(ev): key (17 bytes), then source and target.
     let mut target = fresh.clone();
     target[at.queue + 21] = 99;
@@ -700,6 +746,18 @@ fn restore_rejects_impossible_states() {
     let mut source = fresh.clone();
     source[at.queue + 17] ^= 1;
     assert_eq!(invalid(&source), "queued wake for another component");
+    // Mid-run, messages are in flight; one from a component that does not exist.
+    let (busy, _, _) = checkpoint(200);
+    let (offset, _) = queued(&busy)
+        .into_iter()
+        .find(|(_, ev)| matches!(ev.delivery, Delivered::Message { .. }))
+        .unwrap();
+    let mut stranger = busy.clone();
+    stranger[offset + 17..offset + 21].copy_from_slice(&99u32.to_le_bytes());
+    assert_eq!(
+        invalid(&stranger),
+        "queued message from an unknown component"
+    );
 
     // A component that leaves part of its bytes unread fails the restore.
     let padded = Variant { padded: true, ..v };

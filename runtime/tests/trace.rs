@@ -264,6 +264,22 @@ fn identical_runs_have_identical_digests() {
 }
 
 #[test]
+fn a_prefix_taken_right_after_init_keeps_its_init_records() {
+    let mut rt = build();
+    rt.start_trace().unwrap();
+    rt.init().unwrap();
+    let snapshot = rt.snapshot().unwrap();
+    let prefix = rt.take_trace().unwrap();
+    assert!(prefix.records.iter().any(|r| r.at == TraceAt::Init));
+    let mut resumed = build();
+    resumed.restore(&snapshot).unwrap();
+    resumed.resume_trace(prefix).unwrap();
+    // The resumed trace continues from the prefix, init records included.
+    while resumed.step().unwrap().is_some() {}
+    assert_eq!(resumed.take_trace().unwrap().records, traced_run().records);
+}
+
+#[test]
 fn tracing_starts_only_before_init() {
     let mut rt = build();
     assert!(rt.take_trace().is_none());

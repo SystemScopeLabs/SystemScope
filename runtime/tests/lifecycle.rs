@@ -237,6 +237,24 @@ fn request_and_response_flow_through_link_with_latency() {
 }
 
 #[test]
+fn accessors_report_where_the_session_stands() {
+    let (mut rt, _) = ping_echo(Some(LinkLatency::After(Duration::from_ns(1))));
+    assert_eq!(
+        rt.component_paths().collect::<Vec<_>>(),
+        ["soc.pinger", "soc.echo"]
+    );
+    assert_eq!((rt.now(), rt.next_sequence()), (Tick::ZERO, 0));
+    rt.init().unwrap();
+    // The pinger's request took sequence 0 and waits on the link.
+    assert_eq!((rt.now(), rt.next_sequence()), (Tick::ZERO, 1));
+    rt.step().unwrap();
+    // The echo's response took sequence 1.
+    assert_eq!((rt.now(), rt.next_sequence()), (Tick(1_000), 2));
+    rt.step().unwrap();
+    assert_eq!((rt.now(), rt.next_sequence()), (Tick(52_000), 2));
+}
+
+#[test]
 fn cycle_latency_counts_from_next_edge_of_send_tick() {
     let latency = LinkLatency::Cycles {
         domain: ClockDomainId(0),

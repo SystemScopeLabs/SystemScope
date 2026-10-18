@@ -306,6 +306,37 @@ fn step_dispatches_exactly_one_event_and_ignores_pauses() {
 }
 
 #[test]
+fn step_fires_every_point_that_is_due() {
+    let (mut rt, log) = watched(Watcher {
+        pause_on_observe: true,
+        ..Watcher::default()
+    });
+    rt.init().unwrap();
+    rt.observe_at(Tick(1000));
+    rt.observe_at(Tick(1500));
+    rt.step().unwrap();
+    assert_eq!(rt.pending_observe_points(), 2);
+    // Tick 1000 is finished after its Commit: both points are due, and a pause on the
+    // first does not hold back the second.
+    rt.step().unwrap();
+    assert_eq!(rt.pending_observe_points(), 0);
+    assert!(
+        log.borrow()
+            .ends_with(&[Event(1000, Commit), Observe(1000), Observe(1500)])
+    );
+}
+
+#[test]
+fn a_run_stops_after_the_last_event_at_its_horizon() {
+    let mut rt = build();
+    rt.init().unwrap();
+    let outcome = rt.run(Tick(1000)).unwrap();
+    assert_eq!((outcome.events, outcome.stop), (2, Stop::Horizon));
+    assert_eq!(rt.peek_key().unwrap().tick, Tick(2000));
+    assert_eq!(rt.pending(), 1);
+}
+
+#[test]
 fn observers_see_every_record_with_or_without_a_recorder() {
     let records = |recorder: bool| {
         let (mut rt, log) = watched(Watcher {

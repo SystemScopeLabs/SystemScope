@@ -181,11 +181,13 @@ proptest! {
         limit in limit(),
     ) {
         let mut s = scheduler_at(start, limit);
+        prop_assert_eq!(s.config().max_events_per_phase, limit);
         let mut m = Model { limit, last: None, count: 0, next_seq: start, pending: Vec::new() };
         for (i, op) in ops.iter().enumerate() {
             prop_assert_eq!(apply(&mut s, op, i as u32), apply_model(&mut m, op, i as u32));
             prop_assert_eq!(s.next_sequence(), m.next_seq);
             prop_assert_eq!(s.len(), m.pending.len());
+            prop_assert_eq!(s.is_empty(), m.pending.is_empty());
         }
         // Drain what remains; zero-delay leftovers must come out in the model's order too.
         loop {

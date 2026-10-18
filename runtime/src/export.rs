@@ -391,5 +391,94 @@ mod tests {
         let mut out = String::new();
         json_str(&mut out, "a\"b\\c\n\u{1}\u{e9}");
         assert_eq!(out, "\"a\\\"b\\\\c\\n\\u0001\u{e9}\"");
+        // The last control character is escaped; a space, the first printable one, is not.
+        let mut edge = String::new();
+        json_str(&mut edge, "\u{1f} ");
+        assert_eq!(edge, "\"\\u001f \"");
+    }
+
+    /// A header with two of every list.
+    fn two_of_everything(records: Vec<TraceRecord>) -> Trace {
+        use systemscope_contracts::component::{ComponentId, PortId, PortSpec};
+        use systemscope_contracts::protocol::mem;
+        use systemscope_contracts::time::{
+            ClockDomain, ClockDomainId, Frequency, SimulationClock, Tick,
+        };
+        use systemscope_contracts::trace::{ComponentDecl, LinkDecl, TraceHeader};
+
+        let clock = SimulationClock::new(1_000_000_000_000).unwrap();
+        let domain = |id, mhz: u64| {
+            let f = Frequency::new(mhz * 1_000_000, 1).unwrap();
+            ClockDomain::new(&clock, ClockDomainId(id), f, Tick(0), Rounding::Floor).unwrap()
+        };
+        let port = |name, role| PortSpec {
+            name,
+            protocol: mem::PROTOCOL,
+            role,
+        };
+        let decl = |path: &str| ComponentDecl {
+            path: path.to_owned(),
+            type_name: "t",
+            ports: vec![port("a", Role::Initiator), port("b", Role::Target)],
+        };
+        let link = |a, b| LinkDecl {
+            a: (ComponentId(a), PortId(0)),
+            b: (ComponentId(b), PortId(1)),
+            latency: None,
+        };
+        Trace {
+            header: TraceHeader {
+                ticks_per_second: clock.ticks_per_second(),
+                seed: 0,
+                contracts_version: "v".into(),
+                topology_hash: [0; 32],
+                clock_domains: vec![domain(0, 100), domain(1, 50)],
+                components: vec![decl("x"), decl("y")],
+                links: vec![link(0, 1), link(1, 0)],
+            },
+            records,
+        }
+    }
+
+    #[test]
+    fn every_list_in_the_header_separates_its_elements() {
+        let jsonl = to_jsonl(&two_of_everything(Vec::new()));
+        let header: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        for list in ["clock_domains", "components", "links"] {
+            assert_eq!(header[list].as_array().unwrap().len(), 2, "{list}");
+        }
+        for c in header["components"].as_array().unwrap() {
+            assert_eq!(c["ports"].as_array().unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn only_runtime_dispatch_records_open_slices() {
+        use systemscope_contracts::component::ComponentId;
+
+        let record = |origin, kind| TraceRecord {
+            at: TraceAt::Init,
+            origin,
+            component: ComponentId(1),
+            kind,
+            fields: vec![
+                ("source", Value::U64(0)),
+                ("msg", Value::Str("ReadReq".to_owned())),
+                ("txn", Value::U64(1)),
+            ],
+        };
+        let slices = |records| {
+            to_perfetto(&two_of_everything(records))
+                .lines()
+                .filter(|l| l.contains("\"cat\":\"mem\""))
+                .count()
+        };
+        assert_eq!(slices(vec![record(TraceOrigin::Runtime, DISPATCH_KIND)]), 1);
+        assert_eq!(slices(vec![record(TraceOrigin::Runtime, "other")]), 0);
+        assert_eq!(
+            slices(vec![record(TraceOrigin::Component, DISPATCH_KIND)]),
+            0
+        );
     }
 }
