@@ -839,7 +839,8 @@ A candidate still fails **the same way** when its primary-stream first divergenc
 ### 17.2 M4: Prefix and Window Minimization
 
 - **Prefix:** the minimal failing prefix is the first divergence itself. Every boundary before it agrees, by definition.
-- **Replay window:** choose, for each side that can restore, its latest checkpoint covering at most the divergence's primary ordinal minus the report window, so the bundle replays the fewest events and still holds the whole window. This uses the checkpoint index only.
+- **Replay window:** choose, for each side that can restore, its latest checkpoint covering at most the divergence's primary ordinal minus the report window, so the bundle replays the fewest events and still holds the whole window. This uses the checkpoint index only. Where both sides restore, the origin is the latest such count both indexes hold, since both sides' checkpoints must cover the same boundaries (§16.2).
+- **Acceptance:** the minimized bundle's verification result, recomputed from its own material, must fail the same way as the whole search (§17.1). An agreement keeps the same verdict.
 - Both are exact and deterministic, and neither changes the scenario.
 
 ### 17.3 Deferred Beyond M4: Scenario Reduction
@@ -1130,7 +1131,7 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 to M4.4 are complete. M4.5 is next. M4 as a whole is in progress.
+**Status:** M4.0 to M4.5 are complete. M4.6 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
@@ -1139,8 +1140,8 @@ Why the targets are safe:
 | **M4.2** | complete | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
 | **M4.3** | complete | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
 | **M4.4** | complete | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
-| **M4.5** | next | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
-| **M4.6** | planned | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
+| **M4.5** | complete | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
+| **M4.6** | next | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
 | **M4.7** | planned | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
 | **M4.8** | planned | Exit audit | docs |
 
@@ -1328,3 +1329,17 @@ M4.4 implemented the reproducer bundle (`verification/src/bundle.rs`): its manif
 On `m3-reference`, the agreement case, SP-1 to SP-3, CB-1, and CB-2 each bundle from the initial states, and each divergence also from both sides' checkpoints at `d − w` and from the actual side's alone. Every bundle replays byte for byte and finds the same-engine report's verdict, window, and state differences. The cross-OS set is the agreement case, SP-1, and CB-1 from the initial states, and CB-1 from checkpoints at 61 of its 64 boundaries, about 380 KB. On the counter, every byte of the manifest flipped, every byte of every other entry flipped with and without its hash updated, each entry truncated or removed, an extra entry, another execution's checkpoint, a truncated snapshot, and another scenario or replay configuration are refused.
 
 **Engine mutants.** cargo-mutants on `bundle.rs`, `report.rs`, and `locate::resume` generates 145 mutants: 113 caught, 22 unviable, and 10 missed. Four of the missed were checks the canonical rendering already makes, such as lowercase hex digits and the `initial` string, or a count the decoder bounds anyway, and those checks are gone. Tests now cover the others: escaped control characters in a manifest string, `ReplayError`'s messages, a manifest naming another backend or capability set, and an `AuxiliaryDivergence` bundle with its auxiliary windows. A rerun on the affected functions generates 50 mutants: 44 caught, 6 unviable, and none missed. A larger local budget gives the same result bytes (§25.3).
+
+### 30.5 M4.5
+
+M4.5 implemented prefix and replay-window minimization (`verification/src/minimize.rs`): `same_failure`, the §17.1 predicate; `accepts`, the check on a candidate's verdict; `window_origins`, the §17.2 choice from the checkpoint indexes; and `minimize`, which searches a case, writes its bundle from those origins, and refuses one that fails differently. `cargo xtask m4-repro` now emits the agreement case and SP-1 to CB-2, each minimized with a checkpoint about every 10,000 events, as the same-engine report takes. It revised the design in these places.
+
+| Section | Revision | Why |
+|---|---|---|
+| §17.2, origins | Where both sides restore, the origin is the latest count at most `d − w` that both indexes hold. Without one, both sides start from their initial states | both checkpoints of a bundle must cover the same boundaries (§16.2), and a density may differ per side |
+| §17.2, acceptance | The candidate is the bundle's own recomputed result. A primary divergence must satisfy §17.1; any other verdict must be equal | prefix and window minimization cannot move the divergence, so §17.1 is checked against the search, not assumed |
+| §28.2, cross-OS | The emitted set is the agreement case and the minimized SP-1 to CB-2: about 440 KB. M4.4's `cb1-checkpoint` is dropped | the minimized SP-3 starts from checkpoints at 133 of its 162 boundaries, so the set still replays from checkpoints |
+
+On `m3-reference`, SP-1 to CB-2 are minimized at the report's density, 133 boundaries, and at 16. Each side's origin is its own index's latest checkpoint covering at most `d − w`: at 133, SP-3's at 133 and the others' initial states; at 16, the last multiple of 16 at most `d − w` wherever one exists, SP-1 starting from its initial state. Every minimized bundle replays byte for byte and finds the same-engine report's verdict, window, and state differences. The agreement case starts from the initial states.
+
+Engine mutants of `minimize.rs` and `report::searched` (the class "minimizer accepts a different divergence signature", §25.2): the first run generated 18, caught 13, found 4 unviable, and missed 1, deleting the predicate's arm so that an exact verdict comparison decided. That comparison is equivalent while the ordinal cannot move, so the check became `accepts`, tested on a candidate whose ordinal moved. The rerun of `minimize.rs` generated 20, caught 18, found 2 unviable, and missed none.
