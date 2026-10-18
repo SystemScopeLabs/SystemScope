@@ -13,6 +13,7 @@ pub mod locate;
 pub mod minimize;
 pub mod observation;
 pub mod profile;
+pub mod recorded;
 pub mod report;
 pub mod result;
 pub mod runtime;
