@@ -1,7 +1,8 @@
 //! M4.1 on `m3-reference` (`docs/m4-design.md` §25.1): the unmodified sides agree, and
 //! the state-patch controlled divergences SP-1 to SP-3 diverge exactly where a selector,
 //! a pure function of the reference `arch` stream, says they must, which the naive oracle
-//! confirms.
+//! confirms. M4.2 (§25.2): every locator strategy, and checkpoint search at every
+//! density, finds the same first divergence and reports the same window.
 
 use systemscope_acceptance::m3::Fixture;
 use systemscope_acceptance::m3::golden::Golden;
@@ -16,6 +17,9 @@ use systemscope_verify::compare::{
     naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
+use systemscope_verify::locate::{
+    Located, Strategy, lockstep, record_index, search, stream_compare,
+};
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
 use systemscope_verify::runtime::RuntimeBackend;
@@ -71,15 +75,120 @@ fn patch(event_index: u64, field: &str, old: u32, new: u32) -> InputVariant {
     })
 }
 
+fn side(b: &mut RuntimeBackend, input: InputVariant) -> Side<'_> {
+    Side {
+        backend: b,
+        input,
+        config: verify::config(),
+    }
+}
+
+/// A verdict without the auxiliary streams and failures, which strategies report only as
+/// evidence.
+fn primary(v: &Verdict) -> Verdict {
+    let mut v = v.clone();
+    if let Verdict::Compared(c) = &mut v {
+        c.auxiliary.clear();
+        c.failures.clear();
+    }
+    v
+}
+
+/// Locates the first divergence against the unmodified side `b`, which recorded
+/// `expected`, by lockstep, stream compare with either side recorded, and checkpoint
+/// search with no checkpoints, about one per 10,000 events, and one per 997 primary
+/// boundaries. Checks that each finds the naive primary result and the same window, and
+/// returns the lockstep result.
+fn locate_everywhere(
+    fixture: &Fixture,
+    b: &RuntimeBackend,
+    expected: &Recorded,
+    input: InputVariant,
+) -> Located {
+    let scenario = verify::scenario(fixture);
+    let plan = the_plan(b);
+    let (_, actual) = record(fixture, input.clone());
+    let complete = Recording {
+        streams: expected.clone(),
+        failure: None,
+    };
+    let naive = compare_recordings(&plan, &complete, &actual).unwrap();
+    let n = expected[0].len() as u64;
+    let per_boundary = b.event_index("arch", n - 1).unwrap() / n;
+    let pair = || (verify::backend(fixture), verify::backend(fixture));
+    let mut results = Vec::new();
+    let (mut x, mut y) = pair();
+    let (e, a) = (
+        side(&mut x, InputVariant::None),
+        side(&mut y, input.clone()),
+    );
+    results.push(lockstep(&plan, &scenario, e, a).unwrap());
+    for role in [Role::Expected, Role::Actual] {
+        let (mut x, mut y) = pair();
+        let (e, a) = (
+            side(&mut x, InputVariant::None),
+            side(&mut y, input.clone()),
+        );
+        results.push(stream_compare(&plan, &scenario, role, e, a).unwrap());
+    }
+    for every in [0, 10_000 / per_boundary, 997] {
+        let (mut x, mut y) = pair();
+        let e = side(&mut x, InputVariant::None);
+        let ie = record_index(&plan, &scenario, e, Role::Expected, every).unwrap();
+        let a = side(&mut y, input.clone());
+        let ia = record_index(&plan, &scenario, a, Role::Actual, every).unwrap();
+        // The unmodified side checkpoints every `every` boundaries. An m3 checkpoint is
+        // about 150 KB, so the index at one per 10,000 events stays near 2.4 MB.
+        let states: Vec<usize> = ie.checkpoints.iter().map(|c| c.state.len()).collect();
+        assert_eq!(states.len() as u64, n.checked_div(every).unwrap_or(0));
+        assert!(states.iter().all(|s| *s < 256 << 10), "{states:?}");
+        assert!(states.iter().sum::<usize>() < 4 << 20, "{states:?}");
+        let (mut x, mut y) = pair();
+        let (e, a) = (
+            side(&mut x, InputVariant::None),
+            side(&mut y, input.clone()),
+        );
+        results.push(search(&plan, &scenario, (e, &ie), (a, &ia)).unwrap());
+    }
+    let window = results[0].window.clone();
+    for (i, l) in results.iter().enumerate() {
+        assert_eq!(primary(&l.verdict), primary(&naive), "strategy {i}");
+        assert_eq!(l.window, window, "strategy {i}");
+    }
+    let strategies: Vec<Strategy> = results.iter().map(|l| l.strategy).collect();
+    assert_eq!(
+        strategies[..3],
+        [
+            Strategy::Lockstep,
+            Strategy::StreamCompare,
+            Strategy::StreamCompare
+        ]
+    );
+    assert!(strategies[3..].iter().all(|s| *s == Strategy::Search));
+    // The window is both sides' own observations around the divergence.
+    if let Some(w) = &window {
+        let (d, _) = results[0].divergence().unwrap();
+        let report = u64::from(plan.profile.report_window);
+        assert_eq!(w.first, d.saturating_sub(report));
+        for (kept, whole) in [(&w.expected, &expected[0]), (&w.actual, &actual.streams[0])] {
+            let end = (d + report + 1).min(whole.len() as u64) as usize;
+            assert_eq!(kept[..], whole[w.first as usize..end]);
+        }
+    }
+    results.swap_remove(0)
+}
+
 /// Runs the patched side and checks that the comparator, and the naive oracle, put the
-/// first divergence at `ordinal`. Returns the divergence and the patched side's failures
-/// after it, if any.
+/// first divergence at `ordinal`, as every locator strategy does against `b`. Returns the
+/// divergence, the patched side's failures after it, if any, and the lockstep result.
 fn diverge(
     fixture: &Fixture,
+    b: &RuntimeBackend,
     expected: &Recorded,
     input: InputVariant,
     ordinal: u64,
-) -> (Divergence, Vec<(Role, EngineError)>) {
+) -> (Divergence, Vec<(Role, EngineError)>, Located) {
+    let located = locate_everywhere(fixture, b, expected, input.clone());
     let (b, actual) = record(fixture, input);
     assert_eq!(
         naive_first_divergence(&expected[0], &actual.streams[0]),
@@ -103,19 +212,21 @@ fn diverge(
         unreachable!()
     };
     assert_eq!((stream.as_str(), at), ("arch", ordinal));
-    (divergence, c.failures)
+    assert_eq!(located.divergence(), Some((ordinal, &divergence)));
+    (divergence, c.failures, located)
 }
 
 /// [`diverge`] on a `retire` whose first differing field is `field`, by a side that still
 /// reaches the stop rule.
 fn expect_field(
     fixture: &Fixture,
+    b: &RuntimeBackend,
     expected: &Recorded,
     input: InputVariant,
     ordinal: u64,
     field: &str,
 ) {
-    let (divergence, failures) = diverge(fixture, expected, input, ordinal);
+    let (divergence, failures, _) = diverge(fixture, b, expected, input, ordinal);
     let Divergence::Fields { kind, fields } = divergence else {
         panic!("{divergence:?}")
     };
@@ -133,6 +244,9 @@ fn unmodified_sides_agree_on_every_stream() {
     };
     assert_eq!(c.outcome(), Outcome::Agree);
     assert!(c.not_compared.is_empty());
+    let located = locate_everywhere(&fixture, &b, &expected, InputVariant::None);
+    assert_eq!(located.verdict, Verdict::Compared(c.clone()));
+    assert_eq!(located.window, None);
     let golden = Golden::parse(GOLDEN_JSON).unwrap();
     let g = golden
         .records
@@ -182,7 +296,7 @@ fn sp1_a_patched_pc_diverges_at_the_next_retirement() {
     let pc = u32_field(&arch[1], "pc");
     let event = b.event_index("arch", 0).unwrap();
     let input = patch(event, "pc", pc, pc ^ 0x4);
-    expect_field(&fixture, &expected, input, 1, "pc");
+    expect_field(&fixture, &b, &expected, input, 1, "pc");
 }
 
 /// Whether `insn` is `ADD`, `SUB`, `XOR`, `ADDI`, or `XORI` with `rd` and `rs1` not `x0`,
@@ -228,7 +342,7 @@ fn sp2_a_patched_register_diverges_at_its_first_reader() {
     let old = registers(arch, r)[rs1 as usize];
     let event = b.event_index("arch", r as u64 - 1).unwrap();
     let input = patch(event, &format!("x{rs1}"), old, old ^ 1);
-    expect_field(&fixture, &expected, input, r as u64, "rd_value");
+    expect_field(&fixture, &b, &expected, input, r as u64, "rd_value");
 }
 
 /// SP-3: `stvec ^= 0x4` before `e`, the first `EnvironmentCallFromU`; `arch[e]` agrees,
@@ -257,7 +371,7 @@ fn sp3_a_patched_stvec_diverges_at_the_handler() {
     assert_eq!(u32_field(&arch[e + 1], "insn"), 0x140F_9FF3);
     let event = b.event_index("arch", e as u64 - 1).unwrap();
     let input = patch(event, "stvec", stvec, stvec ^ 0x4);
-    let (divergence, failures) = diverge(&fixture, &expected, input, e as u64 + 1);
+    let (divergence, failures, located) = diverge(&fixture, &b, &expected, input, e as u64 + 1);
     assert_eq!(
         divergence,
         Divergence::Kind {
@@ -275,6 +389,12 @@ fn sp3_a_patched_stvec_diverges_at_the_handler() {
         failures,
         [(Role::Actual, EngineError::BackendFailed(budget))]
     );
+    // A lockstep scan stops at the divergence, long before the budget.
+    let Verdict::Compared(c) = &located.verdict else {
+        unreachable!()
+    };
+    assert!(c.failures.is_empty(), "{:?}", c.failures);
+    assert!(located.window.unwrap().failures.is_empty());
 }
 
 #[test]
