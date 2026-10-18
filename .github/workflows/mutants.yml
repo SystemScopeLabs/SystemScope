@@ -1,7 +1,7 @@
 name: Mutants
 # Weekly and on demand only: exploratory, never a PR gate. Missed and timed-out mutants
 # are reported in the summary; the run fails only when a tool, a baseline, or a runner
-# fails, or when a shard leaves no mutants.out behind.
+# fails, or when a shard leaves no mutants.out behind for a pass.
 on:
   schedule:
     # Saturday 18:17 UTC (Sunday 03:17 KST); off the hour, where scheduled runs queue.
@@ -120,25 +120,40 @@ jobs:
           # keeps systemd from stopping the whole scope, cargo-mutants included, after that kill.
           # A mutant's tests finish in about 70 s at most, so a 180 s timeout stops a runaway
           # one well before the automatic timeout (about 600 s) would.
-          status=0
-          sudo -E env "PATH=$PATH" "HOME=$HOME" \
-            systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
-              -p MemoryMax=12G -p MemorySwapMax=0 -p OOMPolicy=continue \
-            cargo mutants --workspace --in-place --no-shuffle \
-              --shard "$SHARD" --sharding round-robin --timeout 180 || status=$?
-          kill "$monitor"
-          free -m; df -h /
+          mutants() {
+            sudo -E env "PATH=$PATH" "HOME=$HOME" \
+              systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
+                -p MemoryMax=12G -p MemorySwapMax=0 -p OOMPolicy=continue \
+              cargo mutants --in-place --no-shuffle \
+                --shard "$SHARD" --sharding round-robin --timeout 180 "$@"
+          }
           # 0: all caught; 2: missed mutants; 3: timeouts. Both are findings, shown by
           # the summary job. 1 (usage), 4 (baseline failed), and anything else fail.
-          case "$status" in
-            0|2|3) echo "cargo-mutants exited $status" ;;
-            *) echo "::error::cargo-mutants exited $status"; exit 1 ;;
-          esac
+          failed=0
+          check() {
+            case "$2" in
+              0|2|3) echo "cargo-mutants ($1) exited $2" ;;
+              *) echo "::error::cargo-mutants ($1) exited $2"; failed=1 ;;
+            esac
+          }
+          # The runtime's snapshot, restore, and trace behavior is tested on real toy
+          # components, in the toy crate's tests, so the runtime's mutants run those too.
+          status=0
+          mutants --workspace -e 'runtime/**' -o out/main || status=$?
+          check main "$status"
+          status=0
+          mutants -p systemscope-runtime \
+            --test-package systemscope-runtime --test-package systemscope-toy \
+            -o out/runtime || status=$?
+          check runtime "$status"
+          kill "$monitor"
+          free -m; df -h /
+          exit "$failed"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants.out-${{ matrix.shard }}
-          path: systemscope/mutants.out
+          path: systemscope/out
           if-no-files-found: ignore
 
   summary:
@@ -163,18 +178,20 @@ jobs:
             echo "| Shard | Caught | Missed | Timeout | Unviable |"
             echo "|---|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          count() { if [ -f "$1" ]; then grep -c . "$1" || true; else echo 0; fi; }
+          # Each shard holds a mutants.out per pass: main/ and runtime/.
+          count() { cat "$1"/*/mutants.out/"$2".txt 2>/dev/null | grep -c . || true; }
           for k in $(jq -r '.[]' <<<"$SHARDS"); do
             d="shards/mutants.out-$k"
-            if [ ! -f "$d/outcomes.json" ]; then
-              echo "::error::shard $k left no mutants.out"
+            if [ ! -f "$d/main/mutants.out/outcomes.json" ] \
+              || [ ! -f "$d/runtime/mutants.out/outcomes.json" ]; then
+              echo "::error::shard $k left no mutants.out for a pass"
               echo "| $k | no mutants.out | | | |" >> "$GITHUB_STEP_SUMMARY"
               failed=1
               continue
             fi
-            echo "| $k | $(count "$d/caught.txt") | $(count "$d/missed.txt") | $(count "$d/timeout.txt") | $(count "$d/unviable.txt") |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| $k | $(count "$d" caught) | $(count "$d" missed) | $(count "$d" timeout) | $(count "$d" unviable) |" >> "$GITHUB_STEP_SUMMARY"
           done
-          total() { cat shards/*/"$1".txt 2>/dev/null | grep -c . || true; }
+          total() { cat shards/*/*/mutants.out/"$1".txt 2>/dev/null | grep -c . || true; }
           {
             echo "| **all** | $(total caught) | $(total missed) | $(total timeout) | $(total unviable) |"
             echo
@@ -182,7 +199,7 @@ jobs:
               echo "<details><summary>$kind</summary>"
               echo
               echo '```'
-              cat shards/*/"$kind".txt 2>/dev/null | sort
+              cat shards/*/*/mutants.out/"$kind".txt 2>/dev/null | sort
               echo '```'
               echo "</details>"
               echo

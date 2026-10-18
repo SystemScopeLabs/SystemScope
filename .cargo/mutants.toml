@@ -31,4 +31,13 @@ exclude_re = [
     # (elf/tests/user.rs pins it), so the guard against staging no more always holds.
     'replace match guard needed > len with true in Model::staged$',
     'replace > with >= in Model::staged$',
+    # The heap orders entries with cmp only; eq exists because Ord requires it.
+    '<impl PartialEq for Entry<T>>::eq',
+    # Capturing with nobody listening produces records that flush_records then drops.
+    'replace Runtime::capturing -> bool with true$',
+    # dispatched_event rebuilds the record it parsed and compares the whole record, so
+    # these early outs on origin, kind, field names, and the wake shape only save work.
+    'replace \|\| with && in dispatched_event$',
+    'replace match guard \*n == name with true in dispatched_event$',
+    'replace && with \|\| in dispatched_event$',
 ]
