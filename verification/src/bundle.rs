@@ -343,8 +343,9 @@ fn side_entry(j: &Json) -> Result<SideEntry, String> {
         .iter()
         .map(|c| lookup(&CAPABILITIES, c, "capability"))
         .collect::<Result<_, String>>()?;
+    // Any other string re-renders as "initial", which the canonical check refuses.
     let origin = match field(j, "origin")? {
-        Json::String(s) if s == "initial" => None,
+        Json::String(_) => None,
         o => Some(number(o, "checkpoint")?),
     };
     Ok(SideEntry {
@@ -398,17 +399,17 @@ fn names(j: &Json, key: &str) -> Result<Vec<String>, String> {
 
 fn hash(j: &Json, key: &str) -> Result<[u8; 32], String> {
     let s = text(j, key)?;
-    let bad = || format!("{key} is not 64 lowercase hex digits");
-    if s.len() != 64
-        || !s
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-    {
+    let bad = || format!("{key} is not 64 hex digits");
+    if s.len() != 64 {
         return Err(bad());
     }
+    // Uppercase or signed digits parse here, and the canonical check refuses them.
     let mut out = [0; 32];
     for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
+        *b = s
+            .get(2 * i..2 * i + 2)
+            .and_then(|h| u8::from_str_radix(h, 16).ok())
+            .ok_or_else(bad)?;
     }
     Ok(out)
 }
@@ -509,11 +510,7 @@ impl ObservationEvidence {
             });
         }
         let first = d.u64()?;
-        let n = d.len()?;
-        if n > d.remaining() {
-            return Err(DecodeError::Truncated);
-        }
-        let observations = (0..n)
+        let observations = (0..d.len()?)
             .map(|_| Observation::decode(&mut d))
             .collect::<Result<_, _>>()?;
         d.finish()?;

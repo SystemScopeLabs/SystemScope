@@ -110,6 +110,8 @@ pub fn runtime(halts: bool, bad_at: Option<u64>) -> Runtime {
 #[derive(Default)]
 pub struct CounterProjection {
     finished: bool,
+    /// Added to every `uart_tx` byte.
+    pub shift: u64,
 }
 
 impl Projection for CounterProjection {
@@ -164,7 +166,7 @@ impl Projection for CounterProjection {
                 ));
             }
             "t.noise" => out.push(p("arch", "interrupt", vec![("cause", u(n))])),
-            "t.out" => out.push(p("effect", "uart_tx", vec![("byte", u(n))])),
+            "t.out" => out.push(p("effect", "uart_tx", vec![("byte", u(n + self.shift))])),
             "t.halt" => self.finished = true,
             other => return Err(format!("unreadable record {other}")),
         }
@@ -271,6 +273,20 @@ pub fn counter_patch(bytes: &mut [u8], p: &StatePatch) -> Result<(), String> {
     }
     bytes[at..at + 8].copy_from_slice(&new.to_le_bytes());
     Ok(())
+}
+
+/// [`backend`] with every `uart_tx` byte one more: only the auxiliary stream differs.
+pub fn shifted_backend() -> RuntimeBackend {
+    RuntimeBackend::new(
+        id(),
+        Box::new(|_, _| Ok(runtime(true, None))),
+        Box::new(|| {
+            Box::new(CounterProjection {
+                shift: 1,
+                ..CounterProjection::default()
+            })
+        }),
+    )
 }
 
 pub fn backend() -> RuntimeBackend {

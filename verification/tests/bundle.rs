@@ -4,7 +4,9 @@
 mod common;
 
 use common::*;
+use std::cell::Cell;
 use systemscope_verify::backend::Backend;
+
 use systemscope_verify::bundle::{
     Bundle, Case, MANIFEST, Manifest, RESULT, ReplayError, read_dir, replay, validate, write,
     write_dir,
@@ -368,4 +370,106 @@ fn checkpoints_must_belong_to_their_side_and_restore() {
     };
     assert!(case(&other, config()).is_err());
     assert!(case(&scenario, BackendRunConfig { budget: 7 }).is_err());
+}
+
+#[test]
+fn an_auxiliary_divergence_bundle_holds_its_windows() {
+    // Every call of `make` alternates the sides, and the actual side's bytes are shifted.
+    let calls = Cell::new(0);
+    let make = || {
+        calls.set(calls.get() + 1);
+        if calls.get() % 2 == 1 {
+            backend()
+        } else {
+            shifted_backend()
+        }
+    };
+    let same = [InputVariant::None, InputVariant::None];
+    let b = write(
+        &the_plan(),
+        &scenario(),
+        &make,
+        same,
+        config(),
+        [None, None],
+    )
+    .unwrap();
+    let r = VerificationResult::from_bytes(&b.entries[RESULT]).unwrap();
+    assert_eq!(
+        r.outcome(),
+        ResultOutcome::Compared(Outcome::AuxiliaryDivergence)
+    );
+    assert_eq!(r.trace.auxiliary.len(), 1, "{r:?}");
+    let paths: Vec<&str> = b.entries.keys().map(String::as_str).collect();
+    assert_eq!(paths, [MANIFEST, RESULT]);
+    let plan = the_plan();
+    let scenario = scenario();
+    let case = Case {
+        plan: &plan,
+        scenario: &scenario,
+        config: config(),
+        make: &make,
+    };
+    assert_eq!(replay(&b, case).unwrap(), r);
+}
+
+#[test]
+fn strings_are_escaped_and_read_back() {
+    let b = bundle(&[InputVariant::None, InputVariant::None], [None, None]);
+    let mut m = Manifest::parse(&b.entries[MANIFEST]).unwrap();
+    m.scenario.locator = "a\"b\\c\nd\u{1}e\u{1f}f g/é".to_owned();
+    let text = m.render();
+    assert!(
+        text.contains(r#""locator": "a\"b\\c\nd\u0001e\u001ff g/é","#),
+        "{text}"
+    );
+    assert_eq!(Manifest::parse(text.as_bytes()), Ok(m));
+}
+
+#[test]
+fn replay_errors_say_what_failed() {
+    let corrupt = ReplayError::Corrupt(EngineError::CorruptReproducer("no result.bin".to_owned()));
+    assert_eq!(corrupt.to_string(), "corrupt reproducer: no result.bin");
+    assert_eq!(
+        ReplayError::Differs("result.bin".to_owned()).to_string(),
+        "the replay recomputed a different result.bin"
+    );
+}
+
+#[test]
+fn the_backends_and_capabilities_must_be_the_recorded_ones() {
+    let b = a_bundle();
+    let text = String::from_utf8(b.entries[MANIFEST].clone()).unwrap();
+    for (from, to) in [
+        (", \"state\"]", "]"),
+        ("\"name\": \"systemscope\"", "\"name\": \"spike\""),
+    ] {
+        let mut c = b.clone();
+        let changed = text.replacen(from, to, 1);
+        assert_ne!(changed, text);
+        c.entries.insert(MANIFEST.to_owned(), changed.into_bytes());
+        assert!(corrupt(&c), "{from} to {to}");
+    }
+}
+
+#[test]
+fn a_larger_local_budget_changes_nothing() {
+    let inputs = diverging();
+    let ks = checkpoints(&inputs);
+    let origins = [Some(covering(&ks[0], 5)), Some(covering(&ks[1], 5))];
+    let result = |budget| {
+        let config = BackendRunConfig { budget };
+        from_origins(
+            &the_plan(),
+            &scenario(),
+            &backend,
+            inputs.clone(),
+            config,
+            origins,
+        )
+    };
+    assert_eq!(
+        result(1_000_000).to_bytes(),
+        result(config().budget).to_bytes()
+    );
 }
