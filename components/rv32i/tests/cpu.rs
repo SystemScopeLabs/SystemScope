@@ -912,3 +912,11 @@ fn restoring_a_pending_store_never_reissues_it() {
         assert_eq!(resumed, expected);
     }
 }
+
+#[test]
+fn a_config_error_gives_the_entry_point() {
+    assert_eq!(
+        systemscope_rv32i::CpuConfigError::MisalignedEntry(0x8000_0002).to_string(),
+        "entry point 0x80000002 is not 4-byte aligned"
+    );
+}

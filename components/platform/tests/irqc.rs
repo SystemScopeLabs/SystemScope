@@ -1409,3 +1409,14 @@ fn same_phase_levels_in_either_order_give_the_same_result() {
     assert_eq!(field(&a.2, "pending"), Value::U64(0b11));
     assert_eq!(field(&a.2, "out"), Value::Bool(true));
 }
+
+#[test]
+fn a_config_error_gives_the_source_count() {
+    assert_eq!(
+        systemscope_platform::IrqControllerConfigError::TooManySources(40).to_string(),
+        format!(
+            "IRQ controller has 40 sources, more than {}",
+            systemscope_platform::irqc::MAX_SOURCES
+        )
+    );
+}

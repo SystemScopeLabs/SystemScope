@@ -2100,3 +2100,11 @@ fn queued_requests_are_not_duplicated_or_lost_across_a_restore() {
     unique.dedup();
     assert_eq!(unique.len(), 6);
 }
+
+#[test]
+fn a_config_error_names_its_ports() {
+    assert_eq!(
+        systemscope_platform::MultiMasterBusConfigError::DuplicateName("cpu").to_string(),
+        "two ports are named cpu"
+    );
+}

@@ -738,3 +738,11 @@ proptest! {
         prop_assert_eq!(imm_u(word), ou(word));
     }
 }
+
+#[test]
+fn an_illegal_instruction_gives_its_word() {
+    assert_eq!(
+        systemscope_rv32i::Illegal { word: 0xFFFF_FFFF }.to_string(),
+        "illegal instruction 0xffffffff"
+    );
+}

@@ -596,3 +596,11 @@ proptest! {
         prop_assert_eq!(load(&mut fresh, 0, SIZE as u32), model);
     }
 }
+
+#[test]
+fn a_config_error_names_its_segments() {
+    assert_eq!(
+        RamConfigError::SegmentsOverlap(0, 2).to_string(),
+        "image segments 0 and 2 overlap"
+    );
+}

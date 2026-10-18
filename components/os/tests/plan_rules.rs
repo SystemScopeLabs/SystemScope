@@ -257,3 +257,15 @@ fn the_block_controller_window_may_end_at_its_last_register() {
     };
     assert_eq!(disk().validate(&c), Ok(()));
 }
+
+#[test]
+fn the_errors_name_the_broken_rule() {
+    assert_eq!(
+        systemscope_os::KernelConfigError::Overlap("staging", "the frame pool").to_string(),
+        "staging and the frame pool overlap"
+    );
+    assert_eq!(
+        PlanError::Layout("the frame pool is not page-aligned").to_string(),
+        "layout: the frame pool is not page-aligned"
+    );
+}

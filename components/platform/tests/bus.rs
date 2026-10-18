@@ -695,3 +695,11 @@ proptest! {
         prop_assert!(ctx.sent.is_empty());
     }
 }
+
+#[test]
+fn a_config_error_names_its_regions() {
+    assert_eq!(
+        BusConfigError::Overlap("ram", "uart").to_string(),
+        "regions ram and uart overlap"
+    );
+}

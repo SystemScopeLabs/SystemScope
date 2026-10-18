@@ -650,3 +650,11 @@ fn the_ram_region_may_reach_the_top_of_the_address_space_but_not_past_it() {
         ElfError::InvalidRamRegion
     );
 }
+
+#[test]
+fn a_segment_error_reads_as_the_broken_rule() {
+    assert_eq!(
+        SegmentError::FileSizeExceedsMemSize.to_string(),
+        "p_filesz is larger than p_memsz"
+    );
+}
