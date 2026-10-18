@@ -541,6 +541,7 @@ name = "systemscope-verify"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "proptest",
  "systemscope-contracts",
  "systemscope-runtime",
 ]

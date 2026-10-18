@@ -10,5 +10,8 @@ blake3 = "1"
 systemscope-contracts.workspace = true
 systemscope-runtime.workspace = true
 
+[dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true
