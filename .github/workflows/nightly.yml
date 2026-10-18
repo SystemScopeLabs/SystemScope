@@ -56,12 +56,12 @@ jobs:
       M0_SEED: ${{ needs.seed.outputs.seed }}
       M1_PROGEN_SEED: ${{ needs.seed.outputs.seed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: systemscope
       # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
       # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: SystemScopeLabs/contracts
           ref: 90900a128d51f6b42e86dc789447882c90c52ef4
@@ -97,10 +97,10 @@ jobs:
     env:
       M1_PROGEN_SEED: ${{ needs.seed.outputs.seed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: systemscope
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: SystemScopeLabs/contracts
           ref: 90900a128d51f6b42e86dc789447882c90c52ef4
@@ -115,7 +115,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends device-tree-compiler=1.7.0-2build1
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: spike-cache
         with:
           path: ~/spike
@@ -131,7 +131,7 @@ jobs:
         run: echo "::error::nightly Spike differential failed for M1_PROGEN_SEED=$M1_PROGEN_SEED"
       - name: Keep Spike's logs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: spike-logs
           path: systemscope/target/spike-logs
@@ -142,10 +142,10 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: systemscope
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: SystemScopeLabs/contracts
           ref: 90900a128d51f6b42e86dc789447882c90c52ef4
@@ -166,7 +166,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lcov
           path: systemscope/lcov.info

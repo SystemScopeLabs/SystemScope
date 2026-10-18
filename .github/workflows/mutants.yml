@@ -35,7 +35,7 @@ jobs:
       shard_count: ${{ steps.decide.outputs.shard_count }}
       shards: ${{ steps.decide.outputs.shards }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: systemscope, fetch-depth: 0 }
       - id: decide
         working-directory: systemscope
@@ -90,9 +90,9 @@ jobs:
       run:
         working-directory: systemscope
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: { path: systemscope }
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: SystemScopeLabs/contracts
           ref: 90900a128d51f6b42e86dc789447882c90c52ef4
@@ -134,7 +134,7 @@ jobs:
             0|2|3) echo "cargo-mutants exited $status" ;;
             *) echo "::error::cargo-mutants exited $status"; exit 1 ;;
           esac
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants.out-${{ matrix.shard }}
@@ -146,7 +146,7 @@ jobs:
     if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: mutants.out-*
           path: shards
