@@ -150,7 +150,12 @@ fn component_fault(result: Result<impl Sized, SimError>) -> &'static str {
 
 #[test]
 fn ports_are_cpu_then_one_initiator_per_region_in_order() {
-    let ports = platform().ports();
+    let b = platform();
+    assert_eq!(
+        (b.type_name(), b.snapshot_schema_version()),
+        ("platform.bus", 1)
+    );
+    let ports = b.ports();
     let names: Vec<_> = ports.iter().map(|p| p.name).collect();
     assert_eq!(names, ["cpu", "ram", "uart", "next", "top"]);
     assert_eq!(ports[0].role, Role::Target);
@@ -432,6 +437,9 @@ fn messages_in_the_wrong_direction_fault_the_session() {
     assert_eq!(what, "address bus: response on the cpu port");
     let what = component_fault(respond(&mut b, region_port(0), read(1, 0, 1)));
     assert_eq!(what, "address bus: request on a region port");
+    // One past the last of the four region ports.
+    let what = component_fault(respond(&mut b, region_port(4), data(1, &[0])));
+    assert_eq!(what, "address bus: unknown port");
 }
 
 #[test]

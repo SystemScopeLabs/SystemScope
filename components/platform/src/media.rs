@@ -377,7 +377,7 @@ impl Component for SimpleBlockMedia {
         // different configuration too.
         let count = r.len()?;
         let mut bad_blocks = Vec::new();
-        for _ in 0..count.min(self.config.bad_blocks.len() + 1) {
+        for _ in 0..count.min(self.config.bad_blocks.len()) {
             bad_blocks.push(r.u64()?);
         }
         if count != self.config.bad_blocks.len()

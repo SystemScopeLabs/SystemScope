@@ -379,6 +379,20 @@ fn one_master_one_request_is_granted_as_an_offset_with_a_fresh_txn() {
 }
 
 #[test]
+fn a_region_s_first_byte_routes_to_it_after_an_adjacent_region() {
+    let mut bus = MultiMasterBus::new(MultiMasterBusConfig {
+        masters: vec!["cpu"],
+        regions: vec![region("a", 0x1000, 0x100), region("b", 0x1100, 0x100)],
+        clock: CLOCK,
+    })
+    .unwrap();
+    enqueue(&mut bus, CPU, read(3, 0x1100, 4));
+    assert_eq!((bus.queued(0, CPU), bus.queued(1, CPU)), (0, 1));
+    let ctx = arbitrate(&mut bus);
+    assert_eq!(ctx.sent[0].msg, read(0, 0, 4));
+}
+
+#[test]
 fn writes_are_forwarded_with_their_data_and_relayed() {
     let mut bus = bus();
     enqueue(&mut bus, DMA, write(3, UART_BASE + 4, &[1, 2]));
@@ -823,7 +837,9 @@ fn messages_in_the_wrong_direction_or_protocol_fault_the_session() {
     let port = bus.region_port(RAM);
     component_fault(ctx.deliver(&mut bus, port, read(0, 0, 4)));
     let mut ctx = MockCtx::new(Phase::Request);
-    component_fault(ctx.deliver(&mut bus, PortId(4), read(0, 0, 4)));
+    // One past the last region port: two masters, then two regions.
+    let why = component_fault(ctx.deliver(&mut bus, PortId(4), read(0, 0, 4)));
+    assert_eq!(why, "multi-master bus: unknown port");
     component_fault(ctx.deliver_msg(
         &mut bus,
         PortId(0),

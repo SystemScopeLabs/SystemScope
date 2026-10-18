@@ -240,6 +240,7 @@ fn latency_is_the_configured_one() {
 fn the_window_is_eight_bytes() {
     assert_eq!((TX, STATUS, SIZE), (0x0, 0x4, 8));
     assert_eq!(uart().type_name(), "platform.uart");
+    assert_eq!(uart().snapshot_schema_version(), 1);
     let ports = uart().ports();
     assert_eq!(ports.len(), 1);
     assert_eq!(ports[0].name, "mem");

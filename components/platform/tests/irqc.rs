@@ -195,6 +195,10 @@ fn only_1_to_32_sources_are_accepted() {
 fn ports_are_the_sources_then_cpu_then_mem() {
     for n in [1u8, 2, 31, 32] {
         let c = ctrl(n);
+        assert_eq!(
+            (c.type_name(), c.snapshot_schema_version()),
+            ("platform.irqc", 1)
+        );
         let ports = c.ports();
         assert_eq!(ports.len(), usize::from(n) + 2);
         for i in 0..n {
@@ -508,7 +512,14 @@ fn protocol_violations_fault_the_session() {
         c
     };
     let irq = |asserted| Message::from(IrqMsg::Level { asserted });
-    let mut cases: Vec<(Phase, PortId, Message)> = Vec::new();
+    const OUTSIDE: &str = "irq controller: irq.v0 level arrived outside COMPLETE";
+    const ON_SOURCE: &str = "irq controller: message on a source is not irq.v0";
+    const ON_CPU: &str = "irq controller: message on the cpu port";
+    const ON_MEM: &str = "irq controller: message on mem is not mem.v1";
+    const UNKNOWN: &str = "irq controller: message on an unknown port";
+    const RESPONSE: &str = "irq controller: response on the target port";
+    const ZERO: &str = "irq controller: zero-length request";
+    let mut cases: Vec<(Phase, PortId, Message, &str)> = Vec::new();
     // A level outside COMPLETE, on any source, either value.
     for phase in [
         Phase::Request,
@@ -517,11 +528,16 @@ fn protocol_violations_fault_the_session() {
         Phase::Observe,
     ] {
         for (i, asserted) in [(0, false), (1, true)] {
-            cases.push((phase, PortId(i), irq(asserted)));
+            cases.push((phase, PortId(i), irq(asserted), OUTSIDE));
         }
     }
     // mem.v1 or mem.v0 on a source; irq.v0 on mem; anything on cpu; an unknown port.
-    cases.push((Phase::Complete, PortId(1), read(1, PENDING, 4).into()));
+    cases.push((
+        Phase::Complete,
+        PortId(1),
+        read(1, PENDING, 4).into(),
+        ON_SOURCE,
+    ));
     cases.push((
         Phase::Complete,
         PortId(0),
@@ -531,14 +547,25 @@ fn protocol_violations_fault_the_session() {
             len: 4,
         }
         .into(),
+        ON_SOURCE,
     ));
-    cases.push((Phase::Complete, PortId(3), irq(true)));
-    cases.push((Phase::Complete, PortId(2), irq(false)));
-    cases.push((Phase::Transfer, PortId(2), read(1, PENDING, 4).into()));
-    cases.push((Phase::Complete, PortId(4), irq(true)));
-    cases.push((Phase::Transfer, PortId(4), read(1, PENDING, 4).into()));
+    cases.push((Phase::Complete, PortId(3), irq(true), ON_MEM));
+    cases.push((Phase::Complete, PortId(2), irq(false), ON_CPU));
+    cases.push((
+        Phase::Transfer,
+        PortId(2),
+        read(1, PENDING, 4).into(),
+        ON_CPU,
+    ));
+    cases.push((Phase::Complete, PortId(4), irq(true), UNKNOWN));
+    cases.push((
+        Phase::Transfer,
+        PortId(4),
+        read(1, PENDING, 4).into(),
+        UNKNOWN,
+    ));
     // Responses on mem, and zero-length requests.
-    cases.push((Phase::Complete, PortId(3), done(1).into()));
+    cases.push((Phase::Complete, PortId(3), done(1).into(), RESPONSE));
     cases.push((
         Phase::Complete,
         PortId(3),
@@ -547,17 +574,24 @@ fn protocol_violations_fault_the_session() {
             outcome: ReadOutcome::Data { data: vec![0; 4] },
         }
         .into(),
+        RESPONSE,
     ));
-    cases.push((Phase::Transfer, PortId(3), read(1, PENDING, 0).into()));
-    cases.push((Phase::Transfer, PortId(3), write(1, ENABLE, &[]).into()));
-    for (phase, port, msg) in cases {
+    cases.push((Phase::Transfer, PortId(3), read(1, PENDING, 0).into(), ZERO));
+    cases.push((
+        Phase::Transfer,
+        PortId(3),
+        write(1, ENABLE, &[]).into(),
+        ZERO,
+    ));
+    for (phase, port, msg, why) in cases {
         let mut c = fresh();
         let before = snapshot_of(&c);
         let mut ctx = MockCtx::new(phase);
         let result = ctx.deliver_msg(&mut c, port, msg.clone());
-        assert!(
-            matches!(result, Err(SimError::ComponentFault(_))),
-            "{phase:?} {port:?} {msg:?}: {result:?}"
+        assert_eq!(
+            result,
+            Err(SimError::ComponentFault(why)),
+            "{phase:?} {port:?} {msg:?}"
         );
         assert!(ctx.sent.is_empty() && ctx.irqs.is_empty() && ctx.traced.is_empty());
         assert_eq!(snapshot_of(&c), before);

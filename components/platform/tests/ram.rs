@@ -131,6 +131,15 @@ fn canonical(size: u64, hash: [u8; 32], contents: &[u8]) -> Vec<u8> {
 // Construction.
 
 #[test]
+fn the_type_and_schema_are_the_frozen_ones() {
+    let r = ram(P);
+    assert_eq!(
+        (r.type_name(), r.snapshot_schema_version()),
+        ("platform.ram", 1)
+    );
+}
+
+#[test]
 fn sizes_must_be_in_range() {
     let err = |size| Ram::new(config(size), &image(&[])).err();
     assert_eq!(err(0), Some(RamConfigError::ZeroSize));

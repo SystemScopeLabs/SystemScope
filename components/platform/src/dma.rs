@@ -143,7 +143,7 @@ pub const OP_READ: u32 = 1;
 pub const OP_WRITE: u32 = 2;
 
 /// `STATUS` bit 0.
-pub const STATUS_BUSY: u32 = 1 << 0;
+pub const STATUS_BUSY: u32 = 1;
 /// `STATUS` bit 1.
 pub const STATUS_DONE: u32 = 1 << 1;
 /// `STATUS` bit 2, write 1 to clear.
@@ -740,7 +740,7 @@ impl DmaBlockController {
     /// Accepts a request on `mem`: reads or writes a register now, and sends the response
     /// after the configured latency, in `Complete`.
     fn request(&mut self, msg: &MemMsg, ctx: &mut dyn SimContext) -> Result<(), SimError> {
-        // The offset of an aligned 4-byte access inside the window, if it is one.
+        // The offset of an aligned 4-byte access, if it is one.
         let word = match msg.access() {
             None => {
                 return Err(SimError::ComponentFault(
@@ -753,8 +753,9 @@ impl DmaBlockController {
                 ));
             }
             Some(Access::OutOfRange) => None,
+            // An offset past the window names no register, so it faults below.
             Some(Access::Bytes { first, last }) => {
-                (last - first == 3 && first % 4 == 0 && first < SIZE).then_some(first)
+                (last - first == 3 && first % 4 == 0).then_some(first)
             }
         };
         let fault = MemFault::AccessFault;
