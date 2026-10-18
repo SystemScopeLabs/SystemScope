@@ -6,6 +6,8 @@
 //! case's same-engine report carries its state, trace, and slice evidence, and the
 //! code-byte patches CB-1 and CB-2 diverge as §25.1 derives. M4.4 (§16): every case's
 //! reproducer bundle, from the initial states and from checkpoints, replays byte for byte.
+//! M4.5 (§17.2): each minimized bundle starts from each side's latest checkpoint covering
+//! at most the divergence minus the report window, and replays the same failure.
 
 use systemscope_acceptance::m3::Fixture;
 use systemscope_acceptance::m3::golden::Golden;
@@ -28,6 +30,7 @@ use systemscope_verify::latent::{SameSide, StateDivergence, first_state_divergen
 use systemscope_verify::locate::{
     Index, Located, Strategy, lockstep, record_index, search, stream_compare,
 };
+use systemscope_verify::minimize::minimize;
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
 use systemscope_verify::report::same_engine;
@@ -393,6 +396,9 @@ fn diverge(
         (Some(&trace), &slices)
     );
     reproduce(fixture, b, input.clone(), &r, Some(ordinal));
+    for every in [every, 16] {
+        minimized(fixture, b, input.clone(), &r, Some(ordinal), every);
+    }
     let text = r.to_string();
     assert!(text.starts_with("outcome: diverged\nprimary: arch: diverged at "));
     assert!(text.contains("\npredecessor slice (actual), window from record "));
@@ -495,6 +501,75 @@ fn reproduce(
     }
 }
 
+/// Minimizes the case of the unmodified side against `input` with a checkpoint every
+/// `every` primary boundaries: each side's origin is its own index's latest checkpoint
+/// covering at most the divergence at `diverged` minus the report window, or its initial
+/// state, and the bundle replays byte for byte and finds what `r` finds.
+fn minimized(
+    fixture: &Fixture,
+    b: &RuntimeBackend,
+    input: InputVariant,
+    r: &VerificationResult,
+    diverged: Option<u64>,
+    every: u64,
+) {
+    let plan = the_plan(b);
+    let scenario = verify::scenario(fixture);
+    let make = || verify::backend(fixture);
+    let inputs = [InputVariant::None, input];
+    let m = minimize(
+        &plan,
+        &scenario,
+        &make,
+        inputs.clone(),
+        verify::config(),
+        every,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let w = u64::from(plan.profile.report_window);
+    let want = [Role::Expected, Role::Actual].map(|role| {
+        let d = diverged?;
+        let mut b = make();
+        let i = record_index(
+            &plan,
+            &scenario,
+            side(&mut b, inputs[role as usize].clone()),
+            role,
+            every,
+        )
+        .unwrap();
+        i.checkpoints
+            .iter()
+            .map(|c| c.mark("arch").unwrap().covered)
+            .filter(|&c| c <= d.saturating_sub(w))
+            .max()
+    });
+    assert_eq!(m.origins, want, "every {every}");
+    // Every m3 checkpoint is taken, so the latest is the last multiple of `every`.
+    if let Some(d) = diverged.filter(|&d| d >= w + every) {
+        let c = (d - w) / every * every;
+        assert_eq!(want, [Some(c), Some(c)]);
+    }
+    let manifest = Manifest::parse(&m.bundle.entries[MANIFEST]).unwrap();
+    assert_eq!(manifest.sides.map(|s| s.origin), want);
+    let case = Case {
+        plan: &plan,
+        scenario: &scenario,
+        config: verify::config(),
+        make: &make,
+    };
+    let replayed = replay(&m.bundle, case).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(replayed, m.result);
+    assert_eq!(
+        (&m.result.verdict, &m.result.window),
+        (&r.verdict, &r.window)
+    );
+    assert_eq!(
+        m.result.state.as_ref().map(|s| (s.read_at, &s.differences)),
+        r.state.as_ref().map(|s| (s.read_at, &s.differences))
+    );
+}
+
 fn same<'a>(
     backend: &'a mut RuntimeBackend,
     input: InputVariant,
@@ -548,6 +623,7 @@ fn unmodified_sides_agree_on_every_stream() {
         slices: Vec::new(),
     };
     reproduce(&fixture, &b, InputVariant::None, &agree, None);
+    minimized(&fixture, &b, InputVariant::None, &agree, None, 997);
     let golden = Golden::parse(GOLDEN_JSON).unwrap();
     let g = golden
         .records
