@@ -2,7 +2,9 @@
 //! the state-patch controlled divergences SP-1 to SP-3 diverge exactly where a selector,
 //! a pure function of the reference `arch` stream, says they must, which the naive oracle
 //! confirms. M4.2 (§25.2): every locator strategy, and checkpoint search at every
-//! density, finds the same first divergence and reports the same window.
+//! density, finds the same first divergence and reports the same window. M4.3: each
+//! case's same-engine report carries its state, trace, and slice evidence, and the
+//! code-byte patches CB-1 and CB-2 diverge as §25.1 derives.
 
 use systemscope_acceptance::m3::Fixture;
 use systemscope_acceptance::m3::golden::Golden;
@@ -23,6 +25,8 @@ use systemscope_verify::locate::{
 };
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
+use systemscope_verify::report::same_engine;
+use systemscope_verify::result::{ResultOutcome, VerificationResult};
 use systemscope_verify::runtime::RuntimeBackend;
 use systemscope_verify::slice::Link;
 use systemscope_verify::state::{Change, diff_state};
@@ -189,9 +193,10 @@ fn locate_everywhere(
 /// first divergence at `ordinal`, as every locator strategy does against `b`, and that
 /// a state patch's sides first differ in state in the CPU at the patch (§12.4) and in
 /// their canonical traces after it (§14.1); a media patch's, in RAM and the trace before
-/// the CPU. Returns
-/// the divergence, the patched side's failures after it, if any, the lockstep result,
-/// and the first state divergence up to the divergent observation.
+/// the CPU. Each side's predecessor slice (§15) holds only links the case can record,
+/// and the same-engine report carries all of it, byte-identical across runs. Returns the
+/// divergence, the patched side's failures after it, if any, the lockstep result, and
+/// the first state divergence up to the divergent observation.
 fn diverge(
     fixture: &Fixture,
     b: &RuntimeBackend,
@@ -353,6 +358,38 @@ fn diverge(
             assert_eq!(sl.unresolved, []);
         }
     }
+    // The whole same-engine report at the same density carries exactly this evidence,
+    // and gives the same bytes every time (§6.7, §16).
+    let n = expected[0].len() as u64;
+    let every = 10_000 / (b.event_index("arch", n - 1).unwrap() / n);
+    let report = || {
+        same_engine(
+            &the_plan(b),
+            &verify::scenario(fixture),
+            &|| verify::backend(fixture),
+            [InputVariant::None, input.clone()],
+            verify::config(),
+            every,
+        )
+    };
+    let r = report();
+    let bytes = r.to_bytes();
+    assert_eq!(report().to_bytes(), bytes);
+    assert_eq!(VerificationResult::from_bytes(&bytes).as_ref(), Ok(&r));
+    assert_eq!(r.outcome(), ResultOutcome::Compared(Outcome::Diverged));
+    assert_eq!(
+        primary(r.verdict.as_ref().unwrap()),
+        primary(&located.verdict)
+    );
+    assert_eq!(r.window, located.window);
+    assert_eq!(r.state.as_ref().unwrap().first.as_ref(), Some(&state));
+    assert_eq!(
+        (r.trace.canonical.as_ref(), &r.slices),
+        (Some(&trace), &slices)
+    );
+    let text = r.to_string();
+    assert!(text.starts_with("outcome: diverged\nprimary: arch: diverged at "));
+    assert!(text.contains("\npredecessor slice (actual), window from record "));
     let b = a;
     assert_eq!(
         naive_first_divergence(&expected[0], &actual.streams[0]),
