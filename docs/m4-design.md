@@ -715,17 +715,17 @@ M4 reports **recorded relevant predecessors** of the differing state. It does no
 | Link | Evidence today | Status |
 |---|---|---|
 | request → response on one link | `runtime.dispatch`: `source`, target, `port`, `protocol`, `msg`, `txn` | available |
-| master request → bus downstream request → response back | MultiMasterBus renames transaction ids (m2-design §10.2); the mapping is in bus state (snapshot), not a trace record | available by decoding bus state at checkpoints; no trace record in M4 |
+| master request → bus downstream request → response back | MultiMasterBus renames transaction ids (m2-design §10.2); its `platform.bus.grant` record carries `region`, `master`, `txn`, and `downstream_txn` (M4.3 revision, §30.3) | available from the trace |
 | instruction → its memory access | `rv32.commit` `addr`, `paddr`; the preceding `mem.v1` requests from the CPU port | available by ordering (the CPU has one outstanding access) |
-| page walk → PTE reads | CPU walk states in `inspect` (`walk_purpose`, `walk_level`, `walk_table`) and `ReadReq`s from the CPU port between commits | available by ordering; no explicit walk-id record |
+| page walk → PTE reads | CPU walk states in `inspect` (`walk_purpose`, `walk_level`, `walk_table`) and `ReadReq`s from the CPU port between commits | available by ordering, as part of the instruction's accesses; no explicit walk-id record |
 | trap → syscall | `rv32.exception` (ecall from U) → `os.gate.enter` → `os.syscall.enter` | available (m3-design §6.8 records) |
 | DMA command → beats → completion | `platform.blk.command`, `platform.disk.*`, `mem.v1` writes from the DMA port, `platform.blk.done`, `platform.irq.*` | available |
 | kgate `ENTER` → kernel access chain | `os.gate.enter`, kernel-port `mem.v1` records, `os.gate.release` | available |
-| data dependence (which store produced a loaded value) | memory contents are not traced per byte | not available; derived by replaying stores in the window (labeled derived) |
+| data dependence (which store produced a loaded value) | memory contents are not traced per byte | not recorded; derived by replaying the window's writes through the bus (labeled derived). Loaded bytes no store in the window gives are reported unresolved, never linked |
 
 - **Deterministic construction.** Start from the differing field at the first divergence, and follow only the links above backwards, within the dense replay window. Output the predecessor records in trace order, each tagged with the link that included it.
 - **No invented links.** A relationship not in this table does not appear in a slice.
-- **No new instrumentation.** M4 has no bus rename trace record. Slices use only the existing trace ordering, bus state decoded at checkpoints, and the known outstanding-transaction relationships above. M4.3 changes no component schema and no trace semantics.
+- **No new instrumentation.** M4 adds no trace record. Slices use only the existing trace records and ordering, including the bus's existing `platform.bus.grant` record (M4.3 revision, §30.3), and the known outstanding-transaction relationships above. M4.3 changes no component schema and no trace semantics.
 
 ---
 
@@ -957,8 +957,9 @@ tests/verification/      corpus/ (canonical directory bundles, §18) and engine 
 - **No contracts change is planned** (D8). Observation values reuse `trace::Value`, encoding reuses `canonical::Encoder` and `Decoder`, state reuses `StateView` and `WorldView`, and checkpoints reuse the runtime snapshot. The pin stays `90900a128d51f6b42e86dc789447882c90c52ef4`.
 - **Potential future contracts** (recorded, not part of M4):
   - a `Capability` declaration, once a second language or repository (the M7 TypeScript UI) must read backend capabilities;
-  - a language-neutral observation schema (plan.md §9, "Schema / Protobuf"), once a non-Rust consumer reads M4 artifacts;
-  - a trace record for bus transaction renaming, if §15 slices need explicit cross-bus links.
+  - a language-neutral observation schema (plan.md §9, "Schema / Protobuf"), once a non-Rust consumer reads M4 artifacts.
+
+  M4.0 also listed a trace record for bus transaction renaming. M4.3 found that `platform.bus.grant` already records it (§30.3).
 
   Each would land in contracts first, then a pin bump, per plan.md §10.
 
@@ -1048,7 +1049,7 @@ Common rules:
 Why the targets are safe:
 - The kernel never touches registers, CSRs, `pc`, or `priv` (m3-design §6.1), and the trampoline writes only `satp`, `sepc`, `sstatus`, `sscratch`, and the registers from the trap frame (m3-design §7.3). A patched `stvec` therefore survives until the next trap, and a patched GPR until the instruction that reads it.
 - The executable table has no content hash, and the kernel validates only the ELF structure (m3-design §8). A patched instruction word therefore loads normally and shows at the first fetch.
-- For CB-1 and CB-2, state differs from the initial state, because the block media holds the patched bytes, and RAM first differs at the DMA write that carries them. That is state evidence (§12.4), not an acceptance ordinal.
+- For CB-1 and CB-2, state differs from the initial state, because the block media holds the patched bytes, and RAM first differs at the DMA write that carries them. That is state evidence (§12.4), not an acceptance ordinal. The disk's media identity is part of its snapshot, so the first state divergence is at event 0, in `soc.disk` (M4.3 revision, §30.3).
 
 "Expected" and "actual" are semantic roles, not a ranking of implementations. A profile may assign them the other way around.
 
@@ -1130,15 +1131,15 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0, M4.1, and M4.2 are complete. M4.3 is next. M4 as a whole is in progress.
+**Status:** M4.0 to M4.3 are complete. M4.4 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
 | **M4.0** | complete | Design freeze: terminology, comparison model, comparison case and profiles (primary streams, stop rules), capability model, observation fields and ObservedValue canonical encoding v1, artifact logical contents and the directory bundle, evidence policy, corpus location, controlled divergences and mutation classes, acceptance workload and exit criteria | docs |
 | **M4.1** | complete | Observation and comparison core: `systemscope-verify` crate, observations, canonical encoding, prefix digest, comparator, SystemScope runtime adapter and `rv32.*` projection; controlled divergences on the same backend (state patch), naive oracle | code, tests |
 | **M4.2** | complete | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
-| **M4.3** | next | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
-| **M4.4** | planned | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
+| **M4.3** | complete | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
+| **M4.4** | next | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
 | **M4.5** | planned | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
 | **M4.6** | planned | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
 | **M4.7** | planned | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
@@ -1222,7 +1223,7 @@ Every answer below is frozen at M4.0.
 | Q19 | Where is the corpus, and what can be an entry? | `tests/verification/corpus/`; canonical directory bundles, `Diverged` or `Agree` only; no tool writes to it; scratch, then review, then a normal PR (§18) | frozen |
 | Q20 | Is `paddr` compared? | per profile: compared for SystemScope ↔ SystemScope on the same platform; not compared for SystemScope ↔ Spike, as today; excluded for Modeled OS ↔ Native OS (§8.2) | frozen |
 | Q21 | Does `interrupt` join the Spike profiles? | not the existing versions; only a new, versioned profile may add it (§8.2) | frozen |
-| Q22 | Does M4 add a bus rename trace record? | no; slices use existing ordering, checkpoint bus-state decoding, and known outstanding-transaction relationships; M4.3 changes no component schema or trace semantics (§15) | frozen |
+| Q22 | Does M4 add a bus rename trace record? | no; slices use existing ordering, checkpoint bus-state decoding, and known outstanding-transaction relationships; M4.3 changes no component schema or trace semantics (§15). M4.3 found that the existing `platform.bus.grant` record already carries the renaming, so slices read it from the trace (§30.3) | frozen |
 | Q23 | How far can a trace-backed backend take part? | `outcome`, the `arch` observation stream, and stream compare; no state, snapshot, restore, step back, or same-engine event diff; unmet requirements give `Incomparable` (§7) | frozen |
 | Q24 | What observation evidence does each outcome store? | `Diverged`: `w` before, the divergent observation, up to `w` after; `Agree`: none, `result.bin` is authoritative; `AuxiliaryDivergence`: the divergent auxiliary streams only (§16.1) | frozen |
 
@@ -1230,7 +1231,6 @@ Every answer below is frozen at M4.0.
 - Process identity across modeled and native kernels, and the M6 primary stream: deferred to M6 (§24.2).
 - A single-file container for reproducers: a future transport or packaging option outside the M4 contract (§16.1).
 - Scenario reduction: deferred beyond M4 (§17.3).
-- A bus rename trace record: a future component and contracts decision (§15, §23).
 - `interrupt` boundaries in a Spike profile: only in a new profile version (§8.2).
 - A contracts-level `Capability` and a language-neutral observation schema (§23).
 
@@ -1280,3 +1280,32 @@ Deferred: the `StateDigest` accelerator and the first state divergence (§12.4) 
 - `record_index`, `every > 0` to `every >= 0`: with `every` 0, `count.is_multiple_of(0)` holds only at count 0, and a checkpoint is considered only after the first boundary, so no checkpoint is taken either way.
 - The runtime adapter's `restore`, `p.event_index > c.event_index` to `>=`: a patch is applied only when a step brings the event count to its event index, and a side restored at that index has already passed it, so the pending flag is never read.
 
+### 30.3 M4.3
+
+M4.3 implemented structured state and its diff (`verification/src/state.rs`), the first state divergence (`verification/src/latent.rs`), trace evidence (`verification/src/trace.rs`), the relevant-predecessor slice (`verification/src/slice.rs`), and the verification result with its canonical encoding and text rendering (`verification/src/result.rs`, `verification/src/report.rs`). It revised the design in these places. Each revision is a correction or a detail the frozen text left open, not a new decision.
+
+| Section | Revision | Why |
+|---|---|---|
+| §6.6, input variant | A third variant, a media patch: an offset, the bytes it must find there, and the bytes it writes, with identity tag 2. The runtime adapter's build function takes the input variant, and a platform applies the patch to its media at build time. A patch whose old bytes differ, or that falls outside the image, fails the side | CB-1 and CB-2 patch `disk.img`, which a state patch cannot reach: the kernel loads the code by DMA long after reset |
+| §12.4 | The scan's origin is the latest pair of the sides' checkpoints at one event index, at most the scan's end, whose snapshots are byte-equal; otherwise both sides start from their initial states. A scan can be scoped to named components, comparing and searching origins only within their state. The differing components come from the snapshot's per-component state, plus `runtime` for the session's own bytes | equal snapshots are equal full state, so this is the `StateDigest` accelerator. A scope sees past a difference that is there from the start, such as a patched disk's media identity, to where it reaches another component |
+| §12.4 | The runtime adds `snapshot::component_states`, a read-only reader of a snapshot's per-component bytes | the scan names differing components without decoding any component's schema |
+| §13.2 | Every state read carries each component's snapshot schema and a digest of its bytes, labeled derived; the `m3-reference` decoder gives fields by schema path, with RAM pages as derived digests; the registers retirements wrote are replayed from the `arch` stream, labeled derived | sources never claim completeness, so the digest shows a difference no decoded field covers |
+| §14.1 | The canonical trace is compared from the state scan's origin, records emitted during `init` excluded, up to the later of the sides' events at the primary divergence. The window is `report_window` records before and after the first differing record, or fewer where the scan ends | a checkpoint restores state, not records, so the comparison starts where both sides replay |
+| §15, bus rename | MultiMasterBus already emits `platform.bus.grant` with `region`, `master`, `txn`, and `downstream_txn`, so the rename link comes from the trace, not from decoding bus state. A master's index is its port on the bus, and downstream ids are never reused | §15 and Q22 assumed there was no such record. No record was added: Q22's answer stands |
+| §15, construction | A slice starts at each side's first differing canonical trace record and follows links backwards through the dense replay window: up to 4,096 records before it, from the trace scan's origin. A predecessor before the window is not in the slice. The page walk link is part of the instruction's accesses: the CPU's port traffic since its previous retirement | the first differing record is where the trace shows the differing state. The walk's PTE reads have no walk id, and only their ordering in the instruction separates them from the fetch and the data access |
+| §15, data dependence | The `store` link is labeled derived. It replays the window's writes through the bus and links, for each byte a load returned, the latest write before the load's request that covers the byte, if that write wrote the same byte. Loaded bytes with no such write are reported as unresolved, with the load's record, address, and length | §15 allows a derived link only when labeled. A byte no recorded write explains has no link, so none is invented |
+| §6.7 | The result's encoding: magic `SSVR`, version 1, the verdict (`Compared`, `Incomparable`, or an engine error), the primary window, the state evidence, the auxiliary windows, the canonical trace divergence, diagnostics, and the slices. Decoding refuses trailing bytes. The text rendering is derived from the result | it is the precursor of `result.bin` (§16) |
+| §25.1, CB-1 and CB-2 | The first state divergence is at event 0, in `soc.disk` | the disk's media identity is part of its snapshot |
+
+On `m3-reference`, both CB cases first differ in RAM at event 4,116 and in the CPU at event 115,447. Their canonical traces first differ at event 4,108, where the block controller receives the patched block's `ReadResult`, before it reaches RAM. Each CB slice has the same six records before that one: the `ReadBlock` request, the medium's `platform.disk.read`, the transfer's `platform.blk.command` with the MMIO write that issued it, and the bus's `platform.bus.grant` with the kernel's own write that the bus renamed into that MMIO write. SP-1's trace first differs at the fetch request after the patch, the first instruction after reset, so its slice has no predecessor. The SP-2 and SP-3 slices are the CPU's walk and fetch traffic with each access's grant and downstream hop, and the page tables and code they read were written before the window, so those bytes are unresolved. Each case's same-engine report at one checkpoint per 10,000 events carries exactly that evidence, and two runs give the same bytes.
+
+**Engine mutants.** cargo-mutants on `systemscope-verify` before the last test commits generates 710 mutants: 549 caught, 98 unviable, 10 timeouts, and 53 missed. The timeouts are hangs, which are the detection, as at M4.2. Two of the missed are the equivalents §30.2 lists, in `record_index` and the runtime adapter's `restore`. Tests now cover most of the others. They add negative cases for each slice rule: a record that matches a rule in every respect but one, such as another CPU's retirement, a status poll, another bus's grant, or a write that does not go through the bus. They also pin the canonical trace's mark in the text rendering, name the session's own bytes in a state difference, check the default `state`, and check an auxiliary window on a stream longer than the window. A rerun on the affected functions generates 193 mutants: 175 caught, 2 unviable, 2 timeouts, and 14 missed. One of the 14, in the bus rename rule, is now caught. The other 13 are listed below, with `Session::inspect` from the first run, which the rerun did not cover.
+
+- Six `k + 1` to `k * 1` mutants: in `accesses`, `gate` (twice), `dma` (twice), and `rename`. Each moves a range's start back onto the record the rule has just found: the retirement, the gate's enter, the completion, the command, or the grant. The range's filter never accepts that record, or the slice links it already.
+- `stores`, the guard `!found.contains(&j)` to true: a write is listed twice, and a slice links each record once.
+- `diff_state::keys`, `*n - 1` to `*n + 1` or `*n / 1`: the occurrence index shifts the same way on both sides and is used only as a key.
+- `scan`, `keep > 0` to `keep >= 0`: with `keep` 0 the slices are built and then dropped, since only `first_trace_divergence` scans with `keep` 0.
+- `scan`, `kept.len() < want` to `<=`: a side steps one more event, and its records are cut to `want`.
+- `scan`, `record + from - b.len()` to `record - from - b.len()`: `from` is 0 unless the window is larger than `SLICE_RECORDS`, since the ring holds at most the larger of the two.
+- `scan`, the ring's `b.len() > ring` to `==`: not equivalent. Once the ring overshoots its size, it keeps every record, and the result is unchanged. The one difference is a ring that lands on its size exactly and then sees its first differing record first in the next event. Each counter event starts with an equal wake dispatch, so the counter cannot show it. It stays missed.
+- `Session::inspect`, the guard `r.events == 0` to true: a state read runs only the observe point at tick 0, after refusing when an event at tick 0 is pending, so it never runs an event. The guard is a defense.
