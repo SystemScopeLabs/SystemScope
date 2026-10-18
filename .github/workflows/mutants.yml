@@ -138,6 +138,8 @@ jobs:
           }
           # The runtime's snapshot, restore, and trace behavior is tested on real toy
           # components, in the toy crate's tests, so the runtime's mutants run those too.
+          # cargo-mutants creates only the last directory of -o.
+          mkdir -p out
           status=0
           mutants --workspace -e 'runtime/**' -o out/main || status=$?
           check main "$status"
