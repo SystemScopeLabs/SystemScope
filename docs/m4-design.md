@@ -1,8 +1,8 @@
 # M4 Design: Verification & Debugging Engine
 
-> Status: Frozen at M4.0 · Implementation status: Not started (M4.1 is next) · Parent: [plan.md](../plan.md) · Builds on: [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M4.0, revised at M4.1 (§30) · Implementation status: M4.1 complete, M4.2 next · Parent: [plan.md](../plan.md) · Builds on: [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
-This document is the architecture contract for M4, frozen at M4.0. It fixes the decisions the M4 implementation steps (§27) depend on (§3), the controlled divergences and mutation classes (§25), the acceptance workload and exit criteria (§28), and the answers to the M4 design questions (§29). Nothing in it is implemented yet, and M4.1 is the next step. Changing a frozen decision needs an explicit, reviewed revision of this document. M0–M3 are frozen, and nothing here changes their semantics, schemas, contracts, fixtures, or golden files.
+This document is the architecture contract for M4, frozen at M4.0. It fixes the decisions the M4 implementation steps (§27) depend on (§3), the controlled divergences and mutation classes (§25), the acceptance workload and exit criteria (§28), and the answers to the M4 design questions (§29). M4.1 implements the observation and comparison core (§27), and M4.2 is next. Changing a frozen decision needs an explicit, reviewed revision of this document. M0–M3 are frozen, and nothing here changes their semantics, schemas, contracts, fixtures, or golden files.
 
 ---
 
@@ -915,6 +915,7 @@ M4 separates **what it found** from **whether it could look**.
 
 - A SystemScope session that faults (`Lifecycle::Faulted`) is `BackendFailed`, with the fault. Whether a fault on one side is a divergence, because the other side ran on, is decided at the boundary level: the faulting side's stream ends, and that is a length divergence, reported as such. The fault itself is not called architectural.
 - An engine failure is never reported as a divergence, and a divergence is never hidden by an engine failure. The result type keeps them apart.
+- **A side that fails before the stop rule** (M4.1 revision, §30). Each side's recording keeps the observations it made before the failure. The comparator compares the primary observations both sides recorded. A divergence among them is the first divergence: the result is `Diverged`, with each side's failure recorded as evidence, and the auxiliary streams are not compared. With no divergence among them, the result is the first failure, expected side first. A stream cut short by a failure never makes a length divergence; only a side that reached the stop rule ends its stream.
 
 ---
 
@@ -1032,14 +1033,14 @@ Common rules:
 - **Workloads.** SP-1 to CB-2 use the `m3-reference` `reference` scenario (§28.1) under the `m3-reference` SystemScope profile, primary stream `arch`. The expected side is the unmodified run. SK-1 uses the existing rv32ui Spike profile.
 - **"After boundary b"** means the SystemScope checkpoint after the event that emits primary observation `b`. There the CPU has just retired or trapped and is waiting to fetch (`FetchIssue`, `components/rv32i/src/cpu.rs`), so no in-flight memory plan depends on the patched field.
 - **Patch validity.** A patched checkpoint must pass `Runtime::restore`'s full validation, for example schema 3's `stvec` MODE check and its check that `pa` matches `pc`. A patch that fails validation fails the test; it is never skipped.
-- **Injective instructions.** `ADD`, `SUB`, `XOR`, `ADDI`, and `XORI` with `rd ≠ x0` and `rs1 ≠ x0`. For these, flipping bit 0 of `x[rs1]` always changes `rd_value`.
+- **Injective instructions.** `ADD`, `SUB`, `XOR`, `ADDI`, and `XORI` with `rd ≠ x0` and `rs1 ≠ x0`, and, for `SUB` and `XOR`, `rs2 ≠ rs1` (M4.1 revision, §30: `x − x` and `x ⊕ x` are 0 for every `x`). For these, flipping bit 0 of `x[rs1]` always changes `rd_value`.
 - **Input variant.** Each actual side records its patch in its input variant (§6.6).
 
 | ID | Category | Target | Patch | Expected first divergence (independent derivation) |
 |---|---|---|---|---|
 | SP-1 | state patch: `pc` | checkpoint after boundary 0, the first `retire`: M-mode boot stub, translation off, so there is no `pa` to match | `pc ^= 0x4` | `arch[1]`, `retire`, field `pc` |
 | SP-2 | state patch: GPR | `r` = the first `retire` with `priv = U` whose instruction is injective; checkpoint after boundary `r − 1` | `x[rs1] ^= 1` | `arch[r]`, `retire`, field `rd_value` |
-| SP-3 | state patch: CSR | `e` = the first `exception` with cause `EnvironmentCallFromU`; checkpoint after boundary `e − 1` | `stvec ^= 0x4` (MODE stays 0) | `arch[e + 1]`, `retire`, field `pc` (the handler address). `arch[e]` agrees, because no `exception` field reads `stvec` |
+| SP-3 | state patch: CSR | `e` = the first `exception` with cause `EnvironmentCallFromU`; checkpoint after boundary `e − 1` | `stvec ^= 0x4` (MODE stays 0) | `arch[e + 1]`, kind: `retire` expected, `exception` actual (M4.1 revision, §30). `arch[e]` agrees, because no `exception` field reads `stvec` |
 | CB-1 | code-byte patch: valid word | in `disk.img`, the word at the ELF entry `e_entry` of `hello` (table entry 0), inside its `PT_LOAD` bytes; `x` = the first boundary with `priv = U` and `pc = e_entry` while `hello`'s pid is current (from `os.process.create` and `os.process.switch`) | the word becomes `0x00000013` (`addi x0, x0, 0`), or `0x00100013` if it already is that word | `arch[x]`, `retire`, field `insn` |
 | CB-2 | code-byte patch: illegal word | the same word | the word becomes `0x00000000`, an illegal instruction, delegated to S by `medeleg` | `arch[x]`, kind: `retire` expected, `exception` actual |
 | SK-1 | Spike-side | `rv32ui-add`; expected side Spike, origin initial; actual side SystemScope; `r` = the first `retire` in the compared window whose instruction is injective; SystemScope checkpoint after boundary `r − 1` | `x[rs1] ^= 1` on the SystemScope side | `arch[r]`, `retire`, field `rd_value` |
@@ -1129,13 +1130,13 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 is complete, and this document is frozen. M4.1 is next. M4 as a whole is in progress, and no implementation has started.
+**Status:** M4.0 and M4.1 are complete. M4.2 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
 | **M4.0** | complete | Design freeze: terminology, comparison model, comparison case and profiles (primary streams, stop rules), capability model, observation fields and ObservedValue canonical encoding v1, artifact logical contents and the directory bundle, evidence policy, corpus location, controlled divergences and mutation classes, acceptance workload and exit criteria | docs |
-| **M4.1** | next | Observation and comparison core: `systemscope-verify` crate, observations, canonical encoding, prefix digest, comparator, SystemScope runtime adapter and `rv32.*` projection; controlled divergences on the same backend (state patch), naive oracle | code, tests |
-| **M4.2** | planned | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
+| **M4.1** | complete | Observation and comparison core: `systemscope-verify` crate, observations, canonical encoding, prefix digest, comparator, SystemScope runtime adapter and `rv32.*` projection; controlled divergences on the same backend (state patch), naive oracle | code, tests |
+| **M4.2** | next | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
 | **M4.3** | planned | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
 | **M4.4** | planned | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
 | **M4.5** | planned | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
@@ -1232,3 +1233,23 @@ Every answer below is frozen at M4.0.
 - A bus rename trace record: a future component and contracts decision (§15, §23).
 - `interrupt` boundaries in a Spike profile: only in a new profile version (§8.2).
 - A contracts-level `Capability` and a language-neutral observation schema (§23).
+
+---
+
+## 30. Revisions
+
+### 30.1 M4.1
+
+M4.1 implemented the frozen design and revised it in three places. Each revision is a correction found by the implementation and its tests, not a new decision.
+
+| Section | Revision | Why |
+|---|---|---|
+| §20 | A side that fails before the stop rule keeps its observations, and a divergence both sides recorded before the failure is still `Diverged`, with the failures as evidence; otherwise the first failure is the result | the frozen rule that a divergence is never hidden by an engine failure needs the observations made before the failure. SP-3's actual side never reaches the stop rule (below), and without this rule its divergence would be reported as `BackendFailed` |
+| §25.1, injective instructions | `SUB` and `XOR` also need `rs2 ≠ rs1` | with `rs2 = rs1`, flipping bit 0 of `x[rs1]` changes both operands and leaves `rd_value` 0 |
+| §25.1, SP-3 | the expected first divergence is `arch[e + 1]` as a kind divergence, `retire` expected and `exception` actual, not a `retire` differing in `pc` | the trampoline's first instruction, at `stvec`, is `csrrw x31, sscratch, x31`, which points `x31` at the trap frame. The patched handler starts at the second, a store through `x31`, which still holds the user's value, so it faults with `StorePageFault`. The fault repeats at the same store, and the actual side runs out of its safety budget after the divergence. The selector and the ordinal are unchanged |
+
+Where the state patcher lives, which §25.1 left open: the SystemScope runtime adapter (`verification/src/runtime.rs`) takes the patch function from its caller. The `m3-reference` patcher is in `tests/acceptance/src/m3/verify.rs`, on the portable snapshot decoder, so `systemscope-verify` keeps the dependencies of §22 and knows no platform. It patches `pc`, `x1` to `x31`, and `stvec`, after checking the old value.
+
+The §28.1 per-kind counts are reproduced exactly: 2,176 `retire` and 24 `exception`, the 23 delegated exceptions and the halting trap.
+
+**Engine mutants.** cargo-mutants on `systemscope-verify` at the M4.1 commit generates 113 mutants: 92 caught, 20 unviable, 1 timeout, and none missed. The timeout replaces `Session::advance` with `Ok(())`, so the side never advances and never reaches the stop rule; the hang is the detection. The eight M4.1 mutation classes of §25.2 each have a named test in `verification/tests/compare.rs` and `verification/tests/runtime.rs`.
