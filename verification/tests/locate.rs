@@ -337,6 +337,11 @@ fn locate_chooses_by_capability_and_uses_no_other() {
         index(&plan, &a, Role::Actual, 2),
     );
     let no_restore = [Capability::ArchStream, Capability::StepBoundary];
+    // A side that cannot snapshot is indexed without checkpoints, and never asked for one.
+    let mut b = Limited::new(&no_restore);
+    let side = with(&mut b, e.input.clone(), e.budget);
+    let i = record_index(&plan, &s, side, Role::Expected, 2).unwrap();
+    assert_eq!((i.prefixes, i.checkpoints.len()), (ie.prefixes.clone(), 0));
     for (ec, ac, indexes, strategy) in [
         (&ALL[..], &ALL[..], true, Strategy::Search),
         (&ALL[..], &ALL[..], false, Strategy::Lockstep),

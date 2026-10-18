@@ -495,17 +495,14 @@ pub fn search(
     } else {
         (n[0] != n[1]).then_some(common)
     };
-    // The comparator checks every observation up to the divergence before it diffs.
+    // The comparator checks every observation up to the divergence before it diffs. The
+    // sides agree before the divergence, so a refusal there is both sides' first, and the
+    // expected side's is the one a scan meets first.
     let checked = d.map_or(common, |d| d + 1);
-    let mut refused: Option<(u64, &Refusal)> = None;
-    for (index, n) in indexes.iter().zip(n) {
-        if let Some((j, r)) = &index.refused
-            && *j < checked.min(n)
-            && refused.is_none_or(|(k, _)| *j < k)
-        {
-            refused = Some((*j, r));
-        }
-    }
+    let refused = indexes
+        .iter()
+        .zip(n)
+        .find_map(|(index, n)| index.refused.as_ref().filter(|(j, _)| *j < checked.min(n)));
     let located = |verdict: Verdict, window: Option<Window>| Located {
         strategy: Strategy::Search,
         verdict,

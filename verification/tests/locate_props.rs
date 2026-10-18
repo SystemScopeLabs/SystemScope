@@ -57,6 +57,9 @@ struct Script {
 /// A backend replaying a [`Script`] with checkpoints at event boundaries.
 struct Scripted {
     script: Script,
+    /// Whether `emitted` reports nothing, as a backend that makes each stream only on
+    /// demand may.
+    lazy: bool,
     name: &'static str,
     execution: [u8; 32],
     at: usize,
@@ -68,6 +71,7 @@ impl Scripted {
     fn new(script: Script, name: &'static str) -> Scripted {
         Scripted {
             script,
+            lazy: false,
             name,
             execution: [0; 32],
             at: 0,
@@ -141,7 +145,11 @@ impl Backend for Scripted {
         }
     }
     fn emitted(&mut self, stream: &str) -> Result<Vec<Observation>, EngineError> {
-        Ok(std::mem::take(&mut self.queues[Scripted::stream(stream)?]))
+        let queue = &mut self.queues[Scripted::stream(stream)?];
+        if self.lazy {
+            return Ok(Vec::new());
+        }
+        Ok(std::mem::take(queue))
     }
     fn checkpoint(&self) -> Result<Checkpoint, EngineError> {
         Ok(Checkpoint {
@@ -194,6 +202,9 @@ fn every_strategy(plan: &Plan, e: &Script, a: &Script) -> Vec<Result<Located, En
     let mut out = Vec::new();
     let (mut x, mut y) = fresh();
     out.push(lockstep(plan, &s, side(&mut x), side(&mut y)));
+    let (mut x, mut y) = fresh();
+    (x.lazy, y.lazy) = (true, true);
+    out.push(lockstep(plan, &s, side(&mut x), side(&mut y)));
     for role in [Role::Expected, Role::Actual] {
         let (mut x, mut y) = fresh();
         out.push(stream_compare(plan, &s, role, side(&mut x), side(&mut y)));
@@ -204,6 +215,7 @@ fn every_strategy(plan: &Plan, e: &Script, a: &Script) -> Vec<Result<Located, En
         let (mut x, mut y) = fresh();
         let ie = record_index(plan, &s, side(&mut x), Role::Expected, every).unwrap();
         let ia = record_index(plan, &s, side(&mut y), Role::Actual, every).unwrap();
+        assert_eq!(ie.is_empty(), ie.prefixes.len() == 1);
         let (mut x, mut y) = fresh();
         out.push(search(plan, &s, (side(&mut x), &ie), (side(&mut y), &ia)));
     }
@@ -292,10 +304,16 @@ proptest! {
         );
         let results = every_strategy(&plan, &e, &a);
         let first: Option<Window> = results[0].as_ref().ok().and_then(|l| l.window.clone());
+        // Without a primary divergence or a failure, every strategy also compares the
+        // auxiliary streams to the stop rule.
+        let agreed = matches!(&naive, Ok(Verdict::Compared(c)) if c.primary.agrees() && c.failures.is_empty());
         for (i, got) in results.iter().enumerate() {
             match (&naive, got) {
                 (Ok(want), Ok(l)) => {
                     prop_assert_eq!(primary(&l.verdict), primary(want), "strategy {}", i);
+                    if agreed {
+                        prop_assert_eq!(&l.verdict, want, "strategy {}", i);
+                    }
                     prop_assert_eq!(&l.window, &first, "strategy {}", i);
                 }
                 (Err(want), Err(e)) => prop_assert_eq!(e, want, "strategy {}", i),
@@ -317,4 +335,64 @@ proptest! {
             }
         }
     }
+}
+
+/// Records both sides' indexes from `recorded`, then searches with sides that replay
+/// `replayed` under the same identities.
+fn search_replaying(
+    recorded: (&Script, &Script),
+    replayed: (&Script, &Script),
+) -> Result<Located, EngineError> {
+    let profile = common::profile();
+    let support = Scripted::new(recorded.0.clone(), "e").support();
+    let plan = plan(&profile, &support, &support).unwrap();
+    let s = scenario();
+    let mut x = Scripted::new(recorded.0.clone(), "e");
+    let ie = record_index(&plan, &s, side(&mut x), Role::Expected, 0).unwrap();
+    let mut y = Scripted::new(recorded.1.clone(), "a");
+    let ia = record_index(&plan, &s, side(&mut y), Role::Actual, 0).unwrap();
+    let (mut x, mut y) = (
+        Scripted::new(replayed.0.clone(), "e"),
+        Scripted::new(replayed.1.clone(), "a"),
+    );
+    search(&plan, &s, (side(&mut x), &ie), (side(&mut y), &ia))
+}
+
+fn script(retirements: &[u8], fail_at: Option<usize>) -> Script {
+    Script {
+        events: retirements.iter().map(|v| vec![(0, *v)]).collect(),
+        fail_at,
+    }
+}
+
+#[test]
+fn a_replay_that_does_not_reproduce_its_index_is_a_boundary_desync() {
+    // The sides diverge at 3; the expected side has 5 retirements.
+    let e = script(&[1, 2, 4, 5, 6], None);
+    let a = script(&[1, 2, 4, 9, 6], None);
+    let desync = |why: &str| Err(EngineError::BoundaryDesync(format!("Expected: {why}")));
+    for (replayed, want) in [
+        (script(&[1, 2], None), desync("the replay ended at 2")),
+        // At the divergence, an end the index did not record is a desync too.
+        (script(&[1, 2, 4], None), desync("the replay ended at 3")),
+        (
+            script(&[1, 2, 4, 5], Some(1)),
+            desync("the replay failed at 1: backend failed: e failed at event 1"),
+        ),
+    ] {
+        assert_eq!(search_replaying((&e, &a), (&replayed, &a)), want);
+    }
+    // The same end, recorded, is the divergence.
+    let short = script(&[1, 2, 4], None);
+    let l = search_replaying((&short, &a), (&short, &a)).unwrap();
+    assert_eq!(
+        l.divergence(),
+        Some((
+            3,
+            &systemscope_verify::compare::Divergence::Ended {
+                ended: Role::Expected,
+                kind: "retire".to_owned(),
+            }
+        ))
+    );
 }

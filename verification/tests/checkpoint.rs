@@ -57,6 +57,26 @@ fn broken_checkpoint_bytes_are_refused() {
         Checkpoint::from_bytes(&padded),
         Err(CheckpointError::Decode(DecodeError::TrailingBytes))
     );
+    // A checkpoint carries its whole snapshot, however large.
+    let large = Checkpoint {
+        state: vec![9; 4096],
+        ..checkpoint()
+    };
+    assert_eq!(Checkpoint::from_bytes(&large.to_bytes()), Ok(large));
+    // A mark count the bytes cannot hold is refused before any mark is read: two marks
+    // out of order in 50 bytes are truncated, not out of order.
+    let mut short = vec![0; 40];
+    short.extend(2u32.to_le_bytes());
+    for (name, len) in [("b", 45), ("a", 5)] {
+        let mut m = (1u32.to_le_bytes()).to_vec();
+        m.extend(name.as_bytes());
+        m.resize(len, 0);
+        short.extend(m);
+    }
+    assert_eq!(
+        Checkpoint::from_bytes(&short),
+        Err(CheckpointError::Decode(DecodeError::Truncated))
+    );
     // A forged mark count is refused before allocating; one mark takes 44 bytes at least.
     let mut forged = checkpoint();
     forged.streams.clear();
