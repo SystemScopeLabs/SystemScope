@@ -97,7 +97,7 @@ pub fn profile() -> ComparisonProfile {
 }
 
 /// `rv32.*` records through [`Rv32Projection`]; `effect` and `os` records copied field
-/// by field, which must be exactly the fields [`RECORDS`] names.
+/// by field, which must be exactly the fields `RECORDS` names.
 #[derive(Default)]
 pub struct M3Projection {
     rv32: Rv32Projection,
