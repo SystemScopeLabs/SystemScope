@@ -4,7 +4,8 @@
 //! confirms. M4.2 (§25.2): every locator strategy, and checkpoint search at every
 //! density, finds the same first divergence and reports the same window. M4.3: each
 //! case's same-engine report carries its state, trace, and slice evidence, and the
-//! code-byte patches CB-1 and CB-2 diverge as §25.1 derives.
+//! code-byte patches CB-1 and CB-2 diverge as §25.1 derives. M4.4 (§16): every case's
+//! reproducer bundle, from the initial states and from checkpoints, replays byte for byte.
 
 use systemscope_acceptance::m3::Fixture;
 use systemscope_acceptance::m3::golden::Golden;
@@ -13,7 +14,11 @@ use systemscope_contracts::trace::Value;
 use systemscope_rv32::m3::Scenario;
 use systemscope_rv32::workspace_root;
 use systemscope_verify::backend::{Backend, Side, run};
+use systemscope_verify::bundle::{
+    Case, MANIFEST, Manifest, RESULT, read_dir, replay, write, write_dir,
+};
 use systemscope_verify::case::{InputVariant, MediaPatch, StatePatch};
+use systemscope_verify::checkpoint::Checkpoint;
 use systemscope_verify::compare::{
     Divergence, Outcome, Recorded, Recording, StreamResult, Verdict, compare, compare_recordings,
     naive_first_divergence,
@@ -387,6 +392,7 @@ fn diverge(
         (r.trace.canonical.as_ref(), &r.slices),
         (Some(&trace), &slices)
     );
+    reproduce(fixture, b, input.clone(), &r, Some(ordinal));
     let text = r.to_string();
     assert!(text.starts_with("outcome: diverged\nprimary: arch: diverged at "));
     assert!(text.contains("\npredecessor slice (actual), window from record "));
@@ -415,6 +421,78 @@ fn diverge(
     assert_eq!((stream.as_str(), at), ("arch", ordinal));
     assert_eq!(located.divergence(), Some((ordinal, &divergence)));
     (divergence, c.failures, located, state)
+}
+
+/// A side's checkpoint after it emits `boundaries` primary observations.
+fn checkpoint_after(fixture: &Fixture, input: &InputVariant, boundaries: u64) -> Checkpoint {
+    let mut b = verify::backend(fixture);
+    let scenario = verify::scenario(fixture);
+    b.start(&scenario, input, &verify::config(), &verify::profile())
+        .unwrap();
+    for _ in 0..boundaries {
+        b.next("arch").unwrap().unwrap();
+    }
+    b.checkpoint().unwrap()
+}
+
+/// Bundles the case of the unmodified side against `input` from the initial states and,
+/// for a divergence at `diverged`, from both sides', and the actual side's, checkpoint
+/// after the divergence minus the report window: the latest origin §17.2 allows. Each
+/// bundle replays byte-identically, finds what the same-engine report `r` finds, and
+/// survives a directory.
+fn reproduce(
+    fixture: &Fixture,
+    b: &RuntimeBackend,
+    input: InputVariant,
+    r: &VerificationResult,
+    diverged: Option<u64>,
+) {
+    let plan = the_plan(b);
+    let scenario = verify::scenario(fixture);
+    let make = || verify::backend(fixture);
+    let case = Case {
+        plan: &plan,
+        scenario: &scenario,
+        config: verify::config(),
+        make: &make,
+    };
+    let inputs = [InputVariant::None, input];
+    let w = u64::from(plan.profile.report_window);
+    let ks = diverged.map(|d| {
+        inputs
+            .clone()
+            .map(|i| checkpoint_after(fixture, &i, d.saturating_sub(w)))
+    });
+    let mut origins = vec![[None, None]];
+    if let Some([e, a]) = &ks {
+        origins.extend([[Some(e), Some(a)], [None, Some(a)]]);
+    }
+    for o in origins {
+        let bundle = write(&plan, &scenario, &make, inputs.clone(), verify::config(), o)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let replayed = replay(&bundle, case).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(replayed.to_bytes(), bundle.entries[RESULT]);
+        assert_eq!(
+            (&replayed.verdict, &replayed.window),
+            (&r.verdict, &r.window)
+        );
+        assert_eq!(
+            replayed.state.as_ref().map(|s| (s.read_at, &s.differences)),
+            r.state.as_ref().map(|s| (s.read_at, &s.differences))
+        );
+        let m = Manifest::parse(&bundle.entries[MANIFEST]).unwrap();
+        assert_eq!(m.sides.map(|s| s.origin.is_some()), o.map(|c| c.is_some()));
+        let dir = std::env::temp_dir().join(format!(
+            "ss-m4-{}-{}",
+            std::process::id(),
+            blake3::hash(&bundle.entries[MANIFEST]).to_hex()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_dir(&bundle, &dir).unwrap();
+        let read = read_dir(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(read.unwrap(), bundle);
+    }
 }
 
 fn same<'a>(
@@ -462,6 +540,14 @@ fn unmodified_sides_agree_on_every_stream() {
     let (located, _) = locate_everywhere(&fixture, &b, &expected, InputVariant::None);
     assert_eq!(located.verdict, Verdict::Compared(c.clone()));
     assert_eq!(located.window, None);
+    let agree = VerificationResult {
+        verdict: Ok(located.verdict.clone()),
+        window: None,
+        state: None,
+        trace: Default::default(),
+        slices: Vec::new(),
+    };
+    reproduce(&fixture, &b, InputVariant::None, &agree, None);
     let golden = Golden::parse(GOLDEN_JSON).unwrap();
     let g = golden
         .records
