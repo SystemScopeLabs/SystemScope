@@ -46,6 +46,20 @@ pub fn same_failure(a: &StreamResult, b: &StreamResult) -> bool {
     }
 }
 
+/// Whether a candidate's verdict keeps the whole search's (§17.1): a primary divergence
+/// must fail the same way, and anything else must be the same verdict.
+pub fn accepts(
+    full: &Result<Verdict, EngineError>,
+    candidate: &Result<Verdict, EngineError>,
+) -> bool {
+    match (full, candidate) {
+        (Ok(Verdict::Compared(a)), Ok(Verdict::Compared(b))) if !a.primary.agrees() => {
+            same_failure(&a.primary, &b.primary)
+        }
+        _ => full == candidate,
+    }
+}
+
 /// The replay window's origins (§17.2): the latest checkpoint on `stream` covering at
 /// most `limit` boundaries that every side in `restores` holds, for those sides, and
 /// `None` for the others. Without such a checkpoint every side starts from its initial
@@ -108,11 +122,7 @@ pub fn minimize(
         _ => [None, None],
     };
     let (bundle, result) = bundled(plan, scenario, make, inputs, config, origins)?;
-    let same = match (primary(&full), primary(&result)) {
-        (Some(a @ StreamResult::Diverged { .. }), Some(b)) => same_failure(&a, &b),
-        _ => full.verdict == result.verdict,
-    };
-    if !same {
+    if !accepts(&full.verdict, &result.verdict) {
         return Err(EngineError::Internal(format!(
             "the reproducer fails differently: {:?}, not {:?}",
             result.verdict, full.verdict
