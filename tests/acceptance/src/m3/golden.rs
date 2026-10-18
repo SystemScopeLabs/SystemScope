@@ -14,7 +14,8 @@
 //! and never write. The event watchdog is not part of either file.
 
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::Value;
 use systemscope_contracts::COMPATIBILITY_ID;
@@ -449,7 +450,7 @@ impl Golden {
     pub fn verify(root: &Path, json: &str, snapshot: &[u8]) -> Result<(), Vec<String>> {
         let committed = Golden::parse(json).map_err(|e| vec![format!("{GOLDEN_PATH}: {e}")])?;
         committed.ensure_current().map_err(|e| vec![e])?;
-        let (fresh, fresh_snapshot) = Golden::generate(root).map_err(|e| vec![e])?;
+        let (fresh, fresh_snapshot) = generated(root).map_err(|e| vec![e])?;
         let mut errors = compare_files(
             "this machine's run",
             (&committed, json, snapshot),
@@ -483,7 +484,7 @@ impl Golden {
             (&golden, committed.0, committed.1),
             (&other, foreign.0, foreign.1),
         );
-        let (fresh, fresh_snapshot) = Golden::generate(root).map_err(|e| vec![e])?;
+        let (fresh, fresh_snapshot) = generated(root).map_err(|e| vec![e])?;
         errors.extend(compare_files(
             "the foreign result, against this machine's run,",
             (&fresh, &fresh.render(), &fresh_snapshot),
@@ -497,6 +498,25 @@ impl Golden {
             Ok(())
         } else {
             Err(errors)
+        }
+    }
+}
+
+/// [`Golden::generate`] for `root`, run once per process and then reused. xtask calls
+/// [`Golden::verify`] or [`Golden::check_foreign`] once per process, so it still
+/// regenerates every time; the drift test calls them dozens of times on doctored copies
+/// of the committed files, where regenerating would only repeat the same deterministic
+/// run. `generate` itself is not cached: its callers compare separate runs.
+fn generated(root: &Path) -> Result<(Golden, Vec<u8>), String> {
+    type Generated = (PathBuf, Result<(Golden, Vec<u8>), String>);
+    static GENERATED: Mutex<Option<Generated>> = Mutex::new(None);
+    let mut cache = GENERATED.lock().unwrap_or_else(|e| e.into_inner());
+    match &*cache {
+        Some((cached, result)) if cached == root => result.clone(),
+        _ => {
+            let result = Golden::generate(root);
+            *cache = Some((root.to_owned(), result.clone()));
+            result
         }
     }
 }
