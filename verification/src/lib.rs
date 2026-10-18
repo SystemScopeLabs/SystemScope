@@ -3,6 +3,7 @@
 //! See `docs/m4-design.md` for the specification.
 
 pub mod backend;
+pub mod bundle;
 pub mod case;
 pub mod checkpoint;
 pub mod compare;
