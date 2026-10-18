@@ -629,10 +629,14 @@ fn a_transfer_links_only_its_own_command_parts_and_interrupt() {
 #[test]
 fn a_rename_and_a_store_stay_on_their_own_bus_and_bytes() {
     // Another bus's grant forwards no request to this bus.
-    let w = vec![mem(0, CPU, BUS, "ReadReq", 1), grant_on(3, 1, 0, 1, 5)];
+    let w = vec![
+        grant(0, 5, 5, 5),
+        mem(0, CPU, BUS, "ReadReq", 1),
+        grant_on(3, 1, 0, 1, 5),
+    ];
     assert_eq!(
         links(&slice(&w, 0, &paths(), Role::Actual)),
-        [(1, Link::Divergent)]
+        [(2, Link::Divergent)]
     );
     // The downstream response follows its grant.
     let w = vec![
