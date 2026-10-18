@@ -555,7 +555,7 @@ pub fn write(
     bundled(plan, scenario, make, inputs, config, origins).map(|(b, _)| b)
 }
 
-fn bundled(
+pub(crate) fn bundled(
     plan: &Plan,
     scenario: &Scenario,
     make: &dyn Fn() -> RuntimeBackend,

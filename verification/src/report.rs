@@ -7,7 +7,7 @@ use crate::checkpoint::Checkpoint;
 use crate::compare::{StreamResult, Verdict};
 use crate::error::EngineError;
 use crate::latent::{SameSide, first_state_divergence};
-use crate::locate::{Located, record_index, resume, search};
+use crate::locate::{Index, Located, record_index, resume, search};
 use crate::profile::{Plan, Role};
 use crate::result::{StateEvidence, TraceEvidence, VerificationResult};
 use crate::runtime::RuntimeBackend;
@@ -28,7 +28,7 @@ pub fn same_engine(
     config: BackendRunConfig,
     every: u64,
 ) -> VerificationResult {
-    settle(searched(plan, scenario, make, inputs, config, every))
+    settle(searched(plan, scenario, make, inputs, config, every).map(|(r, _)| r))
 }
 
 /// Verifies `inputs[1]` against `inputs[0]` from `origins`, each side's checkpoint or, for
@@ -67,14 +67,15 @@ fn settle(result: Result<VerificationResult, EngineError>) -> VerificationResult
     })
 }
 
-fn searched(
+/// [`same_engine`]'s result, unsettled, with each side's index.
+pub(crate) fn searched(
     plan: &Plan,
     scenario: &Scenario,
     make: &dyn Fn() -> RuntimeBackend,
     inputs: [InputVariant; 2],
     config: BackendRunConfig,
     every: u64,
-) -> Result<VerificationResult, EngineError> {
+) -> Result<(VerificationResult, Vec<Index>), EngineError> {
     let roles = [Role::Expected, Role::Actual];
     let mut indexes = Vec::new();
     for (i, input) in inputs.iter().enumerate() {
@@ -95,7 +96,8 @@ fn searched(
         (side(&mut y, &inputs[1], config), &indexes[1]),
     )?;
     let checkpoints = [&indexes[0].checkpoints[..], &indexes[1].checkpoints[..]];
-    evidence(plan, scenario, make, &inputs, config, located, checkpoints)
+    let result = evidence(plan, scenario, make, &inputs, config, located, checkpoints)?;
+    Ok((result, indexes))
 }
 
 /// The state and trace evidence of a located comparison, scanning from `checkpoints`.

@@ -10,6 +10,7 @@ pub mod compare;
 pub mod error;
 pub mod latent;
 pub mod locate;
+pub mod minimize;
 pub mod observation;
 pub mod profile;
 pub mod report;
