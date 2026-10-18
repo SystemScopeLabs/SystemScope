@@ -22,13 +22,14 @@ use systemscope_contracts::observe::{Control, EventView, Observer, WorldView};
 use systemscope_contracts::protocol::Message;
 use systemscope_contracts::rng::SimRng;
 use systemscope_contracts::snapshot::RestoreError;
-use systemscope_contracts::time::{ClockDomain, SimulationClock, Tick};
+use systemscope_contracts::time::{ClockDomain, SimulationClock, Tick, TimeError};
 use systemscope_contracts::topology::LinkLatency;
 use systemscope_contracts::trace::{
     CONTRACTS_VERSION, ComponentDecl, LinkDecl, TraceAt, TraceHeader, TraceOrigin, TraceRecord,
     Value, encode_topology,
 };
 
+use crate::jitter::{Jitter, JitterState};
 use crate::rng::Xoshiro256StarStar;
 use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::trace::{ResumeError, Trace, check_prefix, dispatch_record};
@@ -40,6 +41,8 @@ pub struct SessionConfig {
     pub seed: u64,
     /// Scheduler limits.
     pub scheduler: SchedulerConfig,
+    /// Perturbation B, per-message jitter (`docs/m5-design.md` §7.2), or `None`.
+    pub jitter: Option<Jitter>,
 }
 
 /// Where a session is in its lifecycle.
@@ -129,6 +132,10 @@ pub(crate) struct Peer {
     pub(crate) component: ComponentId,
     pub(crate) port: PortId,
     pub(crate) latency: Option<LinkLatency>,
+    /// The link's declaration index.
+    pub(crate) link: u32,
+    /// 0 if this port is the link's `a` end, 1 if its `b` end.
+    pub(crate) dir: u8,
 }
 
 /// A component owned by the runtime, with its elaborated ports.
@@ -161,6 +168,8 @@ pub struct Runtime {
     pub(crate) topology_hash: [u8; 32],
     pub(crate) config: SessionConfig,
     pub(crate) scheduler: Scheduler<Pending>,
+    /// Perturbation B's lanes, if the session is jittered.
+    pub(crate) jitter: Option<JitterState>,
     /// Chained BLAKE3 over every dispatched event's `canonical(ev)` (§4.4).
     pub(crate) execution_digest: [u8; 32],
     pub(crate) lifecycle: Lifecycle,
@@ -222,6 +231,7 @@ impl Runtime {
             topology_hash: *blake3::hash(topology.as_bytes()).as_bytes(),
             config,
             scheduler: Scheduler::new(config.scheduler),
+            jitter: config.jitter.map(JitterState::new),
             execution_digest: [0; 32],
             lifecycle: Lifecycle::Elaborated,
             fault: None,
@@ -566,6 +576,7 @@ impl Runtime {
             ports: &self.slots[index].ports,
             peers: &self.peers[index],
             scheduler: &mut self.scheduler,
+            jitter: self.jitter.as_mut(),
             rng: &mut self.rngs[index],
             trace: capturing.then_some(&mut self.emitted),
             at,
@@ -629,6 +640,7 @@ struct Ctx<'a> {
     ports: &'a [PortSpec],
     peers: &'a [Peer],
     scheduler: &'a mut Scheduler<Pending>,
+    jitter: Option<&'a mut JitterState>,
     rng: &'a mut Xoshiro256StarStar,
     /// Where records go, or `None` when nothing captures them. Write-only for the component.
     trace: Option<&'a mut Vec<TraceRecord>>,
@@ -667,7 +679,29 @@ impl Ctx<'_> {
         }
         let peer = self.peers[usize::from(port.0)];
         let sent = resolve(when, self.scheduler.now(), self.clock, self.domains)?;
-        let tick = add_latency(peer.latency, sent, self.clock, self.domains)?;
+        let mut tick = add_latency(peer.latency, sent, self.clock, self.domains)?;
+        let lane = self.jitter.as_deref_mut().and_then(|j| {
+            let jitter = j.jitter;
+            j.lane(peer.link, peer.dir).map(|lane| (jitter, lane))
+        });
+        if let Some((jitter, lane)) = lane {
+            let Some(LinkLatency::Cycles { domain, k }) = peer.latency else {
+                unreachable!("elaboration admits only Cycles links to jitter");
+            };
+            let extra = jitter.draw(peer.link, peer.dir, lane.sent);
+            let late = k
+                .checked_add(extra)
+                .ok_or(SimError::Time(TimeError::TimeOverflow))?;
+            tick = resolve(
+                ScheduleWhen::Cycles { domain, k: late },
+                sent,
+                self.clock,
+                self.domains,
+            )?
+            .max(lane.last);
+            lane.sent += 1;
+            lane.last = tick;
+        }
         let pending = Pending {
             source: self.me,
             target: peer.component,

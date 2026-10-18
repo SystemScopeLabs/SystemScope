@@ -14,6 +14,7 @@ use systemscope_contracts::time::{
 use systemscope_contracts::topology::LinkLatency;
 use systemscope_contracts::trace::LinkDecl;
 
+use crate::jitter::Jitter;
 use crate::runtime::{Peer, Runtime, SessionConfig, Slot};
 
 /// Why a topology could not be elaborated.
@@ -39,6 +40,9 @@ pub enum ElaborationError {
     UnconnectedPort(String),
     /// A link latency names an undeclared clock domain.
     UnknownClockDomain(ClockDomainId),
+    /// The jitter setting is not allowed (`docs/m5-design.md` §7.2): `max_cycles` is 0,
+    /// no link is named, a named link does not exist, or it has no `Cycles` latency.
+    InvalidJitter(&'static str),
 }
 
 impl fmt::Display for ElaborationError {
@@ -60,6 +64,7 @@ impl fmt::Display for ElaborationError {
             ElaborationError::UnknownClockDomain(id) => {
                 write!(f, "unknown clock domain {}", id.0)
             }
+            ElaborationError::InvalidJitter(why) => write!(f, "invalid jitter: {why}"),
         }
     }
 }
@@ -175,7 +180,7 @@ impl TopologyBuilder {
         let mut links = Vec::with_capacity(self.links.len());
         let mut peers: Vec<Vec<Option<Peer>>> =
             slots.iter().map(|s| vec![None; s.ports.len()]).collect();
-        for link in &self.links {
+        for (index, link) in (0u32..).zip(&self.links) {
             if let Some(LinkLatency::Cycles { domain, .. }) = link.latency
                 && domain.0 as usize >= self.domains.len()
             {
@@ -203,12 +208,20 @@ impl TopologyBuilder {
                 component: b.0,
                 port: b.1,
                 latency: link.latency,
+                link: index,
+                dir: 0,
             });
             peers[b.0.0 as usize][usize::from(b.1.0)] = Some(Peer {
                 component: a.0,
                 port: a.1,
                 latency: link.latency,
+                link: index,
+                dir: 1,
             });
+        }
+
+        if let Some(jitter) = config.jitter {
+            check_jitter(&jitter, &links)?;
         }
 
         for (slot, slot_peers) in slots.iter().zip(&peers) {
@@ -235,6 +248,32 @@ impl TopologyBuilder {
             config,
         ))
     }
+}
+
+/// Checks a jitter setting against the elaborated links.
+fn check_jitter(jitter: &Jitter, links: &[LinkDecl]) -> Result<(), ElaborationError> {
+    if jitter.max_cycles == 0 {
+        return Err(ElaborationError::InvalidJitter("max_cycles is 0"));
+    }
+    if jitter.links.0 == 0 {
+        return Err(ElaborationError::InvalidJitter("no link is jittered"));
+    }
+    for index in jitter.links.iter() {
+        match links.get(index as usize).map(|l| l.latency) {
+            None => {
+                return Err(ElaborationError::InvalidJitter(
+                    "a jittered link does not exist",
+                ));
+            }
+            Some(Some(LinkLatency::Cycles { .. })) => {}
+            Some(_) => {
+                return Err(ElaborationError::InvalidJitter(
+                    "a jittered link has no Cycles latency",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Finds a port by name, returning its ids, spec, and a `path.port` label.

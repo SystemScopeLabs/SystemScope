@@ -12,6 +12,7 @@ use systemscope_contracts::snapshot::{RestoreError, SessionField};
 use systemscope_contracts::time::ClockDomain;
 use systemscope_contracts::trace::{CONTRACTS_VERSION, encode_clock_domains};
 
+use crate::jitter::{Jitter, JitterState, Lane};
 use crate::rng::Xoshiro256StarStar;
 use crate::runtime::{Lifecycle, Pending, Runtime, RuntimeError};
 use crate::scheduler::{Event, Scheduler, SchedulerRestoreError, SchedulerSnapshot};
@@ -22,6 +23,11 @@ pub const SNAPSHOT_MAGIC: [u8; 8] = *b"SSSNAP\0\0";
 /// Version of the snapshot layout.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 
+/// Version of the layout of a jittered session's snapshot: version 1 with the jitter
+/// setting and lanes after the topology hash (`docs/m5-design.md` §7.2). An unjittered
+/// session always writes version 1, byte for byte as before M5.
+pub const JITTERED_FORMAT_VERSION: u32 = 2;
+
 /// A snapshot decoded but not yet checked against a session.
 struct Decoded<'a> {
     seed: u64,
@@ -30,6 +36,7 @@ struct Decoded<'a> {
     contracts_version: &'a str,
     clock_domains: Vec<(u32, u64, u64, u64, u8)>,
     topology_hash: [u8; 32],
+    jitter: Option<(Jitter, Vec<[Lane; 2]>)>,
     last_dispatched: Option<EventKey>,
     dispatched_in_phase: u64,
     next_sequence: u64,
@@ -46,7 +53,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         return Err(RestoreError::BadMagic);
     }
     let version = d.u32()?;
-    if version != SNAPSHOT_FORMAT_VERSION {
+    if version != SNAPSHOT_FORMAT_VERSION && version != JITTERED_FORMAT_VERSION {
         return Err(RestoreError::FormatVersion(version));
     }
     let seed = d.u64()?;
@@ -66,6 +73,11 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         clock_domains.push(domain);
     }
     let topology_hash = d.array()?;
+    let jitter = if version == JITTERED_FORMAT_VERSION {
+        Some(JitterState::decode(&mut d)?)
+    } else {
+        None
+    };
     let last_dispatched = match d.u8()? {
         0 => None,
         1 => Some(EventKey::decode(&mut d)?),
@@ -100,6 +112,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         contracts_version,
         clock_domains,
         topology_hash,
+        jitter,
         last_dispatched,
         dispatched_in_phase,
         next_sequence,
@@ -159,13 +172,19 @@ impl Runtime {
         self.require_state(Lifecycle::Ready)?;
         let mut e = Encoder::new();
         e.raw(&SNAPSHOT_MAGIC);
-        e.u32(SNAPSHOT_FORMAT_VERSION);
+        e.u32(match self.jitter {
+            None => SNAPSHOT_FORMAT_VERSION,
+            Some(_) => JITTERED_FORMAT_VERSION,
+        });
         e.u64(self.config.seed);
         e.u64(self.clock.ticks_per_second());
         e.u64(self.config.scheduler.max_events_per_phase);
         e.str(CONTRACTS_VERSION);
         encode_clock_domains(&mut e, &self.domains);
         e.raw(&self.topology_hash);
+        if let Some(jitter) = &self.jitter {
+            jitter.encode(&mut e);
+        }
 
         let scheduler = self.scheduler.snapshot();
         match scheduler.last_dispatched {
@@ -264,6 +283,19 @@ impl Runtime {
         if snap.topology_hash != self.topology_hash {
             return Err(RestoreError::TopologyMismatch);
         }
+        let jitter = match (snap.jitter, self.config.jitter) {
+            (None, None) => None,
+            (Some((found, lanes)), Some(own)) if found == own => Some(
+                JitterState::with_lanes(own, lanes).ok_or(RestoreError::InvalidState(
+                    "not one lane pair per jittered link",
+                ))?,
+            ),
+            _ => {
+                return Err(RestoreError::InvalidState(
+                    "the snapshot's jitter differs from the session's",
+                ));
+            }
+        };
         let entries = self.components.iter().zip(&snap.components);
         for (id, (component, &(_, found, _))) in (0u32..).zip(entries) {
             let expected = component.snapshot_schema_version();
@@ -331,6 +363,7 @@ impl Runtime {
             r.finish()?;
         }
         self.scheduler = scheduler;
+        self.jitter = jitter;
         self.rngs = rngs;
         self.execution_digest = snap.execution_digest;
         Ok(())

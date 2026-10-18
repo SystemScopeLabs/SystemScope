@@ -243,9 +243,15 @@ fn malformed_snapshots_are_rejected() {
         RestoreError::BadMagic
     );
     assert_eq!(
-        restore_error(seed, &doctored(|b, l| put_u32(b, l.format_version, 2))),
-        RestoreError::FormatVersion(2)
+        restore_error(seed, &doctored(|b, l| put_u32(b, l.format_version, 3))),
+        RestoreError::FormatVersion(3)
     );
+    // Version 2 is a jittered session's layout (m5-design §27.1): a version 1 body under
+    // it does not decode.
+    assert!(matches!(
+        restore_error(seed, &doctored(|b, l| put_u32(b, l.format_version, 2))),
+        RestoreError::Decode(_)
+    ));
     assert_eq!(
         restore_error(seed, &doctored(|b, l| b[l.last_dispatched] = 7)),
         RestoreError::Decode(DecodeError::InvalidTag {
