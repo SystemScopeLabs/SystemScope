@@ -1,18 +1,19 @@
-//! M4 reproducer bundles of `m3-reference` (`docs/m4-design.md` §16, §28.2): the
-//! unmodified sides' agreement, SP-1, and CB-1, from the initial states, and CB-1 also
-//! from both sides' checkpoints at its divergence minus the report window. Every bundle
-//! is a pure function of the committed fixtures, so another machine's must equal this
-//! machine's byte for byte and replay here.
+//! M4 reproducer bundles of `m3-reference` (`docs/m4-design.md` §16, §17.2, §28.2): the
+//! unmodified sides' agreement and SP-1 to CB-2 (§25.1), each minimized with a checkpoint
+//! about every 10,000 events. Every bundle is a pure function of the committed fixtures,
+//! so another machine's must equal this machine's byte for byte and replay here.
 
 use std::path::Path;
 
 use systemscope_contracts::trace::Value;
 use systemscope_verify::backend::Backend;
-use systemscope_verify::bundle::{self, Bundle, Case, Manifest, read_dir, replay, write_dir};
+use systemscope_verify::bundle::{Bundle, Case, read_dir, replay, write_dir};
 use systemscope_verify::case::{InputVariant, MediaPatch, StatePatch};
-use systemscope_verify::checkpoint::Checkpoint;
-use systemscope_verify::observation::ObservedValue;
+use systemscope_verify::error::EngineError;
+use systemscope_verify::minimize::minimize;
+use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, plan};
+use systemscope_verify::runtime::RuntimeBackend;
 
 use super::Fixture;
 use super::verify::{self, CPU_PATH};
@@ -21,7 +22,7 @@ use super::verify::{self, CPU_PATH};
 pub const SUFFIX: &str = ".repro";
 
 /// The bundles' names, in emission order.
-pub const NAMES: [&str; 4] = ["agree", "sp1", "cb1", "cb1-checkpoint"];
+pub const NAMES: [&str; 6] = ["agree", "sp1", "sp2", "sp3", "cb1", "cb2"];
 
 fn the_plan(fixture: &Fixture) -> Result<Plan, String> {
     let b = verify::backend(fixture);
@@ -37,29 +38,116 @@ fn u32_of(value: Option<&ObservedValue>) -> Result<u32, String> {
     }
 }
 
+/// The unmodified side's whole `arch` stream, with the backend that recorded it.
+struct Reference {
+    backend: RuntimeBackend,
+    arch: Vec<Observation>,
+}
+
+fn reference(fixture: &Fixture) -> Result<Reference, String> {
+    let mut backend = verify::backend(fixture);
+    let e = |e: EngineError| e.to_string();
+    let scenario = verify::scenario(fixture);
+    backend
+        .start(
+            &scenario,
+            &InputVariant::None,
+            &verify::config(),
+            &verify::profile(),
+        )
+        .map_err(e)?;
+    let mut arch = Vec::new();
+    while let Some(o) = backend.next("arch").map_err(e)? {
+        arch.push(o);
+    }
+    Ok(Reference { backend, arch })
+}
+
+impl Reference {
+    /// The event that emits boundary `b`.
+    fn event(&self, b: usize) -> Result<u64, String> {
+        self.backend
+            .event_index("arch", b as u64)
+            .ok_or_else(|| format!("no event at boundary {b}"))
+    }
+
+    fn u32(&self, b: usize, field: &str) -> Result<u32, String> {
+        let o = self.arch.get(b).ok_or_else(|| format!("no boundary {b}"))?;
+        u32_of(o.field(field)).map_err(|e| format!("arch[{b}].{field}: {e}"))
+    }
+
+    fn is(&self, b: usize, field: &str, value: Value) -> bool {
+        self.arch[b].field(field) == Some(&ObservedValue::Present(value))
+    }
+
+    /// A checkpoint about every 10,000 events, as the same-engine report takes.
+    fn every(&self) -> Result<u64, String> {
+        let n = self.arch.len();
+        Ok(10_000 / (self.event(n - 1)? / n as u64))
+    }
+}
+
+/// Patches the CPU's `field` from `old` to `new` after event `event_index`.
+fn cpu_patch(event_index: u64, field: &str, old: u32, new: u32) -> InputVariant {
+    InputVariant::State(StatePatch {
+        event_index,
+        field: format!("{CPU_PATH}/{field}"),
+        old: Value::U64(old.into()),
+        new: Value::U64(new.into()),
+    })
+}
+
 /// SP-1: `pc ^= 0x4` after boundary 0, where the checkpoint's pc is the next
 /// retirement's.
-fn sp1(fixture: &Fixture) -> Result<InputVariant, String> {
-    let mut b = verify::backend(fixture);
-    let e = |e: systemscope_verify::error::EngineError| e.to_string();
-    let scenario = verify::scenario(fixture);
-    b.start(
-        &scenario,
-        &InputVariant::None,
-        &verify::config(),
-        &verify::profile(),
-    )
-    .map_err(e)?;
-    b.next("arch").map_err(e)?.ok_or("no boundary 0")?;
-    let next = b.next("arch").map_err(e)?.ok_or("no boundary 1")?;
-    let pc = u32_of(next.field("pc"))?;
-    let event_index = b.event_index("arch", 0).ok_or("no event at boundary 0")?;
-    Ok(InputVariant::State(StatePatch {
-        event_index,
-        field: format!("{CPU_PATH}/pc"),
-        old: Value::U64(pc.into()),
-        new: Value::U64((pc ^ 0x4).into()),
-    }))
+fn sp1(r: &Reference) -> Result<InputVariant, String> {
+    let pc = r.u32(1, "pc")?;
+    Ok(cpu_patch(r.event(0)?, "pc", pc, pc ^ 0x4))
+}
+
+/// `rs1` of an `ADD`, `SUB`, `XOR`, `ADDI`, or `XORI` with `rd` and `rs1` not `x0`, and
+/// `rs2 ≠ rs1` for `SUB` and `XOR` (§25.1).
+fn injective_rs1(insn: u32) -> Option<u32> {
+    let (opcode, rd, funct3) = (insn & 0x7f, (insn >> 7) & 0x1f, (insn >> 12) & 0x7);
+    let (rs1, rs2, funct7) = ((insn >> 15) & 0x1f, (insn >> 20) & 0x1f, insn >> 25);
+    let ok = match (opcode, funct3, funct7) {
+        (0x13, 0 | 4, _) => true,
+        (0x33, 0, 0) => true,
+        (0x33, 0, 0x20) | (0x33, 4, 0) => rs2 != rs1,
+        _ => false,
+    };
+    (ok && rd != 0 && rs1 != 0).then_some(rs1)
+}
+
+/// SP-2: `x[rs1] ^= 1` before `r`, the first U-mode retirement of an injective
+/// instruction. Reset leaves the registers 0, and only retirements write them.
+fn sp2(r: &Reference) -> Result<InputVariant, String> {
+    let mut x = [0u32; 32];
+    for (i, o) in r.arch.iter().enumerate() {
+        if o.kind != "retire" {
+            continue;
+        }
+        if r.is(i, "priv", Value::U64(0))
+            && let Some(rs1) = injective_rs1(r.u32(i, "insn")?)
+        {
+            let old = x[rs1 as usize];
+            return Ok(cpu_patch(r.event(i - 1)?, &format!("x{rs1}"), old, old ^ 1));
+        }
+        if let Some(ObservedValue::Present(Value::U64(rd))) = o.field("rd") {
+            x[*rd as usize] = r.u32(i, "rd_value")?;
+        }
+    }
+    Err("no U-mode injective instruction".to_owned())
+}
+
+/// SP-3: `stvec ^= 0x4` before `e`, the first `EnvironmentCallFromU`, where `arch[e + 1]`
+/// is the handler's first instruction.
+fn sp3(r: &Reference) -> Result<InputVariant, String> {
+    let ecall = Value::Str("EnvironmentCallFromU".into());
+    let e = (0..r.arch.len())
+        .find(|&i| r.arch[i].kind == "exception" && r.is(i, "cause", ecall.clone()))
+        .ok_or("no U-mode ecall")?;
+    let stvec = r.u32(e + 1, "pc")?;
+    Ok(cpu_patch(r.event(e - 1)?, "stvec", stvec, stvec ^ 0x4))
 }
 
 fn le32(bytes: &[u8], at: usize) -> Result<u32, String> {
@@ -69,9 +157,9 @@ fn le32(bytes: &[u8], at: usize) -> Result<u32, String> {
         .ok_or_else(|| format!("no word at {at:#x}"))
 }
 
-/// CB-1: `hello`'s entry word, entry 0 of the executable table, becomes `addi x0, x0, 0`,
-/// or `addi x0, x0, 1` if it already is that (`docs/m3-design.md` §8.1).
-fn cb1(fixture: &Fixture) -> Result<InputVariant, String> {
+/// `hello`'s entry word, entry 0 of the executable table (`docs/m3-design.md` §8.1),
+/// replaced by `new` of the word it holds.
+fn code_patch(fixture: &Fixture, new: impl Fn(u32) -> u32) -> Result<InputVariant, String> {
     let disk = &fixture.disk;
     if le32(disk, 0)? != 0x3058_5353 {
         return Err("the disk is not SSX0".to_owned());
@@ -99,33 +187,28 @@ fn cb1(fixture: &Fixture) -> Result<InputVariant, String> {
     }
     let at = lba * 512 + offset.ok_or("e_entry is outside every PT_LOAD segment")? as usize;
     let old = le32(disk, at)?;
-    let new: u32 = if old == 0x0000_0013 {
-        0x0010_0013
-    } else {
-        0x0000_0013
-    };
     Ok(InputVariant::Media(MediaPatch {
         offset: at as u64,
         old: old.to_le_bytes().to_vec(),
-        new: new.to_le_bytes().to_vec(),
+        new: new(old).to_le_bytes().to_vec(),
     }))
 }
 
-/// A side's checkpoint after it emits `boundaries` primary observations.
-fn checkpoint_after(
-    fixture: &Fixture,
-    input: &InputVariant,
-    boundaries: u64,
-) -> Result<Checkpoint, String> {
-    let mut b = verify::backend(fixture);
-    let scenario = verify::scenario(fixture);
-    let e = |e: systemscope_verify::error::EngineError| e.to_string();
-    b.start(&scenario, input, &verify::config(), &verify::profile())
-        .map_err(e)?;
-    for _ in 0..boundaries {
-        b.next("arch").map_err(e)?.ok_or("the stream ended")?;
-    }
-    b.checkpoint().map_err(e)
+/// CB-1: the entry word becomes `addi x0, x0, 0`, or `addi x0, x0, 1` if it already is
+/// that.
+fn cb1(fixture: &Fixture) -> Result<InputVariant, String> {
+    code_patch(fixture, |old| {
+        if old == 0x0000_0013 {
+            0x0010_0013
+        } else {
+            0x0000_0013
+        }
+    })
+}
+
+/// CB-2: the entry word becomes 0, an illegal instruction.
+fn cb2(fixture: &Fixture) -> Result<InputVariant, String> {
+    code_patch(fixture, |_| 0)
 }
 
 /// Every bundle, by name, in [`NAMES`] order.
@@ -133,24 +216,26 @@ pub fn bundles(fixture: &Fixture) -> Result<Vec<(&'static str, Bundle)>, String>
     let plan = the_plan(fixture)?;
     let scenario = verify::scenario(fixture);
     let make = || verify::backend(fixture);
-    let write = |input: InputVariant, origins: [Option<&Checkpoint>; 2]| {
-        let inputs = [InputVariant::None, input];
-        bundle::write(&plan, &scenario, &make, inputs, verify::config(), origins)
-            .map_err(|e| e.to_string())
-    };
-    let cb1 = cb1(fixture)?;
-    let initial = write(cb1.clone(), [None, None])?;
-    let m = Manifest::parse(&initial.entries[bundle::MANIFEST])?;
-    let d = m.primary_divergence.ok_or("CB-1 does not diverge")?.ordinal;
-    let c = d.saturating_sub(u64::from(plan.profile.report_window));
-    let ke = checkpoint_after(fixture, &InputVariant::None, c)?;
-    let ka = checkpoint_after(fixture, &cb1, c)?;
-    Ok(vec![
-        ("agree", write(InputVariant::None, [None, None])?),
-        ("sp1", write(sp1(fixture)?, [None, None])?),
-        ("cb1", initial),
-        ("cb1-checkpoint", write(cb1, [Some(&ke), Some(&ka)])?),
-    ])
+    let r = reference(fixture)?;
+    let every = r.every()?;
+    let inputs = [
+        InputVariant::None,
+        sp1(&r)?,
+        sp2(&r)?,
+        sp3(&r)?,
+        cb1(fixture)?,
+        cb2(fixture)?,
+    ];
+    NAMES
+        .into_iter()
+        .zip(inputs)
+        .map(|(name, input)| {
+            let inputs = [InputVariant::None, input];
+            minimize(&plan, &scenario, &make, inputs, verify::config(), every)
+                .map(|m| (name, m.bundle))
+                .map_err(|e| format!("{name}: {e}"))
+        })
+        .collect()
 }
 
 /// Writes every bundle into `dir`, as `<name>.repro`.
