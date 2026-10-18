@@ -7,6 +7,7 @@ pub mod case;
 pub mod checkpoint;
 pub mod compare;
 pub mod error;
+pub mod latent;
 pub mod locate;
 pub mod observation;
 pub mod profile;

@@ -17,8 +17,9 @@ use systemscope_verify::compare::{
     naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
+use systemscope_verify::latent::{SameSide, first_state_divergence};
 use systemscope_verify::locate::{
-    Located, Strategy, lockstep, record_index, search, stream_compare,
+    Index, Located, Strategy, lockstep, record_index, search, stream_compare,
 };
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
@@ -99,13 +100,14 @@ fn primary(v: &Verdict) -> Verdict {
 /// `expected`, by lockstep, stream compare with either side recorded, and checkpoint
 /// search with no checkpoints, about one per 10,000 events, and one per 997 primary
 /// boundaries. Checks that each finds the naive primary result and the same window, and
-/// returns the lockstep result.
+/// returns the lockstep result and both sides' indexes at about one checkpoint per 10,000
+/// events.
 fn locate_everywhere(
     fixture: &Fixture,
     b: &RuntimeBackend,
     expected: &Recorded,
     input: InputVariant,
-) -> Located {
+) -> (Located, [Index; 2]) {
     let scenario = verify::scenario(fixture);
     let plan = the_plan(b);
     let (_, actual) = record(fixture, input.clone());
@@ -118,6 +120,7 @@ fn locate_everywhere(
     let per_boundary = b.event_index("arch", n - 1).unwrap() / n;
     let pair = || (verify::backend(fixture), verify::backend(fixture));
     let mut results = Vec::new();
+    let mut indexes = Vec::new();
     let (mut x, mut y) = pair();
     let (e, a) = (
         side(&mut x, InputVariant::None),
@@ -150,6 +153,7 @@ fn locate_everywhere(
             side(&mut y, input.clone()),
         );
         results.push(search(&plan, &scenario, (e, &ie), (a, &ia)).unwrap());
+        indexes.push([ie, ia]);
     }
     let window = results[0].window.clone();
     for (i, l) in results.iter().enumerate() {
@@ -176,11 +180,12 @@ fn locate_everywhere(
             assert_eq!(kept[..], whole[w.first as usize..end]);
         }
     }
-    results.swap_remove(0)
+    (results.swap_remove(0), indexes.swap_remove(1))
 }
 
 /// Runs the patched side and checks that the comparator, and the naive oracle, put the
-/// first divergence at `ordinal`, as every locator strategy does against `b`. Returns the
+/// first divergence at `ordinal`, as every locator strategy does against `b`, and that
+/// the sides' states first differ in the CPU at the patch (§12.4). Returns the
 /// divergence, the patched side's failures after it, if any, and the lockstep result.
 fn diverge(
     fixture: &Fixture,
@@ -189,8 +194,32 @@ fn diverge(
     input: InputVariant,
     ordinal: u64,
 ) -> (Divergence, Vec<(Role, EngineError)>, Located) {
-    let located = locate_everywhere(fixture, b, expected, input.clone());
-    let (b, actual) = record(fixture, input);
+    let (located, indexes) = locate_everywhere(fixture, b, expected, input.clone());
+    let (a, actual) = record(fixture, input.clone());
+    // The scan ends where either side emits the divergent observation.
+    let until = [b, &a]
+        .map(|s| s.event_index("arch", ordinal).unwrap())
+        .into_iter()
+        .max()
+        .unwrap();
+    let InputVariant::State(p) = &input else {
+        unreachable!()
+    };
+    let (mut x, mut y) = (verify::backend(fixture), verify::backend(fixture));
+    let state = first_state_divergence(
+        &the_plan(b),
+        &verify::scenario(fixture),
+        same(&mut x, InputVariant::None, &indexes[0]),
+        same(&mut y, input.clone(), &indexes[1]),
+        until,
+    )
+    .unwrap();
+    assert!(state.origin < p.event_index, "{state:?}");
+    assert_eq!(
+        (state.event, &state.differing[..]),
+        (Some(p.event_index), &[CPU_PATH.to_owned()][..])
+    );
+    let b = a;
     assert_eq!(
         naive_first_divergence(&expected[0], &actual.streams[0]),
         Some(ordinal)
@@ -215,6 +244,19 @@ fn diverge(
     assert_eq!((stream.as_str(), at), ("arch", ordinal));
     assert_eq!(located.divergence(), Some((ordinal, &divergence)));
     (divergence, c.failures, located)
+}
+
+fn same<'a>(
+    backend: &'a mut RuntimeBackend,
+    input: InputVariant,
+    index: &'a Index,
+) -> SameSide<'a> {
+    SameSide {
+        backend,
+        input,
+        config: verify::config(),
+        checkpoints: &index.checkpoints,
+    }
 }
 
 /// [`diverge`] on a `retire` whose first differing field is `field`, by a side that still
@@ -245,7 +287,7 @@ fn unmodified_sides_agree_on_every_stream() {
     };
     assert_eq!(c.outcome(), Outcome::Agree);
     assert!(c.not_compared.is_empty());
-    let located = locate_everywhere(&fixture, &b, &expected, InputVariant::None);
+    let (located, _) = locate_everywhere(&fixture, &b, &expected, InputVariant::None);
     assert_eq!(located.verdict, Verdict::Compared(c.clone()));
     assert_eq!(located.window, None);
     let golden = Golden::parse(GOLDEN_JSON).unwrap();

@@ -238,6 +238,30 @@ impl RuntimeBackend {
     pub fn runtime(&self) -> Option<&Runtime> {
         self.session.as_ref().map(|s| &s.runtime)
     }
+
+    /// The events the started side has dispatched.
+    pub fn events(&self) -> Option<u64> {
+        self.session.as_ref().map(|s| s.events)
+    }
+
+    /// Dispatches one event, under the same budget and patch as [`Backend::next`]; its
+    /// observations are queued for `next`. Same-engine only: an event is not a
+    /// comparison boundary (§12.1).
+    pub fn step_event(&mut self) -> Result<(), EngineError> {
+        let RuntimeBackend {
+            session,
+            build,
+            patch,
+            ..
+        } = self;
+        let Some(s) = session.as_mut() else {
+            return Err(EngineError::Internal("step before start".to_owned()));
+        };
+        if let Some(e) = s.shared.borrow().error.clone() {
+            return Err(e);
+        }
+        s.advance(build, patch.as_ref())
+    }
 }
 
 impl Session {

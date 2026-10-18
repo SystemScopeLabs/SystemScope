@@ -531,3 +531,26 @@ fn a_decoder_adds_its_fields_to_every_state_read() {
         ))
     );
 }
+
+#[test]
+fn step_event_dispatches_one_event() {
+    let mut b = backend();
+    assert_eq!(b.events(), None);
+    assert_eq!(
+        b.step_event(),
+        Err(EngineError::Internal("step before start".to_owned()))
+    );
+    let mut b = started(&patch_n(2, 2, 7));
+    for k in 0..4 {
+        assert_eq!(b.events(), Some(k));
+        b.step_event().unwrap();
+    }
+    // The patch after event 2 applies on the way: n becomes 1, 2 (patched to 7), 8, 9.
+    assert_eq!(b.state().unwrap()[0].value, Value::U64(9));
+    // A side whose projection failed keeps its failure.
+    let mut bad = backend_with(true, Some(1));
+    bad.start(&scenario(), &InputVariant::None, &config(), &profile())
+        .unwrap();
+    let e = bad.next("arch").and_then(|_| bad.next("arch")).unwrap_err();
+    assert_eq!(bad.step_event(), Err(e));
+}
