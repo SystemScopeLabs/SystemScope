@@ -288,6 +288,9 @@ proptest! {
             for i in 0..size as u32 {
                 prop_assert_eq!(f.owner(POOL_PPN + i), Some(model[i as usize]));
             }
+            // Neither neighbor of the pool is in it.
+            prop_assert_eq!(f.owner(POOL_PPN - 1), None);
+            prop_assert_eq!(f.owner(POOL_PPN + size as u32), None);
         }
     }
 

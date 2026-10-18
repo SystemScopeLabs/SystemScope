@@ -170,7 +170,10 @@ fn validate_layout(config: &KernelConfig, layout: &UserLayout) -> Result<(), Pla
         base: kernel,
         size: MEGAPAGE,
     };
-    if !kernel.is_multiple_of(MEGAPAGE) || kernel + MEGAPAGE > PHYS_LIMIT {
+    // Below the Sv32 limit needs no check: `KernelConfig::validate` puts the trap frame,
+    // a 32-bit address, in the RAM, so the RAM base is below 4 GiB and the aligned kernel
+    // megapage ends at 4 GiB at most.
+    if !kernel.is_multiple_of(MEGAPAGE) {
         return layout_err("the RAM base is not a 4 MiB aligned Sv32 address");
     }
     let frame = config.frame();
@@ -184,7 +187,8 @@ fn validate_layout(config: &KernelConfig, layout: &UserLayout) -> Result<(), Pla
     if !pool.base.is_multiple_of(PAGE) || !pool.size.is_multiple_of(PAGE) {
         return layout_err("the frame pool is not page-aligned");
     }
-    if pool.base + pool.size > PHYS_LIMIT || pool.size / PAGE > u64::from(u32::MAX) {
+    // Below the limit, the pool holds at most 2^22 frames, so a frame count fits a u32.
+    if pool.base + pool.size > PHYS_LIMIT {
         return layout_err("the frame pool is not reachable by Sv32");
     }
     if mega.overlaps(pool.base, pool.size) {
@@ -290,9 +294,10 @@ pub struct DiskBoot {
 impl DiskBoot {
     /// Checks the configuration and the disk boot: the megapage and layout rules of
     /// [`ProcessPlan::validate`], and what the block controller needs (§8.2): a disk of at
-    /// least one block; staging 16-byte aligned (the controller's `MEM_ADDR` rule), able to
-    /// hold block 0, and below 4 GiB (`MEM_ADDR` is 32 bits); and a block controller
-    /// window that holds every register up to `ACK`.
+    /// least one block; staging 16-byte aligned (the controller's `MEM_ADDR` rule) and able
+    /// to hold block 0; and a block controller window that holds every register up to
+    /// `ACK`. Staging is also below 4 GiB (`MEM_ADDR` is 32 bits), which the kernel
+    /// megapage already ensures.
     pub fn validate(&self, config: &KernelConfig) -> Result<(), PlanError> {
         validate_layout(config, &self.layout)?;
         let staging = config.staging;
@@ -305,9 +310,8 @@ impl DiskBoot {
         if staging.size < BLOCK_SIZE as u64 {
             return Err(PlanError::Disk("staging cannot hold block 0"));
         }
-        if staging.base + staging.size > 1 << 32 {
-            return Err(PlanError::Disk("staging is not below 4 GiB"));
-        }
+        // Staging is below 4 GiB already: `validate_layout` puts it in the kernel
+        // megapage, which ends at 4 GiB at most.
         if config.blk.size < BLK_REGISTERS {
             return Err(PlanError::Disk(
                 "the block controller window does not hold its registers",
@@ -316,7 +320,7 @@ impl DiskBoot {
         Ok(())
     }
 
-    /// The staging size, as the table check takes it (below 4 GiB, checked above).
+    /// The staging size, as the table check takes it (below 4 GiB, as validated).
     pub fn staging_size(config: &KernelConfig) -> u32 {
         u32::try_from(config.staging.size).unwrap_or(u32::MAX)
     }

@@ -32,6 +32,9 @@ use crate::core::{Access, MAX_ACCESS, PAGE};
 use crate::image::{BootImage, MMIO_MEGAPAGE, UserLayout, kernel_megapage, valid_perms, vpn1};
 use crate::pte;
 
+/// The zeroing writes of one frame.
+const ZERO_STEPS_PER_FRAME: usize = (PAGE / MAX_ACCESS) as usize;
+
 /// The stack's permissions: read and write.
 pub const STACK_PERMS: Perms = Perms {
     read: true,
@@ -244,7 +247,7 @@ impl Space {
     }
 
     fn zero_steps(&self) -> usize {
-        self.frames.len() * (PAGE / MAX_ACCESS) as usize
+        self.frames.len() * ZERO_STEPS_PER_FRAME
     }
 
     /// The number of accesses the creation makes.
@@ -267,11 +270,10 @@ impl Space {
     /// or `None` past the last one.
     pub fn access(&self, step: u32, data: &[u8]) -> Option<Access> {
         let step = step as usize;
-        let per_frame = (PAGE / MAX_ACCESS) as usize;
         let zero = self.zero_steps();
         if step < zero {
-            let frame = u64::from(self.frames[step / per_frame]);
-            let addr = frame * PAGE + (step % per_frame) as u64 * MAX_ACCESS;
+            let frame = u64::from(self.frames[step / ZERO_STEPS_PER_FRAME]);
+            let addr = frame * PAGE + (step % ZERO_STEPS_PER_FRAME) as u64 * MAX_ACCESS;
             return Some(Access::Write {
                 addr,
                 data: vec![0; MAX_ACCESS as usize],
@@ -297,14 +299,11 @@ impl Space {
 }
 
 /// `len` bytes from `src` to `dst` as copies of at most [`MAX_ACCESS`] bytes that cross
-/// no page on either side.
+/// no page on either side. The destination needs no bound: a page's file bytes lie in it.
 fn split_copy(mut src: u64, mut dst: u64, len: u64, out: &mut Vec<(u64, u64, u32)>) {
     let end = src + len;
     while src < end {
-        let n = (end - src)
-            .min(MAX_ACCESS)
-            .min(PAGE - src % PAGE)
-            .min(PAGE - dst % PAGE);
+        let n = (end - src).min(MAX_ACCESS).min(PAGE - src % PAGE);
         out.push((src, dst, n as u32));
         src += n;
         dst += n;

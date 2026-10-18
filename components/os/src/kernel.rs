@@ -1680,10 +1680,9 @@ fn check_life(model: &mut Model, work: Option<&Work>) -> Result<(), RestoreError
     checked
         .check(model.entries, creating)
         .map_err(|v| invalid(v.0))?;
+    // An operation before boot needs no check: `proc_op` accepts every stage only with the
+    // kernel up, or down for a shutdown.
     match (model.life, work) {
-        (Life::AwaitBoot, Some(_)) => {
-            return Err(invalid("modeled kernel: an operation before boot"));
-        }
         (Life::AwaitBoot, None) if !procs.pcbs().is_empty() => {
             return Err(invalid("modeled kernel: processes before boot"));
         }

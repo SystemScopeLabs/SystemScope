@@ -844,6 +844,13 @@ fn restore_rejects_every_impossible_process_table() {
             Box::new(|s| s.pcbs[0].regions[1].0 += 4096),
         ),
         ("PID outside the plan", Box::new(|s| s.pcbs[1].pid = 9)),
+        (
+            "a frame fewer than the image needs",
+            Box::new(|s| {
+                let f = s.pcbs[0].regions.last_mut().unwrap().2.pop().unwrap();
+                s.free(f);
+            }),
+        ),
         ("PIDs out of order", Box::new(|s| s.pcbs.swap(0, 1))),
         (
             "terminal process with frames",
@@ -1001,7 +1008,21 @@ fn restore_rejects_every_impossible_process_table() {
             *pid = 3;
         }
     };
+    let hole = |s: &mut Snap| {
+        if let Some(ksnap::Op {
+            stage: Stage::Create { frames, .. },
+            ..
+        }) = &mut s.op
+        {
+            for f in &mut frames[1..] {
+                *f += 1;
+            }
+        }
+        s.bitmap[0] = 0xFD;
+        s.bitmap[1] = 0b111;
+    };
     let unmarked = |s: &mut Snap| s.bitmap[0] = 0xFE;
+    let after_shutdown = |s: &mut Snap| s.life = 2;
     for (why, m) in [
         (
             "creation frames not the lowest free",
@@ -1009,12 +1030,38 @@ fn restore_rejects_every_impossible_process_table() {
         ),
         ("creation with too few frames", &fewer),
         ("creation PID outside the plan", &pid_in_use),
+        ("creation frames above a hole", &hole),
         ("creation frame not marked", &unmarked),
+        ("creation after shutdown", &after_shutdown),
     ] {
         let mut s = creating.clone();
         m(&mut s);
         assert_rejected(&s.encode(), why);
     }
+    // The booted table with one process's creation back in flight: while another runs, or
+    // below a live PID.
+    let in_flight = |pid: u32, current: Option<u32>| {
+        let mut s = good.clone();
+        let i = s.pcbs.iter().position(|p| p.pid == pid).unwrap();
+        let p = s.pcbs.remove(i);
+        let mut frames: Vec<u32> = p.regions.iter().flat_map(|r| &r.2).copied().collect();
+        frames.extend(&p.tables);
+        frames.sort_unstable();
+        s.queue.retain(|&q| q != pid);
+        s.current = current;
+        (s.state, s.wait_txn, s.held, s.next_txn) = (
+            creating.state,
+            creating.wait_txn,
+            creating.held,
+            creating.next_txn,
+        );
+        let mut op = creating.op.clone().unwrap();
+        op.stage = Stage::Create { pid, frames };
+        s.op = Some(op);
+        s.encode()
+    };
+    assert_rejected(&in_flight(2, Some(1)), "creation while a process runs");
+    assert_rejected(&in_flight(1, None), "creation below a live PID");
     // The other mode's snapshots.
     let proto = ModeledKernel::new(config_with_pool(64)).unwrap();
     assert_rejected(&snapshot_of(&proto), "prototype snapshot");
@@ -1145,4 +1192,45 @@ fn inspect_shows_the_process_table() {
         ))
     );
     assert_eq!(s(&h, "free_frames"), Value::U64(64 - 9));
+}
+
+#[test]
+fn creation_zeroes_every_frame_it_gives_a_process() {
+    // A dirty pool: a stack page holds no file bytes, so it is all zeroing.
+    let files = [prog_a(), prog_b()];
+    let mut h = Harness::new(config_with_pool(64), &files, plan_of(&files));
+    h.mem.write(POOL, &[0xAA; 64 * 4096]);
+    h.boot();
+    let procs = h.k.processes().unwrap();
+    assert_eq!(procs.pcbs().len(), 2);
+    for pcb in procs.pcbs() {
+        for &f in &pcb.regions.last().unwrap().frames {
+            let page = h.mem.read(u64::from(f) * 4096, 4096);
+            assert!(page.iter().all(|&b| b == 0), "PID {} frame {f:#x}", pcb.pid);
+        }
+    }
+}
+
+#[test]
+fn creation_reads_exactly_the_file_bytes_of_each_page() {
+    let files = [prog_a(), prog_b()];
+    let plan = plan_of(&files);
+    let mut h = Harness::new(config_with_pool(64), &files, plan.clone());
+    h.boot();
+    let staging = config().staging;
+    let read: usize = h
+        .seen
+        .iter()
+        .filter(|(write, addr, _)| {
+            !write && (staging.base..staging.base + staging.size).contains(addr)
+        })
+        .map(|(_, _, bytes)| bytes.len())
+        .sum();
+    let file_bytes: u32 = plan
+        .images
+        .iter()
+        .flat_map(|b| model::pages(b, &plan.layout))
+        .filter_map(|p| p.4.map(|(_, _, len)| len))
+        .sum();
+    assert_eq!(read, file_bytes as usize);
 }

@@ -776,6 +776,7 @@ impl Raw {
 #[test]
 fn hand_written_snapshots_restore() {
     assert_eq!(kernel().snapshot_schema_version(), SNAPSHOT_SCHEMA);
+    assert_eq!(kernel().type_name(), "os.modeled_kernel");
     assert_eq!(snapshot_of(&kernel()), Raw::idle().encode());
     let mut k = kernel();
     restore_into(&mut k, &Raw::waiting().encode()).unwrap();

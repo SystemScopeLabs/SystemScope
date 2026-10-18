@@ -1028,6 +1028,12 @@ pub mod ksnap {
             e.bytes(&self.bitmap);
             e.into_bytes()
         }
+
+        /// Marks the pool frame `ppn` free in the bitmap.
+        pub fn free(&mut self, ppn: u32) {
+            let i = (ppn - (crate::common::layout::POOL / 4096) as u32) as usize;
+            self.bitmap[i / 8] &= !(1 << (i % 8));
+        }
     }
 
     /// The prefix length of a kernel whose pool has `frames` frames, from the snapshot of

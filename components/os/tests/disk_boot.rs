@@ -764,6 +764,15 @@ fn a_restored_disk_kernel_checks_its_live_processes_against_their_regions() {
     let mut p = snap.clone();
     p.pcbs[0].regions[1].1 &= !0b0010;
     assert!(rejects(&p), "W without R");
+    // A region off a page.
+    let mut off = snap.clone();
+    off.pcbs[0].regions[1].0 += 4;
+    assert!(rejects(&off), "a region off a page");
+    // A level-0 table fewer than the regions need, its frame released.
+    let mut fewer = snap.clone();
+    let table = fewer.pcbs[1].tables.pop().unwrap();
+    fewer.free(table);
+    assert!(rejects(&fewer), "a table too few");
     // The component still works after all the rejected restores.
     let mut k = ModeledKernel::with_disk(config_with_pool(3072), boot_config()).unwrap();
     restore_into(&mut k, &bytes).unwrap();

@@ -10,7 +10,7 @@ use systemscope_elf::Perms;
 use crate::image::perm_bits;
 
 /// Valid.
-pub const V: u32 = 1 << 0;
+pub const V: u32 = 1;
 /// Readable.
 pub const R: u32 = 1 << 1;
 /// Writable.
