@@ -127,6 +127,12 @@ impl PrefixDigest {
         }
     }
 
+    /// Continues a stream whose first `count` observations have prefix digest `digest`,
+    /// as recorded at a checkpoint (§12.1).
+    pub fn resume(digest: [u8; 32], count: u64) -> PrefixDigest {
+        PrefixDigest { digest, count }
+    }
+
     /// Absorbs the next observation of the stream.
     pub fn absorb(&mut self, obs: &Observation) {
         let mut h = blake3::Hasher::new();

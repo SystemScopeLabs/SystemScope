@@ -10,6 +10,8 @@ pub enum EngineError {
     BackendFailed(String),
     /// A capability-gated call was made on a backend without the capability.
     Unsupported(&'static str),
+    /// A checkpoint's recorded boundary counts or prefix digests do not match a replay.
+    BoundaryDesync(String),
     /// An invariant of the engine itself failed.
     Internal(String),
 }
@@ -19,6 +21,7 @@ impl fmt::Display for EngineError {
         match self {
             EngineError::BackendFailed(why) => write!(f, "backend failed: {why}"),
             EngineError::Unsupported(what) => write!(f, "unsupported: {what}"),
+            EngineError::BoundaryDesync(why) => write!(f, "boundary desync: {why}"),
             EngineError::Internal(why) => write!(f, "internal error: {why}"),
         }
     }

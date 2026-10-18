@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use crate::case::{BackendId, BackendRunConfig, InputVariant, Scenario};
+use crate::checkpoint::Checkpoint;
 use crate::compare::{Recorded, Recording, Verdict, compare_recordings};
 use crate::error::EngineError;
 use crate::observation::Observation;
@@ -21,6 +22,10 @@ pub enum Capability {
     StepBoundary,
     /// The same scenario and input variant give the same streams.
     DeterministicReplay,
+    /// A checkpoint of the current state at an event boundary.
+    Snapshot,
+    /// Resume from one of the side's own checkpoints.
+    Restore,
 }
 
 /// A backend's declared capabilities.
@@ -46,6 +51,21 @@ pub trait Backend {
     /// The next boundary of `stream`, or `None` once the stop rule is reached. Requires
     /// [`Capability::StepBoundary`].
     fn next(&mut self, stream: &str) -> Result<Option<Observation>, EngineError>;
+    /// The observations of `stream` already emitted and not yet taken, without advancing.
+    /// Requires [`Capability::StepBoundary`].
+    fn emitted(&mut self, _stream: &str) -> Result<Vec<Observation>, EngineError> {
+        Err(EngineError::Unsupported("emitted"))
+    }
+    /// A checkpoint of the current state, covering every boundary emitted so far.
+    /// Requires [`Capability::Snapshot`].
+    fn checkpoint(&self) -> Result<Checkpoint, EngineError> {
+        Err(EngineError::Unsupported("checkpoint"))
+    }
+    /// Resumes a started side from one of its own checkpoints: each stream continues at
+    /// the checkpoint's covered count. Requires [`Capability::Restore`].
+    fn restore(&mut self, _checkpoint: &Checkpoint) -> Result<(), EngineError> {
+        Err(EngineError::Unsupported("restore"))
+    }
     /// The whole stream up to the stop rule.
     fn record(&mut self, stream: &str) -> Result<Vec<Observation>, EngineError> {
         if !self.capabilities().contains(&Capability::StepBoundary) {

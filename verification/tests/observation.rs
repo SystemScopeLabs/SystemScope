@@ -158,6 +158,11 @@ fn the_prefix_digest_chains_blake3_over_each_encoding() {
     p.absorb(&b);
     let p2 = *blake3::hash(&[p1.as_slice(), &b.to_bytes()].concat()).as_bytes();
     assert_eq!((p.digest(), p.count()), (p2, 2));
+    // Resuming from `P(1)` continues exactly where the uninterrupted digest is.
+    let mut r = PrefixDigest::resume(p1, 1);
+    assert_eq!((r.digest(), r.count()), (p1, 1));
+    r.absorb(&b);
+    assert_eq!(r, p);
 }
 
 #[test]

@@ -4,6 +4,7 @@
 
 pub mod backend;
 pub mod case;
+pub mod checkpoint;
 pub mod compare;
 pub mod error;
 pub mod observation;

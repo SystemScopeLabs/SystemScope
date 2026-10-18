@@ -6,6 +6,7 @@ use systemscope_verify::backend::{Backend, Capabilities, Capability};
 use systemscope_verify::case::{
     BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch, execution_id,
 };
+use systemscope_verify::checkpoint::Checkpoint;
 use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{ComparisonProfile, Support};
@@ -200,6 +201,24 @@ fn the_default_record_steps_to_the_stop_rule_and_needs_step_boundary() {
 }
 
 #[test]
+fn checkpoints_and_emitted_observations_are_unsupported_by_default() {
+    let mut b = Fixed {
+        step: true,
+        left: 3,
+    };
+    assert_eq!(b.emitted("arch"), Err(EngineError::Unsupported("emitted")));
+    assert_eq!(b.checkpoint(), Err(EngineError::Unsupported("checkpoint")));
+    let c = Checkpoint {
+        execution: [0; 32],
+        event_index: 0,
+        streams: Vec::new(),
+        state: Vec::new(),
+    };
+    assert_eq!(b.restore(&c), Err(EngineError::Unsupported("restore")));
+    assert_eq!(b.left, 3);
+}
+
+#[test]
 fn engine_errors_say_what_failed() {
     let cases = [
         (
@@ -208,6 +227,10 @@ fn engine_errors_say_what_failed() {
         ),
         (EngineError::Unsupported("record"), "unsupported: record"),
         (EngineError::Internal("y".to_owned()), "internal error: y"),
+        (
+            EngineError::BoundaryDesync("z".to_owned()),
+            "boundary desync: z",
+        ),
     ];
     for (e, text) in cases {
         assert_eq!(e.to_string(), text);
