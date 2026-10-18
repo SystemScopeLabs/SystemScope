@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.0 complete, M5.1 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.1 complete, M5.2 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -379,14 +379,16 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | O3 | Idle when every process is blocked | **Decided (D10):** a spin loop in the trampoline. `WFI` would need a new CPU wait state and snapshot field, and Spike can be compared on it only with an interrupt already pending |
 | O4 | Reproducer bundle version bump | only if the manifest schema changes |
 | O5 | Seed counts and ranges per mechanism | frozen in M5.6 from measured cost |
+| O6 | How a trace records the perturbation (§7.4). `TraceHeader` is a contracts type, so a header field would move the contracts pin, which M5 keeps | at M5.4, with the evidence that reads it. Candidates: a runtime-origin record at the start of a perturbed trace, or the bundle's `perturbation.bin` alone (§27.1) |
+| O7 | How a message's jitter is recorded with its delivery (§7.4) | at M5.4, with O6 |
 
 ## 25. Roadmap
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
 | **M5.0** | complete | Design freeze (this document) | docs |
-| **M5.1** | next | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
-| **M5.2** | planned | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
+| **M5.1** | complete | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
+| **M5.2** | next | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
 | **M5.3** | planned | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
 | **M5.4** | planned | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
 | **M5.5** | planned | Workload programs and planted races R1–R5; campaigns over A and B | code, CI |
@@ -405,3 +407,18 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 - [ ] **Coverage.** Architectural, schedule, and perturbation coverage are reported for `m5-reference` and `m3-reference`.
 - [ ] **Spike.** The `M5` profile's directed SEI tests agree with the pinned Spike.
 - [ ] **Mutation.** Every source mutant of the M5 paths is detected by a campaign, or listed as equivalent with its reason.
+
+## 27. Revisions
+
+### 27.1 M5.1
+
+M5.1 implemented A and B and their snapshot state. Every M0–M4 golden, expected stream, corpus entry, and reproducer passes unchanged: an unperturbed session takes the M0–M4 path and writes the same snapshot bytes. The M2 and M3 reference scenarios pass under B on every link and under A overrides, and no component faulted on a late delivery (§23).
+
+| Section | Revision | Why |
+|---|---|---|
+| §7.1 | A is `perturb::Latencies` in the `m2-reference` and `m3-reference` builders' `Config`: link cycles by declaration index (`1..=64`) and response cycles by target path (`0..=64`). The builder rejects an unknown link or path, or a value out of range | links have no path of their own, and the builders already declare them in a fixed order. The bounds keep every override a whole number of cycles (§20) and campaigns finite |
+| §7.2 | B is `runtime::jitter::Jitter { seed, max_cycles, links }`, a field of `SessionConfig`. `links` is a set of declaration indices. Elaboration rejects `max_cycles = 0`, an empty set, an undeclared link, and a link without a `Cycles` latency. `j` is the first 8 bytes of `blake3::derive_key("SystemScope 2026-10 jitter v1", seed ‖ link ‖ dir ‖ ordinal)`, little-endian, modulo `max_cycles + 1`. Each direction of a link is its own lane, with its own ordinal and latest tick | a jitter of `j` cycles is defined only for a `Cycles` link. Directions are separate FIFO channels, so one end's traffic does not shift the other's draws |
+| §7.2, §7.4, §19 | A jittered session writes snapshot format version 2: version 1 with the setting and every lane after `topology_hash`. Restore rejects a snapshot whose setting differs from the session's (`InvalidState`). The setting is not part of `topology_hash`, and an unjittered session still writes version 1 | the snapshot is what makes the setting part of the session identity. Leaving `topology_hash` alone keeps A and B separable in evidence |
+| §7.4 | The trace does not record the perturbation yet (O6, O7) | `TraceHeader` is a contracts type. M5.4 decides the record with the evidence that reads it |
+
+`m2ref::components`, the M2 tests' snapshot reader, reads version 2. The other hand-written snapshot readers (`tests/acceptance` layout and portable decoder, the OS test helpers) read only unperturbed snapshots and are unchanged. AT2's malformed-snapshot test now uses version 3 as the unknown version, and checks that a version 1 body labeled version 2 does not decode.
