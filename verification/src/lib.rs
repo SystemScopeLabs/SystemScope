@@ -2,4 +2,7 @@
 //!
 //! See `docs/m4-design.md` for the specification.
 
+pub mod compare;
+pub mod error;
 pub mod observation;
+pub mod profile;
