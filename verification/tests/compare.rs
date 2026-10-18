@@ -1,6 +1,7 @@
 //! Profiles, the field-support plan, and the comparator (`docs/m4-design.md` §6.4–§6.7,
 //! §10, and the M4.1 engine mutation classes of §25.2).
 
+use systemscope_contracts::canonical::Encoder;
 use systemscope_contracts::trace::Value;
 use systemscope_verify::compare::{
     Comparison, Divergence, FieldDiff, Outcome, Recorded, Recording, StreamResult, Verdict,
@@ -479,6 +480,46 @@ fn the_profile_identity_covers_every_rule() {
         assert_ne!(p.identity(), base, "change {i}");
     }
     assert_eq!(profile().identity(), base);
+}
+
+#[test]
+fn the_profile_encoding_is_canonical() {
+    let p = ComparisonProfile {
+        name: "n".to_owned(),
+        version: 1,
+        primary: StreamSpec {
+            stream: "arch".to_owned(),
+            kinds: vec![KindSpec {
+                kind: "retire".to_owned(),
+                fields: vec![field("pc", Requirement::Required, false)],
+                excluded: vec!["next_pc".to_owned()],
+            }],
+            window: String::new(),
+        },
+        auxiliary: Vec::new(),
+        stop_rule: "s".to_owned(),
+        report_window: 3,
+    };
+    let mut e = Encoder::new();
+    p.encode(&mut e);
+    let mut want = Encoder::new();
+    want.str("n");
+    want.u32(1);
+    want.str("arch");
+    want.len(1);
+    want.str("retire");
+    want.len(1);
+    want.str("pc");
+    want.bool(true);
+    want.bool(false);
+    want.len(1);
+    want.str("next_pc");
+    want.str("");
+    want.len(0);
+    want.str("s");
+    want.u32(3);
+    assert_eq!(e.as_bytes(), want.as_bytes());
+    assert_eq!(p.identity(), *blake3::hash(want.as_bytes()).as_bytes());
 }
 
 #[test]

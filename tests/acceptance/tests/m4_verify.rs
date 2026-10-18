@@ -144,6 +144,9 @@ fn unmodified_sides_agree_on_every_stream() {
         unreachable!()
     };
     assert_eq!(compared, g.instret + g.exceptions + 1);
+    // The frozen per-kind counts of `docs/m4-design.md` §28.1.
+    let kinds = |k: &str| expected[0].iter().filter(|o| o.kind == k).count();
+    assert_eq!((kinds("retire"), kinds("exception")), (2_176, 23 + 1));
     let last = expected[0].last().unwrap();
     assert_eq!(last.kind, "exception");
     assert!(is(last, "cause", Value::Str(g.halt.clone())));

@@ -111,6 +111,13 @@ fn a_forged_field_count_is_refused_before_allocating() {
     let n = bytes.len();
     bytes[n - 4..].copy_from_slice(&u32::MAX.to_le_bytes());
     assert_eq!(decode(&bytes), Err(DecodeError::Truncated));
+    // Three fields cannot fit in ten bytes, so the count is refused before the first
+    // field's undefined tag is read.
+    let mut bytes = obs(0, "k", Vec::new()).to_bytes();
+    let n = bytes.len();
+    bytes[n - 4..].copy_from_slice(&3u32.to_le_bytes());
+    bytes.extend([0, 0, 0, 0, 0x07, 0, 0, 0, 0, 0]);
+    assert_eq!(decode(&bytes), Err(DecodeError::Truncated));
 }
 
 #[test]
