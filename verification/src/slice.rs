@@ -37,6 +37,13 @@ pub enum Link {
     /// A kernel gate's held `ENTER`: the write that entered it, `os.gate.enter`, the
     /// kernel's own memory accesses, and `os.gate.release`.
     Gate,
+    /// A bus's transaction renaming, from its `platform.bus.grant` record: a downstream
+    /// request follows the grant and the master request it forwards, and a response
+    /// relayed to a master follows the grant and the downstream response.
+    Rename,
+    /// Derived, not recorded: a store whose bytes a load returned, found by replaying the
+    /// window's writes through the bus (§15's data dependence).
+    Store,
 }
 
 impl Link {
@@ -48,6 +55,8 @@ impl Link {
             Link::Trap => 3,
             Link::Dma => 4,
             Link::Gate => 5,
+            Link::Rename => 6,
+            Link::Store => 7,
         }
     }
 
@@ -59,6 +68,8 @@ impl Link {
             Link::Trap => "trap",
             Link::Dma => "dma",
             Link::Gate => "gate",
+            Link::Rename => "rename",
+            Link::Store => "store (derived)",
         }
     }
 }
@@ -90,6 +101,20 @@ pub struct Slice {
     pub first: u64,
     /// The included records in trace order, the divergent one last.
     pub entries: Vec<SliceEntry>,
+    /// Loaded bytes no store in the window gives, so the slice has no data link for
+    /// them: written before the window, or by no recorded write.
+    pub unresolved: Vec<Unresolved>,
+}
+
+/// Bytes a load returned that no replayed store in the window gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unresolved {
+    /// The index after the origin of the load's response.
+    pub record: u64,
+    /// The first byte's address, as the master addressed it.
+    pub addr: u64,
+    /// The number of bytes.
+    pub len: u64,
 }
 
 impl Slice {
@@ -102,6 +127,12 @@ impl Slice {
             e.u64(s.record);
             e.u8(s.link.tag());
             s.line.encode(e);
+        }
+        e.len(self.unresolved.len());
+        for u in &self.unresolved {
+            e.u64(u.record);
+            e.u64(u.addr);
+            e.u64(u.len);
         }
     }
 
@@ -120,6 +151,8 @@ impl Slice {
                 3 => Link::Trap,
                 4 => Link::Dma,
                 5 => Link::Gate,
+                6 => Link::Rename,
+                7 => Link::Store,
                 tag => return Err(DecodeError::InvalidTag { what: "link", tag }),
             };
             entries.push(SliceEntry {
@@ -128,10 +161,20 @@ impl Slice {
                 line: TraceLine::decode(d)?,
             });
         }
+        let n = d.len()?;
+        let mut unresolved = Vec::new();
+        for _ in 0..n {
+            unresolved.push(Unresolved {
+                record: d.u64()?,
+                addr: d.u64()?,
+                len: d.u64()?,
+            });
+        }
         Ok(Slice {
             role,
             first,
             entries,
+            unresolved,
         })
     }
 }
@@ -209,6 +252,7 @@ pub fn slice(records: &[TraceRecord], first: u64, paths: &[String], role: Role) 
             role,
             first,
             entries: Vec::new(),
+            unresolved: Vec::new(),
         };
     };
     links[anchor] = Some(Link::Divergent);
@@ -216,6 +260,8 @@ pub fn slice(records: &[TraceRecord], first: u64, paths: &[String], role: Role) 
     let devices = emitters(records, "platform.blk.command");
     let mut media = emitters(records, "platform.disk.read");
     media.extend(emitters(records, "platform.disk.write"));
+    let buses = emitters(records, "platform.bus.grant");
+    let mut unresolved = Vec::new();
     // Every link reaches back only, so one pass from the divergent record down sees
     // every included record before its predecessors.
     for i in (0..=anchor).rev() {
@@ -244,7 +290,20 @@ pub fn slice(records: &[TraceRecord], first: u64, paths: &[String], role: Role) 
         for j in dma(before, r, &devices, &media) {
             add(j, Link::Dma);
         }
+        for j in rename(before, r, &buses) {
+            add(j, Link::Rename);
+        }
+        let (stores, missing) = stores(before, r, &buses);
+        for j in stores {
+            add(j, Link::Store);
+        }
+        unresolved.extend(missing.into_iter().map(|(addr, len)| Unresolved {
+            record: first + i as u64,
+            addr,
+            len,
+        }));
     }
+    unresolved.sort_by_key(|u| (u.record, u.addr));
     let entries = links
         .iter()
         .enumerate()
@@ -260,6 +319,7 @@ pub fn slice(records: &[TraceRecord], first: u64, paths: &[String], role: Role) 
         role,
         first,
         entries,
+        unresolved,
     }
 }
 
@@ -461,4 +521,115 @@ fn dma(before: &[TraceRecord], r: &TraceRecord, devices: &[u64], media: &[u64]) 
         }
     }
     out
+}
+
+fn bytes<'r>(r: &'r TraceRecord, name: &str) -> Option<&'r [u8]> {
+    match field(r, name) {
+        Some(Value::Bytes(b)) => Some(b),
+        _ => None,
+    }
+}
+
+/// The latest grant of bus `b` in `before` that `want` accepts.
+fn grant(before: &[TraceRecord], b: u64, want: impl Fn(&TraceRecord) -> bool) -> Option<usize> {
+    before
+        .iter()
+        .rposition(|q| q.kind == "platform.bus.grant" && component(q) == Some(b) && want(q))
+}
+
+/// The master request a grant forwards: the latest request to the bus on the granted
+/// master's port with the master's `txn`. A bus's master ports come first, in master
+/// order, so the master index is the port.
+fn granted(before: &[TraceRecord], g: &TraceRecord, b: u64) -> Option<usize> {
+    let (master, txn) = (int(g, "master")?, int(g, "txn")?);
+    before.iter().rposition(|q| {
+        dispatch(q).is_some_and(|d| {
+            d.target == b
+                && REQUESTS.contains(&d.msg)
+                && int(q, "port") == Some(master)
+                && int(q, "txn") == Some(txn)
+        })
+    })
+}
+
+/// A bus's renaming: from a downstream request to its grant (downstream ids are never
+/// reused), from a grant to the master request, and from a response relayed to a master
+/// to the grant of that master's request and the downstream response.
+fn rename(before: &[TraceRecord], r: &TraceRecord, buses: &[u64]) -> Vec<usize> {
+    let mut out = Vec::new();
+    for &b in buses {
+        if r.kind == "platform.bus.grant" && component(r) == Some(b) {
+            out.extend(granted(before, r, b));
+            continue;
+        }
+        let Some(d) = dispatch(r).filter(|d| d.source == b) else {
+            continue;
+        };
+        let Some(txn) = int(r, "txn") else {
+            continue;
+        };
+        if REQUESTS.contains(&d.msg) {
+            out.extend(grant(before, b, |g| int(g, "downstream_txn") == Some(txn)));
+        } else if RESPONSES.contains(&d.msg) {
+            // The grant of this master's request with that `txn`.
+            let Some(g) = grant(before, b, |g| {
+                int(g, "txn") == Some(txn)
+                    && granted(before, g, b)
+                        .is_some_and(|m| dispatch(&before[m]).is_some_and(|x| x.source == d.target))
+            }) else {
+                continue;
+            };
+            out.push(g);
+            let down = int(&before[g], "downstream_txn");
+            out.extend((g + 1..before.len()).rev().find(|&j| {
+                dispatch(&before[j]).is_some_and(|x| {
+                    x.target == b && RESPONSES.contains(&x.msg) && int(&before[j], "txn") == down
+                })
+            }));
+        }
+    }
+    out
+}
+
+/// A load's data dependence, derived: for a read response a bus relays to a master, the
+/// latest write through that bus before the read's request that covers each loaded
+/// byte, kept if it wrote the byte the load returned. Returns the writes and the address
+/// ranges no write in the window gives.
+fn stores(before: &[TraceRecord], r: &TraceRecord, buses: &[u64]) -> (Vec<usize>, Vec<(u64, u64)>) {
+    let mut found = Vec::new();
+    let mut missing: Vec<(u64, u64)> = Vec::new();
+    let Some(d) = dispatch(r).filter(|d| buses.contains(&d.source) && d.msg == "ReadResp") else {
+        return (found, missing);
+    };
+    let (Some(data), Some(req)) = (bytes(r, "data"), request(before, r)) else {
+        return (found, missing);
+    };
+    let Some(addr) = int(&before[req], "addr") else {
+        return (found, missing);
+    };
+    let covers = |q: &TraceRecord, a: u64| {
+        dispatch(q).is_some_and(|x| x.target == d.source && x.msg == "WriteReq")
+            && int(q, "addr")
+                .zip(bytes(q, "data"))
+                .is_some_and(|(w, b)| w <= a && a - w < b.len() as u64)
+    };
+    for (k, byte) in data.iter().enumerate() {
+        let a = addr + k as u64;
+        let gives = before[..req]
+            .iter()
+            .rposition(|q| covers(q, a))
+            .filter(|&j| {
+                let w = int(&before[j], "addr").expect("covers");
+                bytes(&before[j], "data").expect("covers")[(a - w) as usize] == *byte
+            });
+        match gives {
+            Some(j) if !found.contains(&j) => found.push(j),
+            Some(_) => {}
+            None => match missing.last_mut() {
+                Some((start, len)) if *start + *len == a => *len += 1,
+                _ => missing.push((a, 1)),
+            },
+        }
+    }
+    (found, missing)
 }

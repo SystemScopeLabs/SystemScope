@@ -8,7 +8,7 @@ use systemscope_contracts::event::{EventKey, Phase};
 use systemscope_contracts::time::Tick;
 use systemscope_contracts::trace::{TraceAt, TraceOrigin, TraceRecord, Value};
 use systemscope_verify::profile::Role;
-use systemscope_verify::slice::{Link, Slice, slice};
+use systemscope_verify::slice::{Link, Slice, Unresolved, slice};
 
 const CPU: u32 = 0;
 const BUS: u32 = 1;
@@ -259,7 +259,13 @@ fn slices_round_trip() {
         role: Role::Expected,
         first: 0,
         entries: all[1].entries.clone(),
+        unresolved: vec![Unresolved {
+            record: 3,
+            addr: 0x104,
+            len: 2,
+        }],
     });
+    all.push(slice(&renamed(), 0, &paths(), Role::Actual));
     for s in all {
         let mut e = Encoder::new();
         s.encode(&mut e);
@@ -275,22 +281,160 @@ fn slices_round_trip() {
         Link::Trap,
         Link::Dma,
         Link::Gate,
+        Link::Rename,
+        Link::Store,
     ] {
         assert!(!link.to_string().is_empty());
     }
-    // Role, first, one entry: record 0 and link tag 6.
+    // Role, first, one entry: record 0 and link tag 8.
     let mut e = Encoder::new();
     e.u8(0);
     e.u64(0);
     e.len(1);
     e.u64(0);
-    e.u8(6);
+    e.u8(8);
     let bytes = e.into_bytes();
     assert_eq!(
         Slice::decode(&mut Decoder::new(&bytes)),
         Err(DecodeError::InvalidTag {
             what: "link",
-            tag: 6
+            tag: 8
         })
+    );
+}
+
+/// `r` with `fields` appended.
+fn with(mut r: TraceRecord, fields: &[(&'static str, Value)]) -> TraceRecord {
+    r.fields.extend(fields.iter().cloned());
+    r
+}
+
+fn on_port(mut r: TraceRecord, port: u64) -> TraceRecord {
+    r.fields[1].1 = Value::U64(port);
+    r
+}
+
+fn grant(event: u64, master: u64, txn: u64, downstream: u64) -> TraceRecord {
+    with(
+        c(event, BUS, "platform.bus.grant", None),
+        &[
+            ("region", Value::U64(0)),
+            ("master", Value::U64(master)),
+            ("txn", Value::U64(txn)),
+            ("downstream_txn", Value::U64(downstream)),
+        ],
+    )
+}
+
+fn data(b: &[u8]) -> (&'static str, Value) {
+    ("data", Value::Bytes(b.to_vec()))
+}
+
+fn addr(a: u64) -> (&'static str, Value) {
+    ("addr", Value::U64(a))
+}
+
+/// A CPU store through the bus, then a load of partly the same bytes.
+fn renamed() -> Vec<TraceRecord> {
+    vec![
+        with(
+            mem(0, CPU, BUS, "WriteReq", 1),
+            &[addr(0x100), data(&[1, 2, 3, 4])],
+        ),
+        grant(1, 0, 1, 7),
+        with(
+            mem(2, BUS, RAM, "WriteReq", 7),
+            &[addr(0), data(&[1, 2, 3, 4])],
+        ),
+        mem(3, RAM, BUS, "WriteResp", 7),
+        mem(4, BUS, CPU, "WriteResp", 1),
+        with(mem(5, CPU, BUS, "ReadReq", 2), &[addr(0x102)]),
+        grant(6, 0, 2, 8),
+        with(mem(7, BUS, RAM, "ReadReq", 8), &[addr(2)]),
+        with(mem(8, RAM, BUS, "ReadResp", 8), &[data(&[3, 4, 9, 9])]),
+        with(mem(9, BUS, CPU, "ReadResp", 2), &[data(&[3, 4, 9, 9])]),
+    ]
+}
+
+#[test]
+fn a_relayed_response_reaches_through_the_bus_rename() {
+    let w = renamed();
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Store),
+            (5, Link::Request),
+            (6, Link::Rename),
+            (7, Link::Request),
+            (8, Link::Rename),
+            (9, Link::Divergent),
+        ]
+    );
+    // The store gives the first two loaded bytes; nothing in the window gives the rest.
+    assert_eq!(
+        s.unresolved,
+        [Unresolved {
+            record: 9,
+            addr: 0x104,
+            len: 2
+        }]
+    );
+    // A downstream request: its grant, and the master request the grant forwards.
+    let s = slice(&w[..=2], 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [(0, Link::Rename), (1, Link::Rename), (2, Link::Divergent)]
+    );
+    assert_eq!(s.unresolved, []);
+}
+
+#[test]
+fn a_rename_and_a_store_need_their_own_master_and_bytes() {
+    let mut w = renamed();
+    // Another master's request with the same `txn`, granted later: not the CPU's.
+    w.insert(
+        7,
+        on_port(with(mem(6, BLK, BUS, "ReadReq", 2), &[addr(0x200)]), 1),
+    );
+    w.insert(8, grant(6, 1, 2, 9));
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Store),
+            (5, Link::Request),
+            (6, Link::Rename),
+            (9, Link::Request),
+            (10, Link::Rename),
+            (11, Link::Divergent),
+        ]
+    );
+    // A later store of other bytes hides the earlier one: the replay gives what the
+    // latest write wrote, and that is not what was loaded.
+    let mut w = renamed();
+    w.insert(
+        5,
+        with(mem(4, CPU, BUS, "WriteReq", 3), &[addr(0x103), data(&[7])]),
+    );
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Store),
+            (6, Link::Request),
+            (7, Link::Rename),
+            (8, Link::Request),
+            (9, Link::Rename),
+            (10, Link::Divergent),
+        ]
+    );
+    assert_eq!(
+        s.unresolved,
+        [Unresolved {
+            record: 10,
+            addr: 0x103,
+            len: 3
+        }]
     );
 }

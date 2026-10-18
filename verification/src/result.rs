@@ -711,6 +711,13 @@ fn render(out: &mut String, r: &VerificationResult) -> fmt::Result {
         for e in &s.entries {
             writeln!(out, "  [{}] {}: {}", e.record, e.link, trace_line(&e.line))?;
         }
+        for u in &s.unresolved {
+            writeln!(
+                out,
+                "  [{}] unresolved: {} bytes at {:#x}, no store in the window gives them",
+                u.record, u.len, u.addr
+            )?;
+        }
     }
     for d in &r.trace.diagnostics {
         writeln!(out, "diagnostic ({}) {}:", role(d.role), d.label)?;

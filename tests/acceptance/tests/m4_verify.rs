@@ -260,15 +260,19 @@ fn diverge(
                 .all(|w| sl.first <= w[0].record && w[0].record < w[1].record)
         );
         if let InputVariant::State(_) = &input {
-            // A fetch or a retirement: only the CPU's own port traffic precedes it.
-            for e in &sl.entries[..sl.entries.len() - 1] {
-                assert_eq!(e.link, Link::Access, "{sl:?}");
-                let source = e
-                    .line
-                    .fields
-                    .iter()
-                    .any(|f| f == &("source".to_owned(), Value::U64(0)));
-                assert!(source || e.line.component == CPU_PATH, "{sl:?}");
+            // A fetch or a retirement: only the CPU's own port traffic precedes it, with
+            // each access's bus grant and downstream hop. The page tables and code it
+            // read were written before the window.
+            let rest = &sl.entries[..sl.entries.len() - 1];
+            for e in rest {
+                assert!(
+                    matches!(e.link, Link::Access | Link::Rename | Link::Request),
+                    "{sl:?}"
+                );
+            }
+            for u in &sl.unresolved {
+                let load = rest.iter().find(|e| e.record == u.record).unwrap();
+                assert_eq!((load.link, u.len), (Link::Access, 4), "{sl:?}");
             }
         }
     }
@@ -309,7 +313,8 @@ fn diverge(
         );
         assert!(t <= r, "{trace:?}");
         // The patched block's result follows its request, the medium's read, and the
-        // transfer's command with the MMIO write that issued it.
+        // transfer's command with the MMIO write that issued it, which the bus renamed
+        // from the kernel's own write.
         for sl in &slices {
             let got: Vec<(Link, &str, &str)> = sl
                 .entries
@@ -320,6 +325,8 @@ fn diverge(
             assert_eq!(
                 got,
                 [
+                    (Link::Rename, "soc.bus", dispatch),
+                    (Link::Rename, "soc.bus", "platform.bus.grant"),
                     (Link::Dma, "soc.blk", dispatch),
                     (Link::Dma, "soc.blk", "platform.blk.command"),
                     (Link::Request, "soc.disk", dispatch),
@@ -335,7 +342,15 @@ fn diverge(
                     .find(|f| f.0 == "txn")
                     .cloned()
             };
-            assert_eq!(txn(2), txn(4));
+            assert_eq!(txn(4), txn(6));
+            // The kernel issued the command through the bus.
+            assert!(
+                sl.entries[0]
+                    .line
+                    .fields
+                    .contains(&("source".to_owned(), Value::U64(7)))
+            );
+            assert_eq!(sl.unresolved, []);
         }
     }
     let b = a;

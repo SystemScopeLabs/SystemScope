@@ -19,7 +19,7 @@ use systemscope_verify::report::same_engine;
 use systemscope_verify::result::{
     RESULT_MAGIC, ResultOutcome, StateEvidence, TraceEvidence, VerificationResult,
 };
-use systemscope_verify::slice::{Link, Slice, SliceEntry};
+use systemscope_verify::slice::{Link, Slice, SliceEntry, Unresolved};
 use systemscope_verify::state::{Change, Source, StateDifference};
 use systemscope_verify::trace::{Diagnostic, TraceLine};
 
@@ -249,6 +249,11 @@ fn hand_built() -> VerificationResult {
                     line: line("ReadResp"),
                 },
             ],
+            unresolved: vec![Unresolved {
+                record: 10,
+                addr: 0x8000_0000,
+                len: 2,
+            }],
         }],
     }
 }
@@ -288,6 +293,7 @@ state at events 2 (expected) and 3 (actual):
 predecessor slice (actual), window from record 7:
   [8] request: init soc.bus runtime.dispatch msg=\"ReadReq\"
   [10] divergent: init soc.bus runtime.dispatch msg=\"ReadResp\"
+  [10] unresolved: 2 bytes at 0x80000000, no store in the window gives them
 diagnostic (actual) spike log:
   core 0: 0x0
 "
