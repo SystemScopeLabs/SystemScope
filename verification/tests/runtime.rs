@@ -11,12 +11,14 @@ use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
 use systemscope_runtime::topology::TopologyBuilder;
 use systemscope_verify::backend::{Backend, Capability, Side, run, verify};
-use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch};
+use systemscope_verify::case::{
+    BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch, execution_id,
+};
 use systemscope_verify::compare::{
     Divergence, Outcome, StreamResult, Verdict, compare, naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
-use systemscope_verify::observation::ObservedValue;
+use systemscope_verify::observation::{Observation, ObservedValue, PrefixDigest};
 use systemscope_verify::profile::{
     ComparisonProfile, FieldSpec, KindSpec, Requirement, Role, StreamSpec, Support, plan,
 };
@@ -516,6 +518,8 @@ fn the_adapter_declares_what_its_projection_reports() {
         Capability::EffectStream,
         Capability::StepBoundary,
         Capability::DeterministicReplay,
+        Capability::Snapshot,
+        Capability::Restore,
     ] {
         assert!(caps.contains(&c), "{c:?}");
     }
@@ -569,4 +573,148 @@ fn a_divergence_before_the_patched_side_fails_is_reported() {
             )
         )]
     );
+}
+
+/// Every observation of both streams, taken stream by stream, from a started side.
+fn rest(b: &mut RuntimeBackend) -> [Vec<Observation>; 2] {
+    ["arch", "effect"].map(|s| {
+        let mut out = Vec::new();
+        while let Some(o) = b.next(s).unwrap() {
+            out.push(o);
+        }
+        out
+    })
+}
+
+fn started(input: &InputVariant) -> RuntimeBackend {
+    let mut b = backend();
+    b.start(&scenario(), input, &config(), &profile()).unwrap();
+    b
+}
+
+#[test]
+fn every_checkpoint_resumes_the_uninterrupted_streams() {
+    // Unpatched, and patched after event 4: checkpoints before the patch must apply it on
+    // resume, and the checkpoint after event 4 already holds it.
+    for (input, retirements) in [(InputVariant::None, LIMIT), (patch_n(4, 4, 5), LIMIT - 1)] {
+        let whole = rest(&mut started(&input));
+        assert_eq!(whole[0].len() as u64, retirements);
+        let mut b = started(&input);
+        let mut checkpoints = vec![b.checkpoint().unwrap()];
+        for _ in 1..retirements {
+            b.next("arch").unwrap().unwrap();
+            checkpoints.push(b.checkpoint().unwrap());
+        }
+        // The last retirement's event also halts: no checkpoint after the stop rule.
+        b.next("arch").unwrap().unwrap();
+        assert_eq!(
+            b.checkpoint(),
+            Err(EngineError::Internal(
+                "checkpoint after the stop rule".to_owned()
+            ))
+        );
+        let execution = execution_id(&scenario(), &input, &id());
+        for (j, c) in checkpoints.iter().enumerate() {
+            // One retirement per event; the effect stream counts what was emitted, taken
+            // or not.
+            assert_eq!((c.execution, c.event_index), (execution, j as u64), "{j}");
+            let names: Vec<_> = c.streams.iter().map(|m| m.stream.as_str()).collect();
+            assert_eq!(names, ["arch", "effect"]);
+            for (s, stream) in whole.iter().enumerate() {
+                let m = &c.streams[s];
+                let covered = stream
+                    .iter()
+                    .filter(|o| emitting_event(o, &input) <= j as u64);
+                let covered = covered.count() as u64;
+                assert_eq!(m.covered, covered, "{j} {}", m.stream);
+                let mut p = PrefixDigest::new();
+                stream[..covered as usize].iter().for_each(|o| p.absorb(o));
+                assert_eq!(m.prefix, p.digest(), "{j} {}", m.stream);
+            }
+            let mut r = started(&input);
+            r.restore(c).unwrap();
+            let resumed = rest(&mut r);
+            for s in 0..2 {
+                let from = c.streams[s].covered as usize;
+                assert_eq!(resumed[s], whole[s][from..], "{j} stream {s}");
+            }
+            let first = c.streams[0].covered;
+            assert_eq!(r.event_index("arch", first), Some(j as u64 + 1));
+            if first > 0 {
+                assert_eq!(r.event_index("arch", first - 1), None);
+            }
+        }
+    }
+}
+
+/// The event that emits observation `o` of a counter run with `input`: retirement `i` is
+/// event `i + 1`, or `i + 2` once a patch after event 4 skips `n = 5`; a byte is event `n`.
+fn emitting_event(o: &Observation, input: &InputVariant) -> u64 {
+    let skipped = matches!(input, InputVariant::State(_));
+    match o.field("byte") {
+        Some(ObservedValue::Present(Value::U64(n))) => *n - u64::from(skipped && *n > 4),
+        _ => o.ordinal + 1,
+    }
+}
+
+#[test]
+fn restore_refuses_misuse_and_other_executions() {
+    let mut b = backend();
+    let internal = |e: EngineError| matches!(e, EngineError::Internal(_));
+    assert!(internal(b.checkpoint().unwrap_err()));
+    assert!(internal(b.emitted("arch").unwrap_err()));
+    let c = started(&InputVariant::None).checkpoint().unwrap();
+    assert!(internal(b.restore(&c).unwrap_err()));
+    // Another input variant is another execution.
+    let mut p = started(&patch_n(4, 4, 5));
+    assert_eq!(
+        p.restore(&c),
+        Err(EngineError::Internal(
+            "the checkpoint belongs to another execution".to_owned()
+        ))
+    );
+    let mut b = started(&InputVariant::None);
+    let mut missing = c.clone();
+    missing.streams.pop();
+    assert_eq!(
+        b.restore(&missing),
+        Err(EngineError::Internal(
+            "the checkpoint marks [\"arch\"], not the compared streams".to_owned()
+        ))
+    );
+    let mut corrupt = c.clone();
+    corrupt.state.truncate(10);
+    let e = b.restore(&corrupt).unwrap_err();
+    assert!(
+        matches!(&e, EngineError::BackendFailed(why) if why.starts_with("restore: ")),
+        "{e:?}"
+    );
+    // A side whose projection failed has no checkpoint.
+    let mut bad = backend_with(true, Some(2));
+    bad.start(&scenario(), &InputVariant::None, &config(), &profile())
+        .unwrap();
+    let e = loop {
+        if let Err(e) = bad.next("arch") {
+            break e;
+        }
+    };
+    assert_eq!(bad.checkpoint(), Err(e));
+}
+
+#[test]
+fn emitted_takes_queued_observations_without_advancing() {
+    let mut b = started(&InputVariant::None);
+    for _ in 0..4 {
+        b.next("arch").unwrap().unwrap();
+    }
+    let effect = b.emitted("effect").unwrap();
+    assert_eq!(effect.len(), 1);
+    assert_eq!(
+        effect[0].field("byte"),
+        Some(&ObservedValue::Present(Value::U64(4)))
+    );
+    assert_eq!(b.emitted("effect").unwrap(), Vec::new());
+    assert_eq!(b.emitted("arch").unwrap(), Vec::new());
+    assert_eq!(b.next("arch").unwrap().unwrap().ordinal, 4);
+    assert!(matches!(b.emitted("os"), Err(EngineError::Internal(_))));
 }
