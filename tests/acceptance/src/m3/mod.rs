@@ -26,6 +26,7 @@ pub mod checkpoint;
 pub mod golden;
 pub mod observation;
 pub mod portable;
+pub mod verify;
 
 /// The scenario's platform, as the golden file records it.
 pub const SCENARIO: &str = "m3-reference";

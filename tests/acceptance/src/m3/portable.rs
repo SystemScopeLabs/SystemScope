@@ -798,9 +798,11 @@ impl Platform {
 
 fn cpu(mut r: Reader<'_>) -> Read<Cpu> {
     r.raw(16)?; // clock, entry, instruction limit
+    r.mark("pc");
     let pc = r.u32()?;
     let mut regs = [0; 31];
-    for reg in &mut regs {
+    for (i, reg) in regs.iter_mut().enumerate() {
+        r.mark(&format!("x{}", i + 1));
         *reg = r.u32()?;
     }
     let instret = r.u64()?;
@@ -889,6 +891,7 @@ fn cpu(mut r: Reader<'_>) -> Read<Cpu> {
     r.bool()?;
     r.bool()?;
     r.u32()?; // medeleg
+    r.mark("stvec");
     let stvec = r.u32()?;
     r.u32()?; // sscratch
     let sepc = r.u32()?;

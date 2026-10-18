@@ -15,6 +15,7 @@ systemscope-os.workspace = true
 systemscope-platform.workspace = true
 systemscope-runtime.workspace = true
 systemscope-rv32i.workspace = true
+systemscope-verify.workspace = true
 
 [lints]
 workspace = true

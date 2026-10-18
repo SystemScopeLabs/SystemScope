@@ -437,6 +437,7 @@ dependencies = [
  "systemscope-runtime",
  "systemscope-rv32",
  "systemscope-rv32i",
+ "systemscope-verify",
  "trybuild",
 ]
 
@@ -512,6 +513,7 @@ dependencies = [
  "systemscope-platform",
  "systemscope-runtime",
  "systemscope-rv32i",
+ "systemscope-verify",
 ]
 
 [[package]]
@@ -540,6 +542,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "systemscope-contracts",
+ "systemscope-runtime",
 ]
 
 [[package]]

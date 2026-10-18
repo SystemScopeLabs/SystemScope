@@ -16,6 +16,7 @@ systemscope-reference.workspace = true
 systemscope-runtime.workspace = true
 systemscope-rv32.workspace = true
 systemscope-rv32i.workspace = true
+systemscope-verify.workspace = true
 
 [dev-dependencies]
 trybuild = "1"

@@ -58,6 +58,7 @@ pub mod m3ref;
 pub mod manifest;
 pub mod privgen;
 pub mod progen;
+pub mod projection;
 pub mod runner;
 pub mod spike;
 pub mod upstream;
