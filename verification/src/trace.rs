@@ -202,9 +202,7 @@ fn scan(
             record += re.len() as u64;
             for (b, r) in before.iter_mut().zip([re, ra]) {
                 b.extend(r);
-                while b.len() > ring {
-                    b.pop_front();
-                }
+                b.drain(..b.len().saturating_sub(ring));
             }
             continue;
         };
