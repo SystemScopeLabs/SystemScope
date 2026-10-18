@@ -8,7 +8,7 @@ events, the same state, and the same trace, on every supported platform.
 
 **M4: Verification & Debugging Engine** is complete and tagged `v0.5.0-m4`; see
 [docs/releases/m4-exit-audit.md](docs/releases/m4-exit-audit.md). The next milestone,
-**M5: Timing Exploration**, has no design yet; its M5.0 design freeze is next. SystemScope
+**M5: Timing Exploration**, has a frozen design ([docs/m5-design.md](docs/m5-design.md)); M5.1 is next. SystemScope
 is still an early system, not a usable simulator of real hardware.
 
 | Milestone | Status | Tag |
@@ -18,7 +18,7 @@ is still an early system, not a usable simulator of real hardware.
 | M2 | complete | `v0.3.0-m2` |
 | M3 | complete | `v0.4.0-m3` |
 | M4 | complete | `v0.5.0-m4` |
-| M5 | M5.0 design next | none |
+| M5 | M5.0 design frozen; M5.1 next | none |
 
 On `m3-reference`, a bare-metal firmware boots a small modeled kernel. The kernel loads
 five user programs from a disk image through the DMA block controller. It runs them as
@@ -135,14 +135,14 @@ of it.
 | **M2** (`v0.3.0-m2`) | Interrupts, DMA, block storage (abstract SSD model) |
 | **M3** (`v0.4.0-m3`) | Modeled OS backend: processes, syscalls, Sv32 virtual memory |
 | **M4** (`v0.5.0-m4`) | Verification & Debugging Engine: compare executions at stable architectural boundaries, locate the first divergence, produce structured diagnostic evidence, and build portable reproducers |
-| M5 (planned) | Timing Exploration: seeded timing-perturbation campaigns over CPU, interrupts, DMA, storage, and OS, compared through the M4 engine, with `arch` coverage and a wider reference workload |
+| M5 (M5.0 design frozen) | Timing Exploration: seeded timing-perturbation campaigns over CPU, interrupts, DMA, storage, and OS, compared through the M4 engine, with `arch` coverage and a wider reference workload |
 | M6 (planned) | Native guest OS backend: a C/assembly tiny kernel |
 | M7 (planned) | SystemScope Visualizer / Interactive Debugger: topology, timeline, state, step, step back, seek, breakpoint, filter, plus views of M4 divergences and reproducers, built on time-travel queries and a CLI that come first |
 | M8 (planned) | SystemVerilog CPU backend via Verilator |
 
 M0–M4 are complete ([M4 exit audit](docs/releases/m4-exit-audit.md)). M5–M8 are not
-implemented. They are described in [plan.md](plan.md) §11, and M4 in the design
-[docs/m4-design.md](docs/m4-design.md). The SystemVerilog backend was planned as M5 and moved
+implemented. They are described in [plan.md](plan.md) §11, M4 in the design
+[docs/m4-design.md](docs/m4-design.md), and M5 in [docs/m5-design.md](docs/m5-design.md). The SystemVerilog backend was planned as M5 and moved
 to M8 after M4. The Visualizer was first
 planned as M4 and moved to M7, with its scope unchanged.
 

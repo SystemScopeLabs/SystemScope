@@ -1,8 +1,8 @@
 # M5 Design: Timing Exploration
 
-> Status: **Draft for the M5.0 freeze, not frozen** · Implementation status: not started · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.0 complete, M5.1 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
-This document proposes the design of M5. Sections marked **(open)** still need a decision before the freeze (§24).
+This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
 ---
 
@@ -57,7 +57,7 @@ M5 has three parts:
 - No RTL, native kernel, or UI. Those are M8, M6, and M7.
 - No unbounded search. A campaign is an explicit seed list, as in M4 (§18 of m4-design). Systematic enumeration of schedules is outside M5. M5 only measures the schedules a campaign reached (§17).
 
-## 3. Proposed M5 Decisions
+## 3. Frozen M5 Decisions
 
 | # | Decision | Section |
 |---|---|---|
@@ -247,7 +247,7 @@ It is `m3-reference` with:
 
 The physical layout and seed are otherwise those of m3-design §11. The exact layout is frozen at M5.3.
 
-### 12.2 Workload (draft)
+### 12.2 Workload
 
 | Entry | Program | Exercises | Invariant |
 |---|---|---|---|
@@ -372,7 +372,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 
 ## 24. Open Questions
 
-| # | Question | Draft answer |
+| # | Question | Answer |
 |---|---|---|
 | O1 | Tie-order mechanism | **Decided (D10):** a rank-major `sequence` (§7.3) |
 | O2 | `blk_read` syscall number | from the Linux-numbered range, chosen at M5.3 |
@@ -382,19 +382,19 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 
 ## 25. Roadmap
 
-| Step | Scope | Changes |
-|---|---|---|
-| **M5.0** | Design freeze (this document) | docs |
-| **M5.1** | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
-| **M5.2** | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
-| **M5.3** | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
-| **M5.4** | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
-| **M5.5** | Workload programs and planted races R1–R5; campaigns over A and B | code, CI |
-| **M5.6** | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
-| **M5.7** | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
-| **M5.8** | Exit audit | docs |
+| Step | Status | Scope | Changes |
+|---|---|---|---|
+| **M5.0** | complete | Design freeze (this document) | docs |
+| **M5.1** | next | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
+| **M5.2** | planned | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
+| **M5.3** | planned | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
+| **M5.4** | planned | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
+| **M5.5** | planned | Workload programs and planted races R1–R5; campaigns over A and B | code, CI |
+| **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
+| **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
+| **M5.8** | planned | Exit audit | docs |
 
-## 26. M5 Exit Criteria (draft)
+## 26. M5 Exit Criteria
 
 - [ ] **Identity.** With the empty perturbation, every M0–M4 golden, expected stream, corpus entry, and reproducer is byte-identical, and every M0–M4 CI job passes.
 - [ ] **Determinism.** Every perturbed run, campaign result, minimized perturbation, and reproducer is byte-identical on Linux and Windows, and restores at every event.
