@@ -315,8 +315,12 @@ fn on_port(mut r: TraceRecord, port: u64) -> TraceRecord {
 }
 
 fn grant(event: u64, master: u64, txn: u64, downstream: u64) -> TraceRecord {
+    grant_on(BUS, event, master, txn, downstream)
+}
+
+fn grant_on(bus: u32, event: u64, master: u64, txn: u64, downstream: u64) -> TraceRecord {
     with(
-        c(event, BUS, "platform.bus.grant", None),
+        c(event, bus, "platform.bus.grant", None),
         &[
             ("region", Value::U64(0)),
             ("master", Value::U64(master)),
@@ -436,5 +440,279 @@ fn a_rename_and_a_store_need_their_own_master_and_bytes() {
             addr: 0x103,
             len: 3
         }]
+    );
+}
+
+/// `w` with `r` inserted at `at`.
+fn put(mut w: Vec<TraceRecord>, at: usize, r: TraceRecord) -> Vec<TraceRecord> {
+    w.insert(at, r);
+    w
+}
+
+fn each(ids: &[u64], link: Link, last: u64) -> Vec<(u64, Link)> {
+    let mut out: Vec<(u64, Link)> = ids.iter().map(|&i| (i, link)).collect();
+    out.push((last, Link::Divergent));
+    out
+}
+
+#[test]
+fn accesses_are_the_cpus_own_dispatches_since_its_own_retirement() {
+    // A runtime record of another kind is no dispatch, even with a dispatch's fields.
+    let queued = TraceRecord {
+        kind: "runtime.queue",
+        ..mem(5, CPU, BUS, "ReadReq", 3)
+    };
+    let s = slice(&put(instruction(), 6, queued), 0, &paths(), Role::Actual);
+    assert_eq!(links(&s), each(&[1, 5, 7, 10], Link::Access, 11));
+    // Another CPU's retirement does not end this CPU's instruction.
+    let other = c(5, 3, "rv32.commit", None);
+    let s = slice(&put(instruction(), 6, other), 0, &paths(), Role::Actual);
+    assert_eq!(links(&s), each(&[1, 5, 7, 10], Link::Access, 11));
+    // A record no rule reaches links nothing, inside a held gate or after a transfer.
+    let unrelated = c(5, RAM, "platform.ram.note", None);
+    let held = gated()[..6].to_vec();
+    let s = slice(&put(held, 6, unrelated.clone()), 0, &paths(), Role::Actual);
+    assert_eq!(links(&s), [(6, Link::Divergent)]);
+    let s = slice(&put(transfer(), 15, unrelated), 0, &paths(), Role::Actual);
+    assert_eq!(links(&s), [(15, Link::Divergent)]);
+}
+
+fn gated() -> Vec<TraceRecord> {
+    vec![
+        c(0, CPU, "rv32.exception", None),
+        mem(1, CPU, BUS, "WriteReq", 3),
+        mem(2, BUS, KERNEL, "WriteReq", 11),
+        c(2, KERNEL, "os.gate.enter", Some(11)),
+        c(2, KERNEL, "os.syscall.enter", None),
+        mem(3, KERNEL, BUS, "ReadReq", 1),
+        mem(4, BUS, KERNEL, "ReadResp", 1),
+        c(4, KERNEL, "os.gate.release", Some(11)),
+        mem(4, KERNEL, BUS, "WriteResp", 11),
+    ]
+}
+
+#[test]
+fn a_gate_links_only_its_own_write_release_and_held_work() {
+    let enter = c(2, KERNEL, "os.gate.enter", Some(11));
+    // The write that entered is in the same event, to the kernel.
+    let w = vec![mem(1, BUS, KERNEL, "WriteReq", 11), enter.clone()];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(1, Link::Divergent)]
+    );
+    let w = vec![
+        mem(2, BUS, KERNEL, "WriteReq", 11),
+        mem(2, BUS, RAM, "WriteReq", 12),
+        enter.clone(),
+    ];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(0, Link::Gate), (2, Link::Divergent)]
+    );
+    // The release's response reaches the release, not another kernel record with its
+    // transaction id in that event.
+    let w = put(gated(), 8, c(4, KERNEL, "os.gate.note", Some(11)));
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    let mut want = vec![(0, Link::Trap), (2, Link::Request)];
+    want.extend([3, 4, 5, 6, 7].map(|i| (i, Link::Gate)));
+    want.push((9, Link::Divergent));
+    assert_eq!(links(&s), want);
+    // Only a response from the kernel is a release's.
+    let mut w = gated()[..8].to_vec();
+    w.push(mem(4, KERNEL, BUS, "ReadReq", 11));
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(8, Link::Divergent)]
+    );
+    // Only a release ends a held gate, not another record with its transaction id.
+    let w = put(
+        gated()[..6].to_vec(),
+        4,
+        c(2, KERNEL, "os.gate.note", Some(11)),
+    );
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    let mut want = vec![(0, Link::Trap)];
+    want.extend([2, 3, 4, 5].map(|i| (i, Link::Gate)));
+    want.push((6, Link::Divergent));
+    assert_eq!(links(&s), want);
+    // A release before the enter, of that transaction id or another, is an earlier
+    // gate's.
+    for txn in [11, 5] {
+        let w = vec![
+            c(1, KERNEL, "os.gate.release", Some(txn)),
+            enter.clone(),
+            mem(3, KERNEL, BUS, "ReadReq", 1),
+        ];
+        assert_eq!(
+            links(&slice(&w, 0, &paths(), Role::Actual)),
+            [(1, Link::Gate), (2, Link::Divergent)],
+            "{txn}"
+        );
+    }
+}
+
+#[test]
+fn a_transfer_links_only_its_own_command_parts_and_interrupt() {
+    // A status poll after the media result is neither a part of the transfer nor the
+    // result a beat moves.
+    let w = put(transfer(), 7, mem(3, BUS, BLK, "ReadReq", 21));
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        each(&[0, 1, 3, 4, 6, 8, 9, 10, 11, 12, 13, 14], Link::Dma, 15)
+    );
+    let s = slice(&w[..=8], 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Dma),
+            (1, Link::Dma),
+            (3, Link::Request),
+            (4, Link::Dma),
+            (6, Link::Dma),
+            (8, Link::Divergent)
+        ]
+    );
+    // Interrupt records before the completion are not this interrupt's.
+    let w = put(transfer(), 9, c(5, IRQC, "platform.irq.meip", None));
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        each(&[0, 1, 3, 4, 6, 7, 8, 10, 11, 12, 13, 14], Link::Dma, 15)
+    );
+    // The command's write is in the same event, to the controller.
+    let w = vec![
+        mem(0, BUS, BLK, "WriteReq", 20),
+        c(1, BLK, "platform.blk.command", None),
+    ];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(1, Link::Divergent)]
+    );
+    let command = c(0, BLK, "platform.blk.command", None);
+    let w = vec![
+        mem(0, BUS, BLK, "WriteReq", 20),
+        mem(0, BUS, RAM, "WriteReq", 21),
+        command.clone(),
+    ];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(0, Link::Dma), (2, Link::Divergent)]
+    );
+    // The controller's other records are neither its command nor its completion.
+    let w = put(transfer(), 2, c(1, BLK, "platform.blk.status", None));
+    let s = slice(&w[..=7], 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Dma),
+            (1, Link::Dma),
+            (4, Link::Request),
+            (5, Link::Dma),
+            (7, Link::Divergent)
+        ]
+    );
+    let s = slice(&w[..=2], 0, &paths(), Role::Actual);
+    assert_eq!(links(&s), [(2, Link::Divergent)]);
+    // A medium's record before the command is an earlier transfer's.
+    let w = vec![
+        c(0, DISK, "platform.disk.read", None),
+        command,
+        c(1, BLK, "platform.blk.done", None),
+    ];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(1, Link::Dma), (2, Link::Divergent)]
+    );
+}
+
+#[test]
+fn a_rename_and_a_store_stay_on_their_own_bus_and_bytes() {
+    // Another bus's grant forwards no request to this bus.
+    let w = vec![mem(0, CPU, BUS, "ReadReq", 1), grant_on(3, 1, 0, 1, 5)];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(1, Link::Divergent)]
+    );
+    // The downstream response follows its grant.
+    let w = vec![
+        mem(0, CPU, BUS, "ReadReq", 2),
+        mem(1, RAM, BUS, "ReadResp", 8),
+        grant(2, 0, 2, 8),
+        mem(3, BUS, CPU, "ReadResp", 2),
+    ];
+    assert_eq!(
+        links(&slice(&w, 0, &paths(), Role::Actual)),
+        [(0, Link::Request), (2, Link::Rename), (3, Link::Divergent)]
+    );
+    // A master's later request with the downstream id is not the downstream response.
+    let w = put(renamed(), 9, mem(8, CPU, BUS, "ReadReq", 8));
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Store),
+            (5, Link::Request),
+            (6, Link::Rename),
+            (7, Link::Request),
+            (8, Link::Rename),
+            (10, Link::Divergent),
+        ]
+    );
+    // A write that does not go through the bus gives the load nothing.
+    let w = put(
+        renamed(),
+        5,
+        with(
+            mem(4, BLK, RAM, "WriteReq", 3),
+            &[addr(0x104), data(&[9, 9])],
+        ),
+    );
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [
+            (0, Link::Store),
+            (6, Link::Request),
+            (7, Link::Rename),
+            (8, Link::Request),
+            (9, Link::Rename),
+            (10, Link::Divergent),
+        ]
+    );
+    assert_eq!(
+        s.unresolved,
+        [Unresolved {
+            record: 10,
+            addr: 0x104,
+            len: 2
+        }]
+    );
+    // Unresolved bytes on both sides of a stored one are two ranges.
+    let w = vec![
+        grant(0, 0, 9, 9),
+        with(mem(0, CPU, BUS, "WriteReq", 1), &[addr(0x101), data(&[5])]),
+        with(mem(1, CPU, BUS, "ReadReq", 2), &[addr(0x100)]),
+        with(mem(2, BUS, CPU, "ReadResp", 2), &[data(&[0, 5, 0, 0])]),
+    ];
+    let s = slice(&w, 0, &paths(), Role::Actual);
+    assert_eq!(
+        links(&s),
+        [(1, Link::Store), (2, Link::Request), (3, Link::Divergent)]
+    );
+    assert_eq!(
+        s.unresolved,
+        [
+            Unresolved {
+                record: 3,
+                addr: 0x100,
+                len: 1
+            },
+            Unresolved {
+                record: 3,
+                addr: 0x102,
+                len: 2
+            }
+        ]
     );
 }

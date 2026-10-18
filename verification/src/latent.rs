@@ -182,9 +182,10 @@ fn snapshot(b: &RuntimeBackend) -> Result<Vec<u8>, EngineError> {
         .map_err(|e| EngineError::BackendFailed(format!("snapshot: {e}")))
 }
 
-/// The components whose stored bytes differ, then `runtime` if anything else does: the
-/// session's own state and the component table.
-fn differing(paths: &[String], e: &[u8], a: &[u8]) -> Result<Vec<String>, EngineError> {
+/// The components of the snapshots `e` and `a` whose stored bytes differ, by `paths`, in
+/// component order, then `runtime` if anything else does: the session's own state and
+/// the component table.
+pub fn differing(paths: &[String], e: &[u8], a: &[u8]) -> Result<Vec<String>, EngineError> {
     let (ce, ca) = (read(e)?, read(a)?);
     let mut out: Vec<String> = Vec::new();
     for (x, y) in ce.iter().zip(&ca) {

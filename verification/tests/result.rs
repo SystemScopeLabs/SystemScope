@@ -21,7 +21,7 @@ use systemscope_verify::result::{
 };
 use systemscope_verify::slice::{Link, Slice, SliceEntry, Unresolved};
 use systemscope_verify::state::{Change, Source, StateDifference};
-use systemscope_verify::trace::{Diagnostic, TraceLine};
+use systemscope_verify::trace::{Diagnostic, TraceDivergence, TraceLine};
 
 fn the_plan() -> Plan {
     let b = backend();
@@ -299,6 +299,27 @@ diagnostic (actual) spike log:
 "
     );
     assert_eq!(r.to_string(), want);
+    // The canonical trace marks each side's first differing record.
+    let mut traced = r.clone();
+    traced.trace.canonical = Some(TraceDivergence {
+        origin: 2,
+        event: Some(5),
+        record: 4,
+        first: 3,
+        expected: vec![line("ReadReq"), line("ReadResp")],
+        actual: vec![line("ReadReq"), line("WriteResp")],
+    });
+    let text = traced.to_string();
+    let block = "first trace divergence: event 5, record 4 from origin 2
+  expected:
+    init soc.bus runtime.dispatch msg=\"ReadReq\"
+   >init soc.bus runtime.dispatch msg=\"ReadResp\"
+  actual:
+    init soc.bus runtime.dispatch msg=\"ReadReq\"
+   >init soc.bus runtime.dispatch msg=\"WriteResp\"
+";
+    assert!(text.contains(block), "{text}");
+    round_trip(&traced);
     let other = VerificationResult {
         verdict: Ok(Verdict::Incomparable(Incomparable::Stream {
             side: Role::Actual,

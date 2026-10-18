@@ -280,6 +280,7 @@ fn checkpoints_and_emitted_observations_are_unsupported_by_default() {
         b.checkpoint(),
         Err(EngineError::Unsupported("checkpoint".to_owned()))
     );
+    assert_eq!(b.state(), Err(EngineError::Unsupported("state".to_owned())));
     let c = Checkpoint {
         execution: [0; 32],
         event_index: 0,

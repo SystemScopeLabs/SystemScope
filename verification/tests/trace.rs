@@ -94,7 +94,7 @@ fn the_first_differing_record_matches_a_full_capture() {
         let input = patch_n(k, k, k + 1);
         let (e, a) = (whole(&InputVariant::None), whole(&input));
         let d = e.iter().zip(&a).position(|(x, y)| x.1 != y.1).unwrap();
-        for (every, window) in [(0, 3), (1, 3), (2, 0), (0, 100)] {
+        for (every, window) in [(0, 3), (1, 3), (2, 0), (0, 2), (1, 4), (0, 100)] {
             let found = scan(&input, every, window, LIMIT);
             // Records after the origin: the full capture's, less those before it.
             let skipped = e.iter().take_while(|(at, _)| *at <= found.origin).count();
@@ -227,6 +227,21 @@ fn auxiliary_windows_surround_each_auxiliary_divergence() {
             assert_eq!(kept[..], all[first as usize..end]);
         }
         assert!(window.failures.is_empty());
+    }
+    // A long stream's window ends `report_window` observations after the divergence.
+    let mut early = c.clone();
+    for r in &mut early.auxiliary {
+        if let StreamResult::Diverged { ordinal, .. } = r {
+            *ordinal = 0;
+        }
+    }
+    let mut long = expected.clone();
+    for s in long.iter_mut().skip(1) {
+        s.clone_from(&expected[0]);
+    }
+    assert!(expected[0].len() as u64 > w + 1);
+    for (_, window) in auxiliary_windows(&plan, &early, &long, &long) {
+        assert_eq!((window.first, window.expected.len()), (0, w as usize + 1));
     }
     // Agreeing streams have no window.
     let Verdict::Compared(c) = compare(&plan, &expected, &expected).unwrap() else {

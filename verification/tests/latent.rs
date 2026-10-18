@@ -7,7 +7,7 @@ use common::*;
 use systemscope_verify::backend::Backend;
 use systemscope_verify::case::InputVariant;
 use systemscope_verify::error::EngineError;
-use systemscope_verify::latent::{SameSide, StateDivergence, first_state_divergence};
+use systemscope_verify::latent::{SameSide, StateDivergence, differing, first_state_divergence};
 use systemscope_verify::locate::{Index, record_index};
 use systemscope_verify::profile::{Plan, Role, plan};
 use systemscope_verify::runtime::RuntimeBackend;
@@ -112,5 +112,29 @@ fn a_scope_compares_only_its_components() {
     assert_eq!(
         scoped(&input, 1, &["nothing"], LIMIT),
         Err(EngineError::Internal("no component nothing".to_owned()))
+    );
+}
+
+#[test]
+fn the_differing_components_are_named_then_the_runtime() {
+    let mut b = backend();
+    b.start(&scenario(), &InputVariant::None, &config(), &profile())
+        .unwrap();
+    let snapshot = |b: &RuntimeBackend| b.runtime().unwrap().snapshot().unwrap();
+    b.step_event().unwrap();
+    let first = snapshot(&b);
+    b.step_event().unwrap();
+    let later = snapshot(&b);
+    let paths: Vec<String> = b
+        .runtime()
+        .unwrap()
+        .component_paths()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(differing(&paths, &first, &first), Ok(Vec::new()));
+    // A later event: the counter's own state, and the session's time and queue.
+    assert_eq!(
+        differing(&paths, &first, &later),
+        Ok(vec!["counter".to_owned(), "runtime".to_owned()])
     );
 }
