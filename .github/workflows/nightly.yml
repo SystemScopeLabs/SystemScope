@@ -8,7 +8,10 @@ name: Nightly
 # --run-ignored only` on both operating systems, and `cargo xtask spike random` on Linux.
 on:
   schedule:
-    - cron: "0 17 * * *"
+    # Sunday to Friday, and Saturday, which also runs coverage: the coverage report
+    # depends only on the commit, so once a week is enough.
+    - cron: "0 17 * * 0-5"
+    - cron: "0 17 * * 6"
   workflow_dispatch:
     inputs:
       seed:
@@ -139,6 +142,7 @@ jobs:
 
   coverage:
     name: coverage (report only)
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 17 * * 6'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
