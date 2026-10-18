@@ -23,6 +23,7 @@ use systemscope_verify::locate::{
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
 use systemscope_verify::runtime::RuntimeBackend;
+use systemscope_verify::state::{Change, diff_state};
 
 const GOLDEN_JSON: &str = include_str!("../../golden/m3-reference.json");
 
@@ -417,5 +418,63 @@ fn a_patch_of_the_wrong_old_value_fails_the_side() {
         };
         let err = verify::patch(&mut [], &p).unwrap_err();
         assert!(err.ends_with(why), "{field}: {err}");
+    }
+}
+
+/// M4.3 (§13): after SP-1's patch, the sides' states differ exactly in the CPU's `pc`, as
+/// `inspect` and the portable decoder report it, and in the CPU's snapshot bytes.
+#[test]
+fn sp1_states_differ_in_the_patched_pc() {
+    let fixture = fixture();
+    let (b, expected) = complete(&fixture, InputVariant::None);
+    let pc = u32_field(&expected[0][1], "pc");
+    let event = b.event_index("arch", 0).unwrap();
+    let plan = the_plan(&b);
+    let scenario = verify::scenario(&fixture);
+    let mut states = Vec::new();
+    for input in [InputVariant::None, patch(event, "pc", pc, pc ^ 0x4)] {
+        let mut b = verify::backend(&fixture);
+        b.start(&scenario, &input, &verify::config(), &plan.profile)
+            .unwrap();
+        b.next("arch").unwrap().unwrap();
+        states.push(b.state().unwrap());
+    }
+    let d = diff_state(&states[0], &states[1]);
+    let named: Vec<(&str, &str, String)> = d
+        .iter()
+        .map(|d| (d.component.as_str(), d.field.as_str(), d.source.to_string()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (CPU_PATH, "pc", "inspect".to_owned()),
+            (CPU_PATH, "blake3", "derived:snapshot".to_owned()),
+            (CPU_PATH, "pc", "decoder:m3-portable/3".to_owned()),
+        ]
+    );
+    let pcs = (Value::U64(pc.into()), Value::U64((pc ^ 0x4).into()));
+    for i in [0, 2] {
+        assert_eq!(
+            d[i].change,
+            Change::Changed {
+                expected: pcs.0.clone(),
+                actual: pcs.1.clone(),
+            }
+        );
+    }
+    // Every component has its snapshot digest and decoded fields; RAM's are page
+    // digests.
+    for path in systemscope_rv32::m3ref::PATHS {
+        let decoded = if path == "soc.ram" {
+            "derived:page blake3"
+        } else {
+            "decoder:m3-portable/"
+        };
+        for source in ["derived:snapshot", decoded] {
+            let read = states[0]
+                .iter()
+                .any(|f| f.component == path && f.source.to_string().starts_with(source));
+            assert!(read, "{path} {source}");
+        }
     }
 }

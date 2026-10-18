@@ -8,8 +8,9 @@ use std::rc::Rc;
 use systemscope_contracts::component::ComponentId;
 use systemscope_contracts::observe::{Control, Observer, WorldView};
 use systemscope_contracts::time::Tick;
-use systemscope_contracts::trace::TraceRecord;
+use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_runtime::runtime::Runtime;
+use systemscope_runtime::snapshot::component_states;
 
 use crate::backend::{Backend, Capabilities, Capability};
 use crate::case::{BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch, execution_id};
@@ -51,6 +52,8 @@ pub type Build = Box<dyn Fn(&Scenario) -> Result<Runtime, String>>;
 pub type MakeProjection = Box<dyn Fn() -> Box<dyn Projection>>;
 /// Applies a state patch to runtime snapshot bytes, checking the old value.
 pub type Patch = Box<dyn Fn(&mut [u8], &StatePatch) -> Result<(), String>>;
+/// Reads a platform's state fields from its snapshot bytes (§13.2).
+pub type StateDecoder = Box<dyn Fn(&[u8]) -> Result<Vec<StateField>, String>>;
 
 /// What the observer shares with the adapter.
 struct Shared {
@@ -192,6 +195,7 @@ pub struct RuntimeBackend {
     build: Build,
     projection: MakeProjection,
     patch: Option<Patch>,
+    decoder: Option<StateDecoder>,
     session: Option<Session>,
 }
 
@@ -203,8 +207,15 @@ impl RuntimeBackend {
             build,
             projection,
             patch: None,
+            decoder: None,
             session: None,
         }
+    }
+
+    /// Adds `decoder`'s fields to every state read.
+    pub fn with_decoder(mut self, decoder: StateDecoder) -> RuntimeBackend {
+        self.decoder = Some(decoder);
+        self
     }
 
     /// Lets the adapter apply [`InputVariant::State`] with `patch`.
@@ -266,6 +277,35 @@ impl Session {
                 self.events + 1
             ))),
         }
+    }
+
+    /// Reads every component's `inspect()` at an observe point registered at tick 0,
+    /// which is due at once, and runs no further than tick 0, where no event is left.
+    /// Observe points are driver state, so the read changes nothing (§10).
+    fn inspect(&mut self) -> Result<Vec<StateField>, EngineError> {
+        let s = self;
+        if s.runtime.peek_key().is_some_and(|k| k.tick == Tick(0)) {
+            return Err(EngineError::Internal(
+                "state while events at tick 0 are pending".to_owned(),
+            ));
+        }
+        let paths = s.runtime.component_paths().map(str::to_owned).collect();
+        s.shared.borrow_mut().reading = Some(paths);
+        s.runtime.observe_at(Tick(0));
+        let ran = s.runtime.run(Tick(0));
+        let mut shared = s.shared.borrow_mut();
+        shared.reading = None;
+        let state = shared.state.take();
+        match ran {
+            Ok(r) if r.events == 0 => {}
+            Ok(_) => {
+                return Err(EngineError::Internal(
+                    "a state read ran an event".to_owned(),
+                ));
+            }
+            Err(e) => return Err(EngineError::BackendFailed(format!("state: {e}"))),
+        }
+        state.ok_or_else(|| EngineError::Internal("the state read did not fire".to_owned()))
     }
 
     /// Snapshots, patches, and resumes the patched checkpoint in a fresh runtime.
@@ -467,35 +507,41 @@ impl Backend for RuntimeBackend {
         })
     }
 
-    /// Reads every component's `inspect()` at an observe point registered at tick 0,
-    /// which is due at once, and runs no further than tick 0, where no event is left.
-    /// Observe points are driver state, so the read changes nothing (§10).
+    /// Every component's `inspect()`, then each component's snapshot schema and the
+    /// BLAKE3 of its snapshot bytes, labeled derived, which differ whenever its stored
+    /// state does, then the decoder's fields.
     fn state(&mut self) -> Result<Vec<StateField>, EngineError> {
         let Some(s) = self.session.as_mut() else {
             return Err(EngineError::Internal("state before start".to_owned()));
         };
-        if s.runtime.peek_key().is_some_and(|k| k.tick == Tick(0)) {
-            return Err(EngineError::Internal(
-                "state while events at tick 0 are pending".to_owned(),
+        let mut fields = s.inspect()?;
+        let paths: Vec<&str> = s.runtime.component_paths().collect();
+        let bytes = s
+            .runtime
+            .snapshot()
+            .map_err(|e| EngineError::BackendFailed(format!("snapshot: {e}")))?;
+        let states = component_states(&bytes)
+            .map_err(|e| EngineError::Internal(format!("the snapshot does not read back: {e}")))?;
+        for (id, schema, state) in states {
+            let component = paths.get(id as usize).copied().unwrap_or("?");
+            let field = |field: &str, value| StateField {
+                component: component.to_owned(),
+                field: field.to_owned(),
+                value,
+                source: Source::Derived("snapshot".to_owned()),
+            };
+            fields.push(field("schema", Value::U64(schema.into())));
+            fields.push(field(
+                "blake3",
+                Value::Bytes(blake3::hash(state).as_bytes().to_vec()),
             ));
         }
-        let paths = s.runtime.component_paths().map(str::to_owned).collect();
-        s.shared.borrow_mut().reading = Some(paths);
-        s.runtime.observe_at(Tick(0));
-        let ran = s.runtime.run(Tick(0));
-        let mut shared = s.shared.borrow_mut();
-        shared.reading = None;
-        let state = shared.state.take();
-        match ran {
-            Ok(r) if r.events == 0 => {}
-            Ok(_) => {
-                return Err(EngineError::Internal(
-                    "a state read ran an event".to_owned(),
-                ));
-            }
-            Err(e) => return Err(EngineError::BackendFailed(format!("state: {e}"))),
+        if let Some(decode) = &self.decoder {
+            let decoded = decode(&bytes)
+                .map_err(|why| EngineError::BackendFailed(format!("state decoder: {why}")))?;
+            fields.extend(decoded);
         }
-        state.ok_or_else(|| EngineError::Internal("the state read did not fire".to_owned()))
+        Ok(fields)
     }
 
     fn restore(&mut self, c: &Checkpoint) -> Result<(), EngineError> {

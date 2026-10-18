@@ -12,6 +12,7 @@ use systemscope_verify::profile::{
     ComparisonProfile, FieldSpec, KindSpec, Requirement, StreamSpec, Support,
 };
 use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
+use systemscope_verify::state::{Source, StateField};
 
 use super::Fixture;
 use super::portable::Platform;
@@ -164,7 +165,7 @@ pub fn config() -> BackendRunConfig {
 }
 
 /// A SystemScope backend on the frozen `m3-reference` with `fixture`'s disk, able to
-/// apply state patches to the CPU.
+/// apply state patches to the CPU, and reading state with the portable decoder.
 pub fn backend(fixture: &Fixture) -> RuntimeBackend {
     let fixture = fixture.clone();
     RuntimeBackend::new(
@@ -177,6 +178,7 @@ pub fn backend(fixture: &Fixture) -> RuntimeBackend {
         Box::new(|| Box::new(M3Projection::default())),
     )
     .with_patch(Box::new(patch))
+    .with_decoder(Box::new(decode_state))
 }
 
 /// Patches one 32-bit CPU field of `m3-reference` snapshot bytes, found by the portable
@@ -210,4 +212,135 @@ pub fn patch(bytes: &mut [u8], p: &StatePatch) -> Result<(), String> {
     }
     bytes[at..at + 4].copy_from_slice(&new.to_le_bytes());
     Ok(())
+}
+
+/// Reads `m3-reference` state fields from snapshot bytes with the portable decoder
+/// (`docs/m4-design.md` §13.2): each component's documented schema, field by field, in
+/// component order. Fields are named by schema path, such as `x5`, `regions[0].active`,
+/// or `procs[1].state`; compound values the schema does not name are rendered whole. RAM
+/// pages are BLAKE3 digests, labeled derived.
+pub fn decode_state(bytes: &[u8]) -> Result<Vec<StateField>, String> {
+    let p = Platform::decode(bytes)?;
+    let schema = |id: usize| {
+        p.entries
+            .iter()
+            .find(|e| e.id as usize == id)
+            .map_or(0, |e| e.schema)
+    };
+    let mut out = Vec::new();
+    let mut component = |id: usize, fields: Vec<(String, Value)>| {
+        let source = Source::Decoder(format!("m3-portable/{}", schema(id)));
+        out.extend(fields.into_iter().map(|(field, value)| StateField {
+            component: m3ref::PATHS[id].to_owned(),
+            field,
+            value,
+            source: source.clone(),
+        }));
+    };
+    let u = |v: u64| Value::U64(v);
+    let s = |v: &dyn std::fmt::Debug| Value::Str(format!("{v:?}"));
+    let n = |name: &str| name.to_owned();
+    let c = &p.cpu;
+    let mut cpu = vec![(n("pc"), u(c.pc.into()))];
+    cpu.extend(
+        c.regs
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (format!("x{}", i + 1), u((*r).into()))),
+    );
+    cpu.extend([
+        (n("instret"), u(c.instret)),
+        (n("next_txn"), u(c.next_txn)),
+        (n("state"), s(&c.state)),
+        (n("mepc"), u(c.mepc.into())),
+        (n("priv"), u(c.privilege.into())),
+        (n("spp"), u(c.spp.into())),
+        (n("stvec"), u(c.stvec.into())),
+        (n("sepc"), u(c.sepc.into())),
+        (n("scause"), u(c.scause.into())),
+        (n("stval"), u(c.stval.into())),
+        (n("satp"), u(c.satp.into())),
+    ]);
+    component(0, cpu);
+    let mut bus = vec![(n("next_downstream"), u(p.bus.next_downstream))];
+    for (i, r) in p.bus.regions.iter().enumerate() {
+        bus.extend([
+            (format!("regions[{i}].active"), s(&r.active)),
+            (format!("regions[{i}].cursor"), u(r.cursor.into())),
+            (format!("regions[{i}].queues"), s(&r.queues)),
+            (format!("regions[{i}].addrs"), s(&r.addrs)),
+        ]);
+    }
+    component(1, bus);
+    let pages = p.ram.iter().map(|(index, bytes)| {
+        let pa = super::portable::RAM_BASE + u64::from(*index) * super::portable::PAGE_BYTES;
+        StateField {
+            component: m3ref::PATHS[2].to_owned(),
+            field: format!("page[{pa:#010x}]"),
+            value: Value::Bytes(blake3::hash(bytes).as_bytes().to_vec()),
+            source: Source::Derived("page blake3".to_owned()),
+        }
+    });
+    let pages: Vec<StateField> = pages.collect();
+    component(3, vec![(n("output"), Value::Bytes(p.uart.clone()))]);
+    let (pending, enable, irq) = p.irqc;
+    component(
+        4,
+        vec![
+            (n("pending"), u(pending.into())),
+            (n("enable"), u(enable.into())),
+            (n("out"), Value::Bool(irq)),
+        ],
+    );
+    let b = &p.blk;
+    let mut blk: Vec<(String, Value)> = b
+        .registers
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (format!("registers[{i}]"), u((*r).into())))
+        .collect();
+    blk.extend([
+        (n("busy"), Value::Bool(b.busy)),
+        (n("done"), Value::Bool(b.done)),
+        (n("latched"), s(&b.latched)),
+        (n("engine"), s(&b.engine)),
+        (n("block"), u(b.block.into())),
+        (n("beat"), u(b.beat.into())),
+        (n("buffer"), u(b.buffer as u64)),
+        (n("dma_txn"), u(b.dma_txn)),
+        (n("blk_txn"), u(b.blk_txn)),
+    ]);
+    component(5, blk);
+    component(6, vec![(n("stored"), s(&p.disk))]);
+    let k = &p.kernel;
+    let mut kernel = vec![
+        (n("trap_frame"), u(k.trap_frame.into())),
+        (n("state"), s(&k.state)),
+        (n("op"), s(&k.op)),
+        (n("held"), s(&k.held)),
+        (n("next_txn"), u(k.next_txn)),
+        (n("life"), u(k.life.into())),
+        (n("entries"), u(k.entries.into())),
+        (n("current"), s(&k.current)),
+        (n("queue"), s(&k.queue)),
+    ];
+    for (i, pcb) in k.pcbs.iter().enumerate() {
+        kernel.extend([
+            (format!("procs[{i}].pid"), u(pcb.pid.into())),
+            (format!("procs[{i}].state"), s(&pcb.state)),
+            (format!("procs[{i}].context"), Value::Bool(pcb.context)),
+            (format!("procs[{i}].root"), u(pcb.root.into())),
+            (format!("procs[{i}].tables"), s(&pcb.tables)),
+            (format!("procs[{i}].regions"), s(&pcb.regions)),
+        ]);
+    }
+    kernel.push((n("bitmap"), Value::Bytes(k.bitmap.clone())));
+    component(7, kernel);
+    // RAM's pages go in component order, after the bus.
+    let at = out
+        .iter()
+        .position(|f| f.component == m3ref::PATHS[3])
+        .unwrap_or(out.len());
+    out.splice(at..at, pages);
+    Ok(out)
 }

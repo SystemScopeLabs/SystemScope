@@ -110,6 +110,17 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
     })
 }
 
+/// A component's stored state: its id, schema version, and bytes.
+pub type ComponentState<'a> = (u32, u32, &'a [u8]);
+
+/// The component states of a snapshot, `(id, schema version, bytes)` in stored order,
+/// after the same decoding [`Runtime::restore`] does first. It checks nothing against a
+/// session and builds nothing: a reader for tools that compare snapshots component by
+/// component.
+pub fn component_states(bytes: &[u8]) -> Result<Vec<ComponentState<'_>>, RestoreError> {
+    decode(bytes).map(|d| d.components)
+}
+
 /// The decoded form of this session's clock domains, for comparison.
 fn domain_fields(domains: &[ClockDomain]) -> Vec<(u32, u64, u64, u64, u8)> {
     let mut e = Encoder::new();

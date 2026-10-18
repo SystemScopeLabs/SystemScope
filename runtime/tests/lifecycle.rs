@@ -17,6 +17,7 @@ use systemscope_contracts::time::{
 use systemscope_contracts::topology::LinkLatency;
 use systemscope_runtime::runtime::{Dispatched, Lifecycle, Runtime, RuntimeError, SessionConfig};
 use systemscope_runtime::scheduler::SchedulerConfig;
+use systemscope_runtime::snapshot::component_states;
 use systemscope_runtime::topology::{ElaborationError, TopologyBuilder};
 
 type Log = Rc<RefCell<Vec<String>>>;
@@ -682,4 +683,17 @@ fn message_protocol_must_match_sending_port() {
         }))
     );
     assert_eq!(rt.pending(), 0);
+}
+
+#[test]
+fn a_snapshot_reads_back_as_component_states() {
+    let (mut rt, _) = ping_echo(None);
+    rt.init().unwrap();
+    let bytes = rt.snapshot().unwrap();
+    let states = component_states(&bytes).unwrap();
+    assert_eq!(states, [(0, 0, &[][..]), (1, 0, &[][..])]);
+    assert_eq!(component_states(&bytes[1..]), Err(RestoreError::BadMagic));
+    let mut long = bytes.clone();
+    long.push(0);
+    assert!(component_states(&long).is_err());
 }

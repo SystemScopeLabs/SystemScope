@@ -446,14 +446,28 @@ fn emitted_takes_queued_observations_without_advancing() {
     assert!(matches!(b.emitted("os"), Err(EngineError::Internal(_))));
 }
 
+/// The counter's state as the adapter reads it: its `inspect()`, then its snapshot schema
+/// and the BLAKE3 of its snapshot bytes.
 fn counter_state(n: u64) -> Vec<StateField> {
-    let field = |field: &str, value| StateField {
+    let field = |field: &str, value, source| StateField {
         component: "counter".to_owned(),
         field: field.to_owned(),
         value,
-        source: Source::Inspect,
+        source,
     };
-    vec![field("n", Value::U64(n)), field("halts", Value::Bool(true))]
+    let mut bytes = MARK.to_le_bytes().to_vec();
+    bytes.extend(n.to_le_bytes());
+    let derived = || Source::Derived("snapshot".to_owned());
+    vec![
+        field("n", Value::U64(n), Source::Inspect),
+        field("halts", Value::Bool(true), Source::Inspect),
+        field("schema", Value::U64(1), derived()),
+        field(
+            "blake3",
+            Value::Bytes(blake3::hash(&bytes).as_bytes().to_vec()),
+            derived(),
+        ),
+    ]
 }
 
 #[test]
@@ -490,4 +504,30 @@ fn the_state_is_read_at_the_current_boundary_without_advancing() {
     let mut r = started(&input);
     r.restore(&c).unwrap();
     assert_eq!(r.state(), Ok(counter_state(1)));
+}
+
+#[test]
+fn a_decoder_adds_its_fields_to_every_state_read() {
+    let decoded = |bytes: &[u8]| StateField {
+        component: "counter".to_owned(),
+        field: "bytes".to_owned(),
+        value: Value::U64(bytes.len() as u64),
+        source: Source::Decoder("test/1".to_owned()),
+    };
+    let mut b = backend().with_decoder(Box::new(move |bytes| Ok(vec![decoded(bytes)])));
+    b.start(&scenario(), &InputVariant::None, &config(), &profile())
+        .unwrap();
+    let len = b.runtime().unwrap().snapshot().unwrap().len();
+    let mut want = counter_state(0);
+    want.push(decoded(&vec![0; len]));
+    assert_eq!(b.state(), Ok(want));
+    let mut b = backend().with_decoder(Box::new(|_| Err("unreadable".to_owned())));
+    b.start(&scenario(), &InputVariant::None, &config(), &profile())
+        .unwrap();
+    assert_eq!(
+        b.state(),
+        Err(EngineError::BackendFailed(
+            "state decoder: unreadable".to_owned()
+        ))
+    );
 }

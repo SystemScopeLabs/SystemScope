@@ -2,8 +2,11 @@
 
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_contracts::trace::Value;
+use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::Role;
-use systemscope_verify::state::{Change, Source, StateDifference, StateField, diff_state};
+use systemscope_verify::state::{
+    Change, Source, StateDifference, StateField, arch_registers, diff_state,
+};
 
 fn f(component: &str, field: &str, v: u64, source: Source) -> StateField {
     StateField {
@@ -192,4 +195,38 @@ fn state_fields_and_differences_round_trip() {
     assert_eq!(Source::Inspect.to_string(), "inspect");
     assert_eq!(Source::Decoder("a/1".into()).to_string(), "decoder:a/1");
     assert_eq!(Source::Derived("b".into()).to_string(), "derived:b");
+}
+
+#[test]
+fn registers_are_replayed_from_retirements() {
+    let obs = |kind: &str, rd: Option<u64>, rd_value: Option<u64>| Observation {
+        stream: "arch".to_owned(),
+        ordinal: 0,
+        kind: kind.to_owned(),
+        fields: [("rd", rd), ("rd_value", rd_value)]
+            .into_iter()
+            .map(|(n, v)| {
+                let v = v.map_or(ObservedValue::Absent, |v| {
+                    ObservedValue::Present(Value::U64(v))
+                });
+                (n.to_owned(), v)
+            })
+            .collect(),
+    };
+    let arch = [
+        obs("retire", Some(5), Some(1)),
+        obs("retire", Some(2), Some(7)),
+        // Not a retirement, x0, an out-of-range register, and absent values write
+        // nothing.
+        obs("exception", Some(2), Some(9)),
+        obs("retire", Some(0), Some(9)),
+        obs("retire", Some(32), Some(9)),
+        obs("retire", None, Some(9)),
+        obs("retire", Some(2), None),
+        obs("retire", Some(5), Some(3)),
+    ];
+    let derived =
+        |field: &str, v: u64| f("arch", field, v, Source::Derived("arch replay".to_owned()));
+    assert_eq!(arch_registers(&arch), [derived("x2", 7), derived("x5", 3)]);
+    assert_eq!(arch_registers(&[]), []);
 }

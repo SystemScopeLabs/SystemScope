@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_contracts::trace::Value;
 
-use crate::observation::decode_value;
+use crate::observation::{Observation, ObservedValue, decode_value};
 use crate::profile::Role;
 
 /// Where a state field came from (§13.2).
@@ -266,4 +266,31 @@ pub fn diff_state(expected: &[StateField], actual: &[StateField]) -> Vec<StateDi
     }
     out.sort_by_key(|d| rank[d.component.as_str()]);
     out
+}
+
+/// The registers the `retire` observations of an `arch` stream wrote, replayed in order
+/// (§13.2): `x1` to `x31` from each retirement's `rd` and `rd_value`, for the registers
+/// written at least once, labeled derived. A retirement without a present `rd` or
+/// `rd_value` writes nothing, and `x0` is never written.
+pub fn arch_registers(arch: &[Observation]) -> Vec<StateField> {
+    let mut x: [Option<Value>; 32] = Default::default();
+    for o in arch.iter().filter(|o| o.kind == "retire") {
+        if let (Some(ObservedValue::Present(Value::U64(rd))), Some(ObservedValue::Present(value))) =
+            (o.field("rd"), o.field("rd_value"))
+            && (1..32).contains(rd)
+        {
+            x[*rd as usize] = Some(value.clone());
+        }
+    }
+    x.into_iter()
+        .enumerate()
+        .filter_map(|(i, v)| {
+            v.map(|value| StateField {
+                component: "arch".to_owned(),
+                field: format!("x{i}"),
+                value,
+                source: Source::Derived("arch replay".to_owned()),
+            })
+        })
+        .collect()
 }
