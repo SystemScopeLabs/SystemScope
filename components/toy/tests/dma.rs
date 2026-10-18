@@ -1,12 +1,20 @@
 //! ToyDma against a ToyMemory: bursts, the region, and the outstanding limit
 //! (`docs/m0-design.md` §9.1).
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
+use std::rc::Rc;
 
-use systemscope_contracts::time::{Duration, Frequency, Rounding, SimulationClock, Tick};
+use systemscope_contracts::component::ComponentId;
+use systemscope_contracts::error::SimError;
+use systemscope_contracts::observe::{Control, EventView, Observer, StateView, WorldView};
+use systemscope_contracts::time::{
+    ClockDomainId, Duration, Frequency, Rounding, SimulationClock, Tick,
+};
 use systemscope_contracts::topology::LinkLatency;
 use systemscope_contracts::trace::{TraceRecord, Value};
-use systemscope_runtime::runtime::{Runtime, SessionConfig};
+use systemscope_runtime::runtime::{Runtime, RuntimeError, SessionConfig};
 use systemscope_runtime::topology::TopologyBuilder;
 use systemscope_toy::{ToyDma, ToyDmaConfig, ToyMemory, ToyMemoryConfig};
 
@@ -16,6 +24,29 @@ const LEN: u32 = 16;
 const SLOTS: u32 = 32;
 
 fn build(seed: u64, max_outstanding: u32, max_gap: u64, write_latency: Duration) -> Runtime {
+    let dma = ToyDmaConfig {
+        max_outstanding,
+        max_gap_cycles: NonZeroU64::new(max_gap).unwrap(),
+        ..dma_config()
+    };
+    build_with(seed, dma, write_latency)
+}
+
+/// The DMA workload; `build_with` replaces `clock` with the domain it declares.
+fn dma_config() -> ToyDmaConfig {
+    ToyDmaConfig {
+        clock: ClockDomainId(0),
+        ops: OPS,
+        max_outstanding: 8,
+        max_burst: NonZeroU64::new(8).unwrap(),
+        max_gap_cycles: NonZeroU64::new(16).unwrap(),
+        base: BASE,
+        access_len: LEN,
+        slots: SLOTS,
+    }
+}
+
+fn build_with(seed: u64, dma: ToyDmaConfig, write_latency: Duration) -> Runtime {
     let mut t = TopologyBuilder::new(SimulationClock::default());
     let io = t
         .add_clock(
@@ -26,16 +57,7 @@ fn build(seed: u64, max_outstanding: u32, max_gap: u64, write_latency: Duration)
         .unwrap();
     let dma = t.add_component(
         "dma",
-        Box::new(ToyDma::new(ToyDmaConfig {
-            clock: io,
-            ops: OPS,
-            max_outstanding,
-            max_burst: NonZeroU64::new(8).unwrap(),
-            max_gap_cycles: NonZeroU64::new(max_gap).unwrap(),
-            base: BASE,
-            access_len: LEN,
-            slots: SLOTS,
-        })),
+        Box::new(ToyDma::new(ToyDmaConfig { clock: io, ..dma })),
     );
     let mem = t.add_component(
         "mem",
@@ -145,4 +167,110 @@ fn the_seed_decides_the_writes() {
     };
     assert_eq!(run(7), run(7));
     assert_ne!(run(7), run(8));
+}
+
+/// Keeps what every component reports after each event: the last report is the end state.
+struct EndState {
+    views: Rc<RefCell<Vec<StateView>>>,
+    components: u32,
+}
+
+impl Observer for EndState {
+    fn on_after_dispatch(&mut self, _: &EventView<'_>, world: &WorldView<'_>) -> Control {
+        *self.views.borrow_mut() = (0..self.components)
+            .map(|id| world.inspect(ComponentId(id)).unwrap())
+            .collect();
+        Control::Continue
+    }
+}
+
+fn end_state(rt: &mut Runtime) -> Rc<RefCell<Vec<StateView>>> {
+    let views = Rc::default();
+    rt.add_observer(Box::new(EndState {
+        views: Rc::clone(&views),
+        components: 2,
+    }));
+    views
+}
+
+/// The DMA's fold: FNV-1a style over 64-bit words.
+fn fold(checksum: u64, word: u64) -> u64 {
+    (checksum ^ word).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+#[test]
+fn a_finished_dma_reports_its_counters_and_the_fold_of_its_completions() {
+    let mut rt = build(1, 8, 16, Duration::from_ns(30));
+    let views = end_state(&mut rt);
+    let records = records(rt);
+    let addr: BTreeMap<u64, u64> = of_kind(&records, "toy.dma.issue")
+        .iter()
+        .map(|r| (u64_field(r, "txn"), u64_field(r, "addr")))
+        .collect();
+    let mut checksum = 0;
+    for r in of_kind(&records, "toy.dma.done") {
+        let txn = u64_field(r, "txn");
+        checksum = fold(fold(checksum, txn), addr[&txn]);
+        assert_eq!(u64_field(r, "checksum"), checksum);
+    }
+    let views = views.borrow();
+    assert_eq!(
+        views[0].fields,
+        [
+            ("issued", Value::U64(OPS)),
+            ("completed", Value::U64(OPS)),
+            ("next_txn", Value::U64(OPS)),
+            ("outstanding", Value::U64(0)),
+            ("burst_left", Value::U64(0)),
+            ("checksum", Value::U64(checksum)),
+        ]
+    );
+    assert_eq!(
+        views[1].fields,
+        [("size", Value::U64(BASE + u64::from(SLOTS * LEN)))]
+    );
+}
+
+#[test]
+fn one_seed_gives_one_exact_run() {
+    // Pinned: every random choice, from burst lengths to the data bytes, shifts the
+    // stream behind it, so a change in what the DMA draws changes these.
+    let mut rt = build(7, 8, 16, Duration::from_ns(30));
+    let views = end_state(&mut rt);
+    rt.init().unwrap();
+    while rt.step().unwrap().is_some() {}
+    let checksum = views.borrow()[0].fields[5].1.clone();
+    assert_eq!(
+        (rt.now(), checksum),
+        (Tick(1_754_666), Value::U64(15_731_638_562_920_060_080))
+    );
+}
+
+#[test]
+fn a_dma_needs_slots_and_room_for_a_write() {
+    for (max_outstanding, slots) in [(0, SLOTS), (8, 0)] {
+        let dma = ToyDmaConfig {
+            max_outstanding,
+            slots,
+            ..dma_config()
+        };
+        let mut rt = build_with(1, dma, Duration::from_ns(30));
+        assert_eq!(
+            rt.init(),
+            Err(RuntimeError::Faulted(SimError::ComponentFault(
+                "toy dma: max_outstanding and slots must be non-zero"
+            )))
+        );
+    }
+}
+
+#[test]
+fn a_dma_with_nothing_to_write_schedules_nothing() {
+    let dma = ToyDmaConfig {
+        ops: 0,
+        ..dma_config()
+    };
+    let mut rt = build_with(1, dma, Duration::from_ns(30));
+    rt.init().unwrap();
+    assert_eq!(rt.pending(), 0);
 }

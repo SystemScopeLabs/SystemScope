@@ -1,12 +1,16 @@
 //! First end-to-end runs of real toy components through the runtime.
 
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::num::NonZeroU64;
+use std::rc::Rc;
 
 use systemscope_contracts::component::{
     Component, ComponentId, Delivered, InitContext, PortSpec, Role, SimContext,
 };
 use systemscope_contracts::error::SimError;
 use systemscope_contracts::event::{Phase, ScheduleWhen};
+use systemscope_contracts::observe::{Control, EventView, Observer, StateView, WorldView};
 use systemscope_contracts::protocol::Message;
 use systemscope_contracts::protocol::mem::{self, MemMsg};
 use systemscope_contracts::snapshot::{RestoreError, SnapshotReader, SnapshotWriter};
@@ -14,6 +18,7 @@ use systemscope_contracts::time::{
     ClockDomainId, Duration, Frequency, Rounding, SimulationClock, Tick,
 };
 use systemscope_contracts::topology::LinkLatency;
+use systemscope_contracts::trace::Value;
 use systemscope_runtime::runtime::{Dispatched, Runtime, RuntimeError, SessionConfig};
 use systemscope_runtime::topology::TopologyBuilder;
 use systemscope_toy::cpu::{COMMIT, ISSUE};
@@ -289,4 +294,105 @@ fn stale_memory_is_caught_by_the_read_check() {
         err,
         RuntimeError::Faulted(SimError::ComponentFault("toy cpu: read mismatch"))
     );
+}
+
+/// Keeps what the CPU reports after each event.
+struct CpuViews(Rc<RefCell<Vec<StateView>>>);
+
+impl Observer for CpuViews {
+    fn on_after_dispatch(&mut self, _: &EventView<'_>, world: &WorldView<'_>) -> Control {
+        self.0.borrow_mut().push(world.inspect(CPU).unwrap());
+        Control::Continue
+    }
+}
+
+fn cpu_views(rt: &mut Runtime) -> Rc<RefCell<Vec<StateView>>> {
+    let views = Rc::default();
+    rt.add_observer(Box::new(CpuViews(Rc::clone(&views))));
+    views
+}
+
+fn field(view: &StateView, name: &str) -> u64 {
+    match view.get(name) {
+        Some(Value::U64(v)) => *v,
+        other => panic!("{name}: {other:?}"),
+    }
+}
+
+/// The CPU's fold: FNV-1a style over 64-bit words.
+fn fold(checksum: u64, word: u64) -> u64 {
+    (checksum ^ word).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+#[test]
+fn a_finished_cpu_reports_its_counters_and_the_fold_of_its_commits() {
+    let mut rt = build(7, cpu_config(2_000, 40), memory());
+    let views = cpu_views(&mut rt);
+    let trace = run_all(&mut rt);
+    // Each response commits in arrival order: its kind, txn, address, then every byte
+    // read or written.
+    let mut requests = BTreeMap::new();
+    let mut checksum = 0;
+    for d in &trace {
+        let Delivered::Message {
+            msg: Message::Mem(msg),
+            ..
+        } = &d.delivery
+        else {
+            continue;
+        };
+        let (tag, txn, data) = match msg {
+            MemMsg::ReadReq { txn, addr, .. } => {
+                requests.insert(*txn, (*addr, Vec::new()));
+                continue;
+            }
+            MemMsg::WriteReq { txn, addr, data } => {
+                requests.insert(*txn, (*addr, data.clone()));
+                continue;
+            }
+            MemMsg::ReadResp { txn, data } => (0, txn, data.clone()),
+            MemMsg::WriteResp { txn } => (1, txn, requests[txn].1.clone()),
+        };
+        for word in [tag, txn.0, requests[txn].0] {
+            checksum = fold(checksum, word);
+        }
+        for byte in data {
+            checksum = fold(checksum, u64::from(byte));
+        }
+    }
+    let views = views.borrow();
+    assert_eq!(
+        views.last().unwrap().fields,
+        [
+            ("issued", Value::U64(2_000)),
+            ("committed", Value::U64(2_000)),
+            ("next_txn", Value::U64(2_000)),
+            ("outstanding", Value::U64(0)),
+            ("arrived", Value::U64(0)),
+            ("checksum", Value::U64(checksum)),
+        ]
+    );
+    // Memory is far slower than the CPU thinks, so it keeps its limit's worth in flight.
+    let peak = views.iter().map(|v| field(v, "outstanding")).max();
+    assert_eq!(peak, Some(4));
+}
+
+#[test]
+fn one_seed_gives_one_exact_run() {
+    // Pinned: every random choice, from slots to the data bytes, shifts the stream behind
+    // it, so a change in what the CPU draws changes these.
+    let mut rt = build(7, cpu_config(300, 40), memory());
+    let views = cpu_views(&mut rt);
+    run_all(&mut rt);
+    let checksum = field(views.borrow().last().unwrap(), "checksum");
+    assert_eq!(
+        (rt.now(), checksum),
+        (Tick(3_426_000), 18_283_340_612_557_787_727)
+    );
+}
+
+#[test]
+fn a_cpu_with_nothing_to_do_schedules_nothing() {
+    let rt = build(7, cpu_config(0, 40), memory());
+    assert_eq!(rt.pending(), 0);
 }
