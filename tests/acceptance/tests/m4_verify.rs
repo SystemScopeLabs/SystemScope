@@ -24,8 +24,9 @@ use systemscope_verify::locate::{
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
 use systemscope_verify::runtime::RuntimeBackend;
+use systemscope_verify::slice::Link;
 use systemscope_verify::state::{Change, diff_state};
-use systemscope_verify::trace::first_trace_divergence;
+use systemscope_verify::trace::trace_and_slices;
 
 const GOLDEN_JSON: &str = include_str!("../../golden/m3-reference.json");
 
@@ -226,7 +227,7 @@ fn diverge(
     let state = scan(&[]);
     let trace = {
         let (mut x, mut y) = (verify::backend(fixture), verify::backend(fixture));
-        first_trace_divergence(
+        trace_and_slices(
             &the_plan(b),
             &verify::scenario(fixture),
             same(&mut x, InputVariant::None, &indexes[0]),
@@ -236,10 +237,41 @@ fn diverge(
         )
         .unwrap()
     };
+    let (trace, slices) = trace;
     let t = trace.event.expect("the traces differ");
     let d = (trace.record - trace.first) as usize;
     assert_ne!(trace.expected[d], trace.actual[d]);
     assert!(t <= until, "{trace:?}");
+    // Each side's slice ends at its first differing record, in trace order, within its
+    // window.
+    assert_eq!(slices.len(), 2);
+    for (sl, (role, lines)) in slices.iter().zip([
+        (Role::Expected, &trace.expected),
+        (Role::Actual, &trace.actual),
+    ]) {
+        assert_eq!(sl.role, role);
+        let last = sl.entries.last().unwrap();
+        assert_eq!((last.record, last.link), (trace.record, Link::Divergent));
+        assert_eq!(last.line, lines[d]);
+        assert!(sl.first <= trace.record);
+        assert!(
+            sl.entries
+                .windows(2)
+                .all(|w| sl.first <= w[0].record && w[0].record < w[1].record)
+        );
+        if let InputVariant::State(_) = &input {
+            // A fetch or a retirement: only the CPU's own port traffic precedes it.
+            for e in &sl.entries[..sl.entries.len() - 1] {
+                assert_eq!(e.link, Link::Access, "{sl:?}");
+                let source = e
+                    .line
+                    .fields
+                    .iter()
+                    .any(|f| f == &("source".to_owned(), Value::U64(0)));
+                assert!(source || e.line.component == CPU_PATH, "{sl:?}");
+            }
+        }
+    }
     if let InputVariant::State(p) = &input {
         assert!(state.origin < p.event_index, "{state:?}");
         // The patch shows in the trace no earlier than the next event.
@@ -276,6 +308,35 @@ fn diverge(
                 .contains(&("msg".to_owned(), Value::Str("ReadResult".to_owned())))
         );
         assert!(t <= r, "{trace:?}");
+        // The patched block's result follows its request, the medium's read, and the
+        // transfer's command with the MMIO write that issued it.
+        for sl in &slices {
+            let got: Vec<(Link, &str, &str)> = sl
+                .entries
+                .iter()
+                .map(|e| (e.link, e.line.component.as_str(), e.line.kind.as_str()))
+                .collect();
+            let dispatch = "runtime.dispatch";
+            assert_eq!(
+                got,
+                [
+                    (Link::Dma, "soc.blk", dispatch),
+                    (Link::Dma, "soc.blk", "platform.blk.command"),
+                    (Link::Request, "soc.disk", dispatch),
+                    (Link::Dma, "soc.disk", "platform.disk.read"),
+                    (Link::Divergent, "soc.blk", dispatch),
+                ]
+            );
+            let txn = |i: usize| {
+                sl.entries[i]
+                    .line
+                    .fields
+                    .iter()
+                    .find(|f| f.0 == "txn")
+                    .cloned()
+            };
+            assert_eq!(txn(2), txn(4));
+        }
     }
     let b = a;
     assert_eq!(

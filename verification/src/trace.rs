@@ -15,6 +15,7 @@ use crate::latent::{SameSide, resume, start};
 use crate::locate::Window;
 use crate::observation::decode_value;
 use crate::profile::{Plan, Role};
+use crate::slice::{SLICE_RECORDS, Slice, slice};
 use crate::state::{decode_role, role_tag};
 
 /// One canonical trace record, with its component named by topology path (§14.1).
@@ -33,7 +34,7 @@ pub struct TraceLine {
 }
 
 impl TraceLine {
-    fn of(r: &TraceRecord, paths: &[String]) -> TraceLine {
+    pub(crate) fn of(r: &TraceRecord, paths: &[String]) -> TraceLine {
         TraceLine {
             at: r.at,
             origin: r.origin,
@@ -138,26 +139,60 @@ pub fn first_trace_divergence(
     window: u64,
     until: u64,
 ) -> Result<TraceDivergence, EngineError> {
-    let mut sides = [expected, actual];
+    Ok(scan(plan, scenario, [expected, actual], window, 0, until)?.0)
+}
+
+/// The first trace divergence, as [`first_trace_divergence`] finds it, and each side's
+/// relevant-predecessor slice of its first differing record (§15), built from the up to
+/// [`SLICE_RECORDS`] records before it. A side whose records end before the differing
+/// index has no slice.
+pub fn trace_and_slices(
+    plan: &Plan,
+    scenario: &Scenario,
+    expected: SameSide<'_>,
+    actual: SameSide<'_>,
+    window: u64,
+    until: u64,
+) -> Result<(TraceDivergence, Vec<Slice>), EngineError> {
+    scan(
+        plan,
+        scenario,
+        [expected, actual],
+        window,
+        SLICE_RECORDS,
+        until,
+    )
+}
+
+fn scan(
+    plan: &Plan,
+    scenario: &Scenario,
+    mut sides: [SameSide<'_>; 2],
+    window: u64,
+    keep: usize,
+    until: u64,
+) -> Result<(TraceDivergence, Vec<Slice>), EngineError> {
     let paths = start(plan, scenario, &mut sides)?;
     let origin = resume(&mut sides, until, |b| Ok(b.to_vec()))?;
     let [e, a] = sides.map(|s| s.backend);
     e.capture()?;
     a.capture()?;
     let w = usize::try_from(window).unwrap_or(usize::MAX);
+    let ring = w.max(keep);
     let mut before: [VecDeque<TraceRecord>; 2] = Default::default();
     let mut record = 0u64;
     loop {
         let at = e.events().expect("started");
         if at >= until {
-            return Ok(TraceDivergence {
+            let none = TraceDivergence {
                 origin,
                 event: None,
                 record,
                 first: record,
                 expected: Vec::new(),
                 actual: Vec::new(),
-            });
+            };
+            return Ok((none, Vec::new()));
         }
         e.step_event()?;
         a.step_event()?;
@@ -167,12 +202,31 @@ pub fn first_trace_divergence(
             record += re.len() as u64;
             for (b, r) in before.iter_mut().zip([re, ra]) {
                 b.extend(r);
-                while b.len() > w {
+                while b.len() > ring {
                     b.pop_front();
                 }
             }
             continue;
         };
+        // Each side's dense window, ending at its first differing record.
+        let mut slices = Vec::new();
+        if keep > 0 {
+            for ((role, b), r) in [Role::Expected, Role::Actual]
+                .into_iter()
+                .zip(&before)
+                .zip([&re, &ra])
+            {
+                let Some(anchor) = r.get(j) else {
+                    continue;
+                };
+                let from = b.len().saturating_sub(keep);
+                let mut dense: Vec<TraceRecord> = b.iter().skip(from).cloned().collect();
+                dense.extend(r[..j].iter().cloned());
+                dense.push(anchor.clone());
+                let first = record + (from as u64) - (b.len() as u64);
+                slices.push(slice(&dense, first, &paths, role));
+            }
+        }
         // The records before the first differing one are equal on both sides.
         let mut lines = [re, ra].map(|r| {
             let mut kept: Vec<TraceRecord> = before[0].iter().cloned().collect();
@@ -195,14 +249,15 @@ pub fn first_trace_divergence(
         }
         let record = record + j as u64;
         let [le, la] = lines.map(|k| k.iter().map(|r| TraceLine::of(r, &paths)).collect());
-        return Ok(TraceDivergence {
+        let found = TraceDivergence {
             origin,
             event: Some(at + 1),
             record,
             first: record - kept_before as u64,
             expected: le,
             actual: la,
-        });
+        };
+        return Ok((found, slices));
     }
 }
 

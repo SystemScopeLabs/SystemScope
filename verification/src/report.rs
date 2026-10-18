@@ -11,13 +11,14 @@ use crate::profile::{Plan, Role};
 use crate::result::{StateEvidence, TraceEvidence, VerificationResult};
 use crate::runtime::RuntimeBackend;
 use crate::state::diff_state;
-use crate::trace::{auxiliary_windows, first_trace_divergence};
+use crate::trace::{auxiliary_windows, trace_and_slices};
 
 /// Verifies `inputs[1]` against `inputs[0]` on backends `make` builds, with a checkpoint
 /// every `every` primary boundaries. A primary divergence at ordinal `d` gets every
 /// evidence a same-engine pair can give: each side's state after its boundary `d`, and
 /// the first state and trace divergences up to the later of the two sides' events at
-/// `d`. An engine failure is the result, with no evidence.
+/// `d`, with each side's predecessor slice of its first differing trace record. An
+/// engine failure is the result, with no evidence.
 pub fn same_engine(
     plan: &Plan,
     scenario: &Scenario,
@@ -33,6 +34,7 @@ pub fn same_engine(
             window: None,
             state: None,
             trace: TraceEvidence::default(),
+            slices: Vec::new(),
         },
     }
 }
@@ -69,6 +71,7 @@ fn evidence(
         window: located.window.clone(),
         state: None,
         trace: TraceEvidence::default(),
+        slices: Vec::new(),
     };
     let Verdict::Compared(c) = &located.verdict else {
         return Ok(result);
@@ -119,14 +122,16 @@ fn evidence(
         first: Some(first),
     });
     let (mut x, mut y) = (make(), make());
-    result.trace.canonical = Some(first_trace_divergence(
+    let (canonical, slices) = trace_and_slices(
         plan,
         scenario,
         same(0, &mut x),
         same(1, &mut y),
         u64::from(plan.profile.report_window),
         until,
-    )?);
+    )?;
+    result.trace.canonical = Some(canonical);
+    result.slices = slices;
     Ok(result)
 }
 

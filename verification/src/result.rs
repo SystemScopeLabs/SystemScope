@@ -15,6 +15,7 @@ use crate::latent::StateDivergence;
 use crate::locate::Window;
 use crate::observation::{Observation, ObservedValue, decode_value};
 use crate::profile::{Incomparable, Role};
+use crate::slice::Slice;
 use crate::state::{Change, StateDifference, decode_role, role_tag};
 use crate::trace::{Diagnostic, TraceDivergence, TraceLine};
 
@@ -34,6 +35,9 @@ pub struct VerificationResult {
     pub state: Option<StateEvidence>,
     /// Trace evidence (§14).
     pub trace: TraceEvidence,
+    /// Each side's recorded predecessors of its first differing trace record (§15), for
+    /// a primary divergence of same-engine sides.
+    pub slices: Vec<Slice>,
 }
 
 /// The overall outcome, the engine's failures included (§20).
@@ -112,6 +116,7 @@ impl VerificationResult {
         });
         option(&mut e, self.trace.canonical.as_ref(), trace_divergence);
         list(&mut e, &self.trace.diagnostics, |e, d| d.encode(e));
+        list(&mut e, &self.slices, |e, s| s.encode(e));
         e.into_bytes()
     }
 
@@ -155,12 +160,14 @@ impl VerificationResult {
             canonical: read_option(&mut d, read_trace_divergence)?,
             diagnostics: read_list(&mut d, Diagnostic::decode)?,
         };
+        let slices = read_list(&mut d, Slice::decode)?;
         d.finish()?;
         Ok(VerificationResult {
             verdict,
             window,
             state,
             trace,
+            slices,
         })
     }
 }
@@ -692,6 +699,17 @@ fn render(out: &mut String, r: &VerificationResult) -> fmt::Result {
                 };
                 writeln!(out, "   {mark}{}", trace_line(l))?;
             }
+        }
+    }
+    for s in &r.slices {
+        writeln!(
+            out,
+            "predecessor slice ({}), window from record {}:",
+            role(s.role),
+            s.first
+        )?;
+        for e in &s.entries {
+            writeln!(out, "  [{}] {}: {}", e.record, e.link, trace_line(&e.line))?;
         }
     }
     for d in &r.trace.diagnostics {

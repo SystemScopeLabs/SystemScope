@@ -5,7 +5,7 @@ mod common;
 
 use common::*;
 use systemscope_contracts::canonical::DecodeError;
-use systemscope_contracts::trace::Value;
+use systemscope_contracts::trace::{TraceAt, TraceOrigin, Value};
 use systemscope_verify::backend::Backend;
 use systemscope_verify::case::InputVariant;
 use systemscope_verify::compare::{
@@ -19,8 +19,9 @@ use systemscope_verify::report::same_engine;
 use systemscope_verify::result::{
     RESULT_MAGIC, ResultOutcome, StateEvidence, TraceEvidence, VerificationResult,
 };
+use systemscope_verify::slice::{Link, Slice, SliceEntry};
 use systemscope_verify::state::{Change, Source, StateDifference};
-use systemscope_verify::trace::Diagnostic;
+use systemscope_verify::trace::{Diagnostic, TraceLine};
 
 fn the_plan() -> Plan {
     let b = backend();
@@ -75,12 +76,24 @@ fn a_same_engine_report_carries_every_evidence() {
     );
     let trace = r.trace.canonical.as_ref().unwrap();
     assert_eq!(trace.event, Some(5));
+    // The counter records no link: each slice is its side's first differing record.
+    assert_eq!(r.slices.len(), 2);
+    for (s, (role, lines)) in r.slices.iter().zip([
+        (Role::Expected, &trace.expected),
+        (Role::Actual, &trace.actual),
+    ]) {
+        assert_eq!(s.role, role);
+        let [e] = &s.entries[..] else { panic!("{s:?}") };
+        assert_eq!((e.record, e.link), (trace.record, Link::Divergent));
+        assert_eq!(e.line, lines[(trace.record - trace.first) as usize]);
+    }
     round_trip(&r);
     // Agreement has no divergence evidence.
     let agree = report(InputVariant::None, 2);
     assert_eq!(agree.outcome(), ResultOutcome::Compared(Outcome::Agree));
     assert_eq!((&agree.window, &agree.state), (&None, &None));
     assert_eq!(agree.trace, TraceEvidence::default());
+    assert_eq!(agree.slices, []);
     round_trip(&agree);
 }
 
@@ -126,7 +139,10 @@ fn an_engine_failure_is_the_result() {
         matches!(&r.verdict, Err(EngineError::BackendFailed(_))),
         "{r:?}"
     );
-    assert_eq!((&r.window, &r.state), (&None, &None));
+    assert_eq!(
+        (&r.window, &r.state, &r.slices[..]),
+        (&None, &None, &[][..])
+    );
     round_trip(&r);
 }
 
@@ -218,6 +234,32 @@ fn hand_built() -> VerificationResult {
                 lines: vec!["core 0: 0x0".to_owned()],
             }],
         },
+        slices: vec![Slice {
+            role: Role::Actual,
+            first: 7,
+            entries: vec![
+                SliceEntry {
+                    record: 8,
+                    link: Link::Request,
+                    line: line("ReadReq"),
+                },
+                SliceEntry {
+                    record: 10,
+                    link: Link::Divergent,
+                    line: line("ReadResp"),
+                },
+            ],
+        }],
+    }
+}
+
+fn line(msg: &str) -> TraceLine {
+    TraceLine {
+        at: TraceAt::Init,
+        origin: TraceOrigin::Runtime,
+        component: "soc.bus".to_owned(),
+        kind: "runtime.dispatch".to_owned(),
+        fields: vec![("msg".to_owned(), Value::Str(msg.to_owned()))],
     }
 }
 
@@ -243,6 +285,9 @@ window from 0:
 state at events 2 (expected) and 3 (actual):
   soc.cpu0 pc [inspect]: expected 0x4, actual 0x8
   soc.ram page[0x0] [derived:page blake3]: missing(expected), other bytes[2] 0102
+predecessor slice (actual), window from record 7:
+  [8] request: init soc.bus runtime.dispatch msg=\"ReadReq\"
+  [10] divergent: init soc.bus runtime.dispatch msg=\"ReadResp\"
 diagnostic (actual) spike log:
   core 0: 0x0
 "
@@ -256,6 +301,7 @@ diagnostic (actual) spike log:
         window: None,
         state: None,
         trace: TraceEvidence::default(),
+        slices: Vec::new(),
     };
     assert_eq!(other.outcome(), ResultOutcome::Incomparable);
     assert!(
@@ -294,6 +340,7 @@ fn every_incomparable_and_engine_error_round_trips() {
             window: None,
             state: None,
             trace: TraceEvidence::default(),
+            slices: Vec::new(),
         });
     }
 }

@@ -14,5 +14,6 @@ pub mod profile;
 pub mod report;
 pub mod result;
 pub mod runtime;
+pub mod slice;
 pub mod state;
 pub mod trace;
