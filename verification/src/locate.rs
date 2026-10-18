@@ -5,6 +5,8 @@
 //! compare stop there; checkpoint search finds it from recorded prefix digests and
 //! confirms it by direct comparison after restoring each side.
 
+use std::collections::VecDeque;
+
 use crate::backend::{Backend, Capabilities, Capability, Side, run};
 use crate::case::{Scenario, execution_id};
 use crate::checkpoint::Checkpoint;
@@ -573,6 +575,185 @@ pub fn search(
     let verdict = Verdict::Compared(Comparison {
         primary: StreamResult::Diverged {
             stream: plan.profile.primary.stream.clone(),
+            ordinal: d,
+            divergence,
+        },
+        auxiliary: Vec::new(),
+        not_compared: plan.not_compared.clone(),
+        failures: Vec::new(),
+    });
+    let window = Window {
+        first,
+        expected: e,
+        actual: a,
+        failures,
+    };
+    Ok(located(verdict, Some(window)))
+}
+
+/// Steps both sides from a common origin up to the first primary divergence (§16.2): a
+/// side with a checkpoint is restored at it, and a side without one is started and
+/// stepped to the boundaries the checkpoint covers, which must reproduce its prefix
+/// digest. Without checkpoints the origin is the initial state. The divergence and its
+/// report window are those [`search`] reports, so the origin must cover at most the
+/// divergence minus the report window. An agreement is confirmed by [`lockstep`] from
+/// the initial states, and from a checkpoint it is an error. Requires
+/// [`Capability::StepBoundary`] on both sides and [`Capability::Restore`] on a side with
+/// a checkpoint.
+pub fn resume<'a>(
+    plan: &Plan,
+    scenario: &Scenario,
+    expected: (Side<'a>, Option<&Checkpoint>),
+    actual: (Side<'a>, Option<&Checkpoint>),
+) -> Result<Located, EngineError> {
+    const ROLES: [Role; 2] = [Role::Expected, Role::Actual];
+    let spec = &plan.profile.primary;
+    let primary = spec.stream.as_str();
+    let checkpoints = [expected.1, actual.1];
+    let mut marks = [None, None];
+    for (i, c) in checkpoints.iter().enumerate() {
+        if let Some(c) = c {
+            let m = c.mark(primary).ok_or_else(|| {
+                EngineError::BoundaryDesync(format!(
+                    "{:?}: the checkpoint marks no {primary}",
+                    ROLES[i]
+                ))
+            })?;
+            marks[i] = Some((m.covered, m.prefix));
+        }
+    }
+    let origin = match marks {
+        [Some(e), Some(a)] if e != a => {
+            return Err(EngineError::BoundaryDesync(format!(
+                "the checkpoints cover {} and {} boundaries, or different prefixes",
+                e.0, a.0
+            )));
+        }
+        [Some(m), _] | [None, Some(m)] => Some(m),
+        [None, None] => None,
+    };
+    let mut sides = [expected.0, actual.0];
+    for (i, side) in sides.iter_mut().enumerate() {
+        start(plan, scenario, side)?;
+        match (checkpoints[i], origin) {
+            (Some(c), _) => side.backend.restore(c)?,
+            (None, Some((covered, prefix))) => {
+                let desync =
+                    |why: String| EngineError::BoundaryDesync(format!("{:?}: {why}", ROLES[i]));
+                let mut p = PrefixDigest::new();
+                while p.count() < covered {
+                    match side.backend.next(primary) {
+                        Ok(Some(o)) => p.absorb(&o),
+                        Ok(None) => return Err(desync(format!("ended at {}", p.count()))),
+                        Err(f) => return Err(desync(format!("failed at {}: {f}", p.count()))),
+                    }
+                }
+                if p.digest() != prefix {
+                    return Err(desync(format!("P({covered}) is not the checkpoint's")));
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    let c = origin.map_or(0, |(covered, _)| covered);
+    let w = u64::from(plan.profile.report_window);
+    let mut recent = [VecDeque::new(), VecDeque::new()];
+    let mut refused = [None, None];
+    let mut at = c;
+    let diverged = loop {
+        let mut o = [None, None];
+        for i in 0..2 {
+            o[i] = sides[i].backend.next(primary)?;
+            if let Some(o) = &o[i]
+                && refused[i].is_none()
+            {
+                refused[i] = match compare::check(spec, at, ROLES[i], o) {
+                    Ok(Ok(())) => None,
+                    Ok(Err(why)) => Some(Refusal::Incomparable(why)),
+                    Err(broken) => Some(Refusal::Broken(broken)),
+                };
+            }
+        }
+        match o {
+            [None, None] => break None,
+            [Some(eo), Some(ao)] if eo == ao => {
+                for (r, o) in recent.iter_mut().zip([eo, ao]) {
+                    r.push_back(o);
+                    if r.len() as u64 > w {
+                        r.pop_front();
+                    }
+                }
+                at += 1;
+            }
+            [eo, ao] => break Some((eo, ao)),
+        }
+    };
+    let located = |verdict: Verdict, window: Option<Window>| Located {
+        strategy: Strategy::Lockstep,
+        verdict,
+        window,
+    };
+    // The expected side's refusal is the one a scan from the initial states meets first.
+    match refused.into_iter().flatten().next() {
+        Some(Refusal::Broken(e)) => return Err(e),
+        Some(Refusal::Incomparable(why)) => {
+            return Ok(located(Verdict::Incomparable(why), None));
+        }
+        None => {}
+    }
+    let Some((eo, ao)) = diverged else {
+        if origin.is_some() {
+            return Err(EngineError::Internal(format!(
+                "the sides agree from the checkpoints at {c}"
+            )));
+        }
+        let [e, a] = sides;
+        return lockstep(plan, scenario, e, a);
+    };
+    let d = at;
+    let first = d.saturating_sub(w);
+    if first < c {
+        return Err(EngineError::Internal(format!(
+            "the checkpoints cover {c} boundaries, past the report window before {d}"
+        )));
+    }
+    let divergence = match (&eo, &ao) {
+        (Some(eo), Some(ao)) => compare::diff(eo, ao).ok_or_else(|| {
+            EngineError::Internal(format!("the observations at {d} differ without a diff"))
+        })?,
+        (Some(eo), None) => Divergence::Ended {
+            ended: Role::Actual,
+            kind: eo.kind.clone(),
+        },
+        (None, Some(ao)) => Divergence::Ended {
+            ended: Role::Expected,
+            kind: ao.kind.clone(),
+        },
+        (None, None) => unreachable!("both ended is an agreement"),
+    };
+    let mut failures = Vec::new();
+    let mut kept = [Vec::new(), Vec::new()];
+    for (i, o) in [eo, ao].into_iter().enumerate() {
+        kept[i].extend(recent[i].drain(..));
+        let Some(o) = o else {
+            continue;
+        };
+        kept[i].push(o);
+        for _ in 0..w {
+            match sides[i].backend.next(primary) {
+                Ok(Some(o)) => kept[i].push(o),
+                Ok(None) => break,
+                Err(f) => {
+                    failures.push((ROLES[i], f));
+                    break;
+                }
+            }
+        }
+    }
+    let [e, a] = kept;
+    let verdict = Verdict::Compared(Comparison {
+        primary: StreamResult::Diverged {
+            stream: spec.stream.clone(),
             ordinal: d,
             divergence,
         },

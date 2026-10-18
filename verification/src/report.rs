@@ -3,10 +3,11 @@
 
 use crate::backend::{Backend, Side, run};
 use crate::case::{BackendRunConfig, InputVariant, Scenario};
+use crate::checkpoint::Checkpoint;
 use crate::compare::{StreamResult, Verdict};
 use crate::error::EngineError;
 use crate::latent::{SameSide, first_state_divergence};
-use crate::locate::{record_index, search};
+use crate::locate::{Located, record_index, resume, search};
 use crate::profile::{Plan, Role};
 use crate::result::{StateEvidence, TraceEvidence, VerificationResult};
 use crate::runtime::RuntimeBackend;
@@ -27,19 +28,46 @@ pub fn same_engine(
     config: BackendRunConfig,
     every: u64,
 ) -> VerificationResult {
-    match evidence(plan, scenario, make, inputs, config, every) {
-        Ok(r) => r,
-        Err(e) => VerificationResult {
-            verdict: Err(e),
-            window: None,
-            state: None,
-            trace: TraceEvidence::default(),
-            slices: Vec::new(),
-        },
-    }
+    settle(searched(plan, scenario, make, inputs, config, every))
 }
 
-fn evidence(
+/// Verifies `inputs[1]` against `inputs[0]` from `origins`, each side's checkpoint or, for
+/// `None`, its initial state, with the evidence [`same_engine`] gives: a reproducer's
+/// result, a function of its material alone (§16.2). A checkpoint must cover at most the
+/// divergence minus the report window, and an agreement starts from the initial states.
+pub fn from_origins(
+    plan: &Plan,
+    scenario: &Scenario,
+    make: &dyn Fn() -> RuntimeBackend,
+    inputs: [InputVariant; 2],
+    config: BackendRunConfig,
+    origins: [Option<&Checkpoint>; 2],
+) -> VerificationResult {
+    settle((|| {
+        let (mut x, mut y) = (make(), make());
+        let located = resume(
+            plan,
+            scenario,
+            (side(&mut x, &inputs[0], config), origins[0]),
+            (side(&mut y, &inputs[1], config), origins[1]),
+        )?;
+        let checkpoints = origins.map(|c| c.map_or(&[][..], std::slice::from_ref));
+        evidence(plan, scenario, make, &inputs, config, located, checkpoints)
+    })())
+}
+
+/// The result, or an engine failure as the result with no evidence.
+fn settle(result: Result<VerificationResult, EngineError>) -> VerificationResult {
+    result.unwrap_or_else(|e| VerificationResult {
+        verdict: Err(e),
+        window: None,
+        state: None,
+        trace: TraceEvidence::default(),
+        slices: Vec::new(),
+    })
+}
+
+fn searched(
     plan: &Plan,
     scenario: &Scenario,
     make: &dyn Fn() -> RuntimeBackend,
@@ -48,13 +76,13 @@ fn evidence(
     every: u64,
 ) -> Result<VerificationResult, EngineError> {
     let roles = [Role::Expected, Role::Actual];
-    let mut ran = [make(), make()];
     let mut indexes = Vec::new();
-    for (i, b) in ran.iter_mut().enumerate() {
+    for (i, input) in inputs.iter().enumerate() {
+        let mut b = make();
         indexes.push(record_index(
             plan,
             scenario,
-            side(b, &inputs[i], config),
+            side(&mut b, input, config),
             roles[i],
             every,
         )?);
@@ -66,6 +94,20 @@ fn evidence(
         (side(&mut x, &inputs[0], config), &indexes[0]),
         (side(&mut y, &inputs[1], config), &indexes[1]),
     )?;
+    let checkpoints = [&indexes[0].checkpoints[..], &indexes[1].checkpoints[..]];
+    evidence(plan, scenario, make, &inputs, config, located, checkpoints)
+}
+
+/// The state and trace evidence of a located comparison, scanning from `checkpoints`.
+fn evidence(
+    plan: &Plan,
+    scenario: &Scenario,
+    make: &dyn Fn() -> RuntimeBackend,
+    inputs: &[InputVariant; 2],
+    config: BackendRunConfig,
+    located: Located,
+    checkpoints: [&[Checkpoint]; 2],
+) -> Result<VerificationResult, EngineError> {
     let mut result = VerificationResult {
         verdict: Ok(located.verdict.clone()),
         window: located.window.clone(),
@@ -76,13 +118,15 @@ fn evidence(
     let Verdict::Compared(c) = &located.verdict else {
         return Ok(result);
     };
-    let mut recordings = Vec::new();
-    for input in &inputs {
-        let mut b = make();
-        recordings.push(run(plan, scenario, side(&mut b, input, config)));
+    if !c.auxiliary.is_empty() {
+        let mut recordings = Vec::new();
+        for input in inputs {
+            let mut b = make();
+            recordings.push(run(plan, scenario, side(&mut b, input, config)));
+        }
+        result.trace.auxiliary =
+            auxiliary_windows(plan, c, &recordings[0].streams, &recordings[1].streams);
     }
-    result.trace.auxiliary =
-        auxiliary_windows(plan, c, &recordings[0].streams, &recordings[1].streams);
     let StreamResult::Diverged {
         stream, ordinal, ..
     } = &c.primary
@@ -92,6 +136,7 @@ fn evidence(
     // Each side's state after its own boundary `ordinal`, or where its stream ended.
     let mut states = Vec::new();
     let mut read_at = [0; 2];
+    let mut until = 0;
     for i in 0..2 {
         let mut b = make();
         b.start(scenario, &inputs[i], &config, &plan.profile)?;
@@ -101,17 +146,14 @@ fn evidence(
             }
         }
         read_at[i] = b.events().expect("started");
+        until = until.max(b.event_index(stream, *ordinal).unwrap_or(read_at[i]));
         states.push(b.state()?);
     }
-    let until = (0..2)
-        .map(|i| ran[i].event_index(stream, *ordinal).unwrap_or(read_at[i]))
-        .max()
-        .expect("two sides");
     let same = |i: usize, backend| SameSide {
         backend,
         input: inputs[i].clone(),
         config,
-        checkpoints: &indexes[i].checkpoints,
+        checkpoints: checkpoints[i],
     };
     let (mut x, mut y) = (make(), make());
     let first =
