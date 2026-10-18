@@ -188,9 +188,13 @@ jobs:
           name: m3-result-${{ matrix.os }}
           path: systemscope/target/m3-result
           if-no-files-found: error
-      # This machine's own M4 reproducers, for the m4-cross-os job.
+      # This machine's own M4 reproducers, for the m4-cross-os job. The bundle writer
+      # refuses an existing directory, and the cache may restore an earlier run's.
       - name: Emit this machine's M4 reproducers
-        run: cargo xtask m4-repro emit target/m4-repro
+        shell: bash
+        run: |
+          rm -rf target/m4-repro
+          cargo xtask m4-repro emit target/m4-repro
       - name: M4 reproducers replay
         run: cargo xtask m4-repro replay target/m4-repro
       - uses: actions/upload-artifact@v7
@@ -343,6 +347,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: systemscope
+      # Only the downloaded bundles: the cache may restore an earlier run's.
+      - name: Clear earlier foreign reproducers
+        shell: bash
+        run: rm -rf target/m4-foreign
       - uses: actions/download-artifact@v8
         with:
           name: m4-repro-${{ matrix.from }}
