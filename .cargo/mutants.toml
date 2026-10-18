@@ -6,3 +6,7 @@ test_tool = "nextest"
 # rv32 and Spike test harness in tests/rv32 is excluded too: its mutants took half the
 # run time, and the ones that survive are gaps in the harness, not in the product.
 exclude_globs = ["tests/acceptance/**", "xtask/**", "tests/rv32/**"]
+# `|` to `^` is equivalent wherever the operands share no set bits, which is how
+# immediates, CSR images, and page-table entries are assembled; all 48 such survivors in
+# the first full run were of that kind. `|` to `&` still runs.
+exclude_re = ['replace \| with \^']
