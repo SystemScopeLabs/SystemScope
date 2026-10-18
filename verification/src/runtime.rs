@@ -69,6 +69,8 @@ struct Shared {
     /// The component paths, by id, while a state read is asked for; the state read.
     reading: Option<Vec<String>>,
     state: Option<Vec<StateField>>,
+    /// Every trace record since capture began, until taken.
+    captured: Option<Vec<TraceRecord>>,
 }
 
 /// One compared stream of a running side.
@@ -156,7 +158,11 @@ struct Tap(Rc<RefCell<Shared>>);
 
 impl Observer for Tap {
     fn on_trace(&mut self, record: &TraceRecord) {
-        self.0.borrow_mut().take(record);
+        let mut shared = self.0.borrow_mut();
+        if let Some(c) = &mut shared.captured {
+            c.push(record.clone());
+        }
+        shared.take(record);
     }
 
     fn on_observe(&mut self, _: Tick, world: &WorldView<'_>) -> Control {
@@ -240,6 +246,24 @@ impl RuntimeBackend {
     /// The running runtime, for read-only inspection.
     pub fn runtime(&self) -> Option<&Runtime> {
         self.session.as_ref().map(|s| &s.runtime)
+    }
+
+    /// Keeps every trace record the started side emits from now on, until the next
+    /// `start` or `restore` (§14.1).
+    pub fn capture(&mut self) -> Result<(), EngineError> {
+        let Some(s) = self.session.as_mut() else {
+            return Err(EngineError::Internal("capture before start".to_owned()));
+        };
+        s.shared.borrow_mut().captured.get_or_insert_with(Vec::new);
+        Ok(())
+    }
+
+    /// The trace records kept since the last call, in emission order.
+    pub fn captured(&mut self) -> Vec<TraceRecord> {
+        self.session
+            .as_mut()
+            .and_then(|s| s.shared.borrow_mut().captured.as_mut().map(std::mem::take))
+            .unwrap_or_default()
     }
 
     /// The events the started side has dispatched.
@@ -395,6 +419,7 @@ fn shared(
         error: None,
         reading: None,
         state: None,
+        captured: None,
     })))
 }
 

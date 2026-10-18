@@ -25,6 +25,7 @@ use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
 use systemscope_verify::runtime::RuntimeBackend;
 use systemscope_verify::state::{Change, diff_state};
+use systemscope_verify::trace::first_trace_divergence;
 
 const GOLDEN_JSON: &str = include_str!("../../golden/m3-reference.json");
 
@@ -185,7 +186,9 @@ fn locate_everywhere(
 
 /// Runs the patched side and checks that the comparator, and the naive oracle, put the
 /// first divergence at `ordinal`, as every locator strategy does against `b`, and that
-/// a state patch's sides first differ in state in the CPU at the patch (§12.4). Returns
+/// a state patch's sides first differ in state in the CPU at the patch (§12.4) and in
+/// their canonical traces after it (§14.1); a media patch's, in RAM and the trace before
+/// the CPU. Returns
 /// the divergence, the patched side's failures after it, if any, the lockstep result,
 /// and the first state divergence up to the divergent observation.
 fn diverge(
@@ -221,8 +224,26 @@ fn diverge(
         .unwrap()
     };
     let state = scan(&[]);
+    let trace = {
+        let (mut x, mut y) = (verify::backend(fixture), verify::backend(fixture));
+        first_trace_divergence(
+            &the_plan(b),
+            &verify::scenario(fixture),
+            same(&mut x, InputVariant::None, &indexes[0]),
+            same(&mut y, input.clone(), &indexes[1]),
+            3,
+            until,
+        )
+        .unwrap()
+    };
+    let t = trace.event.expect("the traces differ");
+    let d = (trace.record - trace.first) as usize;
+    assert_ne!(trace.expected[d], trace.actual[d]);
+    assert!(t <= until, "{trace:?}");
     if let InputVariant::State(p) = &input {
         assert!(state.origin < p.event_index, "{state:?}");
+        // The patch shows in the trace no earlier than the next event.
+        assert!(p.event_index < t, "{trace:?}");
         assert_eq!(
             (state.event, &state.differing[..]),
             (Some(p.event_index), &[CPU_PATH.to_owned()][..])
@@ -242,6 +263,19 @@ fn diverge(
         assert!(0 < r && r < c && c <= until, "{ram:?} {cpu:?}");
         assert_eq!(ram.differing, ["soc.ram"]);
         assert_eq!(cpu.differing, [CPU_PATH]);
+        // The trace first differs where the controller hands the patched block to the
+        // DMA engine, before it reaches RAM.
+        let first = &trace.expected[d];
+        assert_eq!(
+            (first.component.as_str(), first.kind.as_str()),
+            ("soc.blk", "runtime.dispatch")
+        );
+        assert!(
+            first
+                .fields
+                .contains(&("msg".to_owned(), Value::Str("ReadResult".to_owned())))
+        );
+        assert!(t <= r, "{trace:?}");
     }
     let b = a;
     assert_eq!(

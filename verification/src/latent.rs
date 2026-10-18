@@ -63,17 +63,7 @@ pub fn first_state_divergence(
     until: u64,
 ) -> Result<StateDivergence, EngineError> {
     let mut sides = [expected, actual];
-    for side in &mut sides {
-        side.backend
-            .start(scenario, &side.input, &side.config, &plan.profile)?;
-    }
-    let paths: Vec<String> = sides[0]
-        .backend
-        .runtime()
-        .expect("started")
-        .component_paths()
-        .map(str::to_owned)
-        .collect();
+    let paths = start(plan, scenario, &mut sides)?;
     let ids: Vec<u32> = scope
         .iter()
         .map(|c| {
@@ -85,25 +75,7 @@ pub fn first_state_divergence(
         })
         .collect::<Result<_, _>>()?;
     let view = |bytes: &[u8]| scoped(bytes, &ids);
-    let (ke, ka) = (sides[0].checkpoints, sides[1].checkpoints);
-    let mut origin: Option<(&Checkpoint, &Checkpoint)> = None;
-    for ce in ke.iter().filter(|c| c.event_index <= until) {
-        if origin.is_some_and(|(o, _)| o.event_index >= ce.event_index) {
-            continue;
-        }
-        let want = view(&ce.state)?;
-        for ca in ka.iter().filter(|ca| ca.event_index == ce.event_index) {
-            if view(&ca.state)? == want {
-                origin = Some((ce, ca));
-                break;
-            }
-        }
-    }
-    if let Some((ce, ca)) = origin {
-        sides[0].backend.restore(ce)?;
-        sides[1].backend.restore(ca)?;
-    }
-    let origin = origin.map_or(0, |(c, _)| c.event_index);
+    let origin = resume(&mut sides, until, view)?;
     let [e, a] = sides.map(|s| s.backend);
     loop {
         let at = e.events().expect("started");
@@ -129,6 +101,55 @@ pub fn first_state_divergence(
         e.step_event()?;
         a.step_event()?;
     }
+}
+
+/// Starts both sides; returns the component paths.
+pub(crate) fn start(
+    plan: &Plan,
+    scenario: &Scenario,
+    sides: &mut [SameSide<'_>; 2],
+) -> Result<Vec<String>, EngineError> {
+    for side in sides.iter_mut() {
+        side.backend
+            .start(scenario, &side.input, &side.config, &plan.profile)?;
+    }
+    Ok(sides[0]
+        .backend
+        .runtime()
+        .expect("started")
+        .component_paths()
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Restores both started sides to their latest checkpoint pair at one event index, at
+/// most `until`, whose `view`s are equal; returns that event index, or 0 if there is
+/// none and the sides stay at their initial states.
+pub(crate) fn resume(
+    sides: &mut [SameSide<'_>; 2],
+    until: u64,
+    view: impl Fn(&[u8]) -> Result<Vec<u8>, EngineError>,
+) -> Result<u64, EngineError> {
+    let (ke, ka) = (sides[0].checkpoints, sides[1].checkpoints);
+    let mut origin: Option<(&Checkpoint, &Checkpoint)> = None;
+    for ce in ke.iter().filter(|c| c.event_index <= until) {
+        if origin.is_some_and(|(o, _)| o.event_index >= ce.event_index) {
+            continue;
+        }
+        let want = view(&ce.state)?;
+        for ca in ka.iter().filter(|ca| ca.event_index == ce.event_index) {
+            if view(&ca.state)? == want {
+                origin = Some((ce, ca));
+                break;
+            }
+        }
+    }
+    let Some((ce, ca)) = origin else {
+        return Ok(0);
+    };
+    sides[0].backend.restore(ce)?;
+    sides[1].backend.restore(ca)?;
+    Ok(ce.event_index)
 }
 
 fn read(bytes: &[u8]) -> Result<Vec<ComponentState<'_>>, EngineError> {
