@@ -3,7 +3,6 @@
 mod common;
 
 use common::*;
-use std::cell::Cell;
 use systemscope_verify::backend::Backend;
 
 use systemscope_contracts::trace::Value;
@@ -18,7 +17,7 @@ use systemscope_verify::locate::record_index;
 use systemscope_verify::minimize::{accepts, minimize, same_failure, window_origins};
 use systemscope_verify::observation::ObservedValue;
 use systemscope_verify::profile::{Plan, Role, plan};
-use systemscope_verify::report::same_engine;
+use systemscope_verify::report::{Builder, same_engine};
 use systemscope_verify::result::ResultOutcome;
 
 fn the_plan() -> Plan {
@@ -162,7 +161,14 @@ fn a_minimized_divergence_replays_from_the_latest_window_checkpoint() {
     let scenario = scenario();
     let found = same_engine(&plan, &scenario, &backend, diverging(), config(), 1);
     for every in [0, 1, 2, 3, 4, 5, 6, 10] {
-        let m = minimize(&plan, &scenario, &backend, diverging(), config(), every).unwrap();
+        let m = minimize(
+            &plan,
+            &scenario,
+            Builder::same(&backend, config()),
+            diverging(),
+            every,
+        )
+        .unwrap();
         let limit = DIVERGED - W;
         let want = (every > 0 && every <= limit).then(|| limit / every * every);
         assert_eq!(m.origins, [want, want], "{every}");
@@ -182,13 +188,18 @@ fn a_minimized_divergence_replays_from_the_latest_window_checkpoint() {
             Some([e, a]) => [Some(e), Some(a)],
             None => [None, None],
         };
-        let written = write(&plan, &scenario, &backend, diverging(), config(), origins);
+        let written = write(
+            &plan,
+            &scenario,
+            Builder::same(&backend, config()),
+            diverging(),
+            origins,
+        );
         assert_eq!(written.unwrap(), m.bundle, "{every}");
         let case = Case {
             plan: &plan,
             scenario: &scenario,
-            config: config(),
-            make: &backend,
+            sides: Builder::same(&backend, config()),
         };
         assert_eq!(replay(&m.bundle, case).unwrap(), m.result);
     }
@@ -198,21 +209,19 @@ fn a_minimized_divergence_replays_from_the_latest_window_checkpoint() {
 fn an_agreement_starts_from_the_initial_states() {
     let plan = the_plan();
     let same = [InputVariant::None, InputVariant::None];
-    let m = minimize(&plan, &scenario(), &backend, same, config(), 1).unwrap();
+    let m = minimize(
+        &plan,
+        &scenario(),
+        Builder::same(&backend, config()),
+        same,
+        1,
+    )
+    .unwrap();
     assert_eq!(m.origins, [None, None]);
     assert_eq!(m.result.outcome(), ResultOutcome::Compared(Outcome::Agree));
-    // Every call of `make` alternates the sides, so only the auxiliary stream differs.
-    let calls = Cell::new(0);
-    let make = || {
-        calls.set(calls.get() + 1);
-        if calls.get() % 2 == 1 {
-            backend()
-        } else {
-            shifted_backend()
-        }
-    };
+    // Only the actual side's auxiliary bytes are shifted.
     let same = [InputVariant::None, InputVariant::None];
-    let m = minimize(&plan, &scenario(), &make, same, config(), 1).unwrap();
+    let m = minimize(&plan, &scenario(), shifted_sides(), same, 1).unwrap();
     assert_eq!(m.origins, [None, None]);
     assert_eq!(
         m.result.outcome(),
@@ -224,7 +233,16 @@ fn an_agreement_starts_from_the_initial_states() {
 fn a_failing_search_has_no_reproducer() {
     let plan = the_plan();
     let bad = [InputVariant::None, patch_n(DIVERGED, 0, 1)];
-    assert!(minimize(&plan, &scenario(), &backend, bad, config(), 1).is_err());
+    assert!(
+        minimize(
+            &plan,
+            &scenario(),
+            Builder::same(&backend, config()),
+            bad,
+            1
+        )
+        .is_err()
+    );
 }
 
 fn compared(primary: StreamResult) -> Result<Verdict, EngineError> {

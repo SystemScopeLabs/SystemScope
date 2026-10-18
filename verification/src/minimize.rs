@@ -2,16 +2,15 @@
 //! case from the latest checkpoints that still hold the report window, accepted only
 //! when it fails the same way as the whole search.
 
-use crate::backend::{Backend, Capability};
+use crate::backend::Capability;
 use crate::bundle::{Bundle, bundled};
-use crate::case::{BackendRunConfig, InputVariant, Scenario};
+use crate::case::{InputVariant, Scenario};
 use crate::checkpoint::Checkpoint;
 use crate::compare::{StreamResult, Verdict};
 use crate::error::EngineError;
 use crate::profile::Plan;
-use crate::report::searched;
+use crate::report::{Builder, searched};
 use crate::result::VerificationResult;
-use crate::runtime::RuntimeBackend;
 
 /// A minimized reproducer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,27 +90,27 @@ pub fn window_origins<'a>(
     }
 }
 
-/// Searches `inputs[1]` against `inputs[0]` with a checkpoint every `every` primary
-/// boundaries, then writes the reproducer from each restoring side's latest checkpoint
-/// covering at most the divergence minus the report window (§17.2). An agreement starts
-/// from the initial states. The reproducer must fail the same way as the search, or this
-/// is an [`EngineError::Internal`].
+/// Locates `inputs[1]` against `inputs[0]`, indexing each side that can step with a
+/// checkpoint every `every` primary boundaries, then writes the reproducer from each
+/// restoring side's latest checkpoint covering at most the divergence minus the report
+/// window (§17.2). A side that cannot restore starts from its initial state, and an
+/// agreement starts from the initial states. The reproducer must fail the same way as
+/// the search, or this is an [`EngineError::Internal`].
 pub fn minimize(
     plan: &Plan,
     scenario: &Scenario,
-    make: &dyn Fn() -> RuntimeBackend,
+    sides: [Builder<'_>; 2],
     inputs: [InputVariant; 2],
-    config: BackendRunConfig,
     every: u64,
 ) -> Result<Minimized, EngineError> {
-    let (full, indexes) = searched(plan, scenario, make, inputs.clone(), config, every)?;
+    let (full, indexes) = searched(plan, scenario, sides, inputs.clone(), every)?;
     let primary = |r: &VerificationResult| match &r.verdict {
         Ok(Verdict::Compared(c)) => Some(c.primary.clone()),
         _ => None,
     };
     let stream = plan.profile.primary.stream.as_str();
     let w = u64::from(plan.profile.report_window);
-    let restores = [0, 1].map(|_| make().capabilities().contains(&Capability::Restore));
+    let restores = sides.map(|s| s.make.build().capabilities().contains(&Capability::Restore));
     let origins = match primary(&full) {
         Some(StreamResult::Diverged { ordinal, .. }) => window_origins(
             stream,
@@ -121,7 +120,7 @@ pub fn minimize(
         ),
         _ => [None, None],
     };
-    let (bundle, result) = bundled(plan, scenario, make, inputs, config, origins)?;
+    let (bundle, result) = bundled(plan, scenario, sides, inputs, origins)?;
     if !accepts(&full.verdict, &result.verdict) {
         return Err(EngineError::Internal(format!(
             "the reproducer fails differently: {:?}, not {:?}",

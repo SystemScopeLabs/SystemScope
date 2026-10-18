@@ -33,7 +33,7 @@ use systemscope_verify::locate::{
 use systemscope_verify::minimize::minimize;
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, Role, plan};
-use systemscope_verify::report::same_engine;
+use systemscope_verify::report::{Builder, same_engine};
 use systemscope_verify::result::{ResultOutcome, VerificationResult};
 use systemscope_verify::runtime::RuntimeBackend;
 use systemscope_verify::slice::Link;
@@ -459,8 +459,7 @@ fn reproduce(
     let case = Case {
         plan: &plan,
         scenario: &scenario,
-        config: verify::config(),
-        make: &make,
+        sides: Builder::same(&make, verify::config()),
     };
     let inputs = [InputVariant::None, input];
     let w = u64::from(plan.profile.report_window);
@@ -474,8 +473,14 @@ fn reproduce(
         origins.extend([[Some(e), Some(a)], [None, Some(a)]]);
     }
     for o in origins {
-        let bundle = write(&plan, &scenario, &make, inputs.clone(), verify::config(), o)
-            .unwrap_or_else(|e| panic!("{e}"));
+        let bundle = write(
+            &plan,
+            &scenario,
+            Builder::same(&make, verify::config()),
+            inputs.clone(),
+            o,
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
         let replayed = replay(&bundle, case).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(replayed.to_bytes(), bundle.entries[RESULT]);
         assert_eq!(
@@ -520,9 +525,8 @@ fn minimized(
     let m = minimize(
         &plan,
         &scenario,
-        &make,
+        Builder::same(&make, verify::config()),
         inputs.clone(),
-        verify::config(),
         every,
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -555,8 +559,7 @@ fn minimized(
     let case = Case {
         plan: &plan,
         scenario: &scenario,
-        config: verify::config(),
-        make: &make,
+        sides: Builder::same(&make, verify::config()),
     };
     let replayed = replay(&m.bundle, case).unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(replayed, m.result);

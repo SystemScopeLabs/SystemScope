@@ -13,6 +13,7 @@ use systemscope_verify::error::EngineError;
 use systemscope_verify::minimize::minimize;
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{Plan, plan};
+use systemscope_verify::report::Builder;
 use systemscope_verify::runtime::RuntimeBackend;
 
 use super::Fixture;
@@ -216,6 +217,7 @@ pub fn bundles(fixture: &Fixture) -> Result<Vec<(&'static str, Bundle)>, String>
     let plan = the_plan(fixture)?;
     let scenario = verify::scenario(fixture);
     let make = || verify::backend(fixture);
+    let sides = Builder::same(&make, verify::config());
     let r = reference(fixture)?;
     let every = r.every()?;
     let inputs = [
@@ -231,7 +233,7 @@ pub fn bundles(fixture: &Fixture) -> Result<Vec<(&'static str, Bundle)>, String>
         .zip(inputs)
         .map(|(name, input)| {
             let inputs = [InputVariant::None, input];
-            minimize(&plan, &scenario, &make, inputs, verify::config(), every)
+            minimize(&plan, &scenario, sides, inputs, every)
                 .map(|m| (name, m.bundle))
                 .map_err(|e| format!("{name}: {e}"))
         })
@@ -255,8 +257,7 @@ fn replayed(fixture: &Fixture, b: &Bundle) -> Result<(), String> {
     let case = Case {
         plan: &plan,
         scenario: &scenario,
-        config: verify::config(),
-        make: &make,
+        sides: Builder::same(&make, verify::config()),
     };
     replay(b, case).map(|_| ()).map_err(|e| e.to_string())
 }

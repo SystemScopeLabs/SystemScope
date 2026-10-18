@@ -392,6 +392,19 @@ pub struct Index {
     pub checkpoints: Vec<Checkpoint>,
 }
 
+impl Default for Index {
+    /// No observation recorded: only `P(0)`, and no checkpoint.
+    fn default() -> Index {
+        Index {
+            execution: [0; 32],
+            prefixes: vec![[0; 32]],
+            failure: None,
+            refused: None,
+            checkpoints: Vec::new(),
+        }
+    }
+}
+
 impl Index {
     /// The number of primary observations recorded.
     pub fn len(&self) -> u64 {
@@ -594,12 +607,12 @@ pub fn search(
 /// Steps both sides from a common origin up to the first primary divergence (§16.2): a
 /// side with a checkpoint is restored at it, and a side without one is started and
 /// stepped to the boundaries the checkpoint covers, which must reproduce its prefix
-/// digest. Without checkpoints the origin is the initial state. The divergence and its
-/// report window are those [`search`] reports, so the origin must cover at most the
-/// divergence minus the report window. An agreement is confirmed by [`lockstep`] from
-/// the initial states, and from a checkpoint it is an error. Requires
-/// [`Capability::StepBoundary`] on both sides and [`Capability::Restore`] on a side with
-/// a checkpoint.
+/// digest. A side that cannot step is recorded whole, as [`stream_compare`] records it,
+/// and its recording is read from the origin. Without checkpoints the origin is the
+/// initial state. The divergence and its report window are those [`search`] reports, so
+/// the origin must cover at most the divergence minus the report window. An agreement is
+/// confirmed by [`locate`] from the initial states, and from a checkpoint it is an error.
+/// Requires [`Capability::Restore`] on a side with a checkpoint.
 pub fn resume<'a>(
     plan: &Plan,
     scenario: &Scenario,
@@ -633,16 +646,41 @@ pub fn resume<'a>(
         [None, None] => None,
     };
     let mut sides = [expected.0, actual.0];
+    let mut cursors = Vec::with_capacity(2);
     for (i, side) in sides.iter_mut().enumerate() {
-        start(plan, scenario, side)?;
+        let mut cursor = if side
+            .backend
+            .capabilities()
+            .contains(&Capability::StepBoundary)
+        {
+            start(plan, scenario, side)?;
+            Cursor::Live(&mut *side.backend)
+        } else {
+            let whole = Side {
+                backend: &mut *side.backend,
+                input: side.input.clone(),
+                config: side.config,
+            };
+            let Recording { streams, failure } = run(plan, scenario, whole);
+            Cursor::Replay {
+                streams,
+                next: 0,
+                failure,
+            }
+        };
         match (checkpoints[i], origin) {
-            (Some(c), _) => side.backend.restore(c)?,
+            (Some(c), _) => match &mut cursor {
+                Cursor::Live(b) => b.restore(c)?,
+                Cursor::Replay { .. } => {
+                    return Err(EngineError::Unsupported("restore".to_owned()));
+                }
+            },
             (None, Some((covered, prefix))) => {
                 let desync =
                     |why: String| EngineError::BoundaryDesync(format!("{:?}: {why}", ROLES[i]));
                 let mut p = PrefixDigest::new();
                 while p.count() < covered {
-                    match side.backend.next(primary) {
+                    match cursor.next(primary) {
                         Ok(Some(o)) => p.absorb(&o),
                         Ok(None) => return Err(desync(format!("ended at {}", p.count()))),
                         Err(f) => return Err(desync(format!("failed at {}: {f}", p.count()))),
@@ -654,7 +692,12 @@ pub fn resume<'a>(
             }
             (None, None) => {}
         }
+        cursors.push(cursor);
     }
+    let strategy = match cursors.iter().any(|c| matches!(c, Cursor::Replay { .. })) {
+        true => Strategy::StreamCompare,
+        false => Strategy::Lockstep,
+    };
     let c = origin.map_or(0, |(covered, _)| covered);
     let w = u64::from(plan.profile.report_window);
     let mut recent = [VecDeque::new(), VecDeque::new()];
@@ -663,7 +706,7 @@ pub fn resume<'a>(
     let diverged = loop {
         let mut o = [None, None];
         for i in 0..2 {
-            o[i] = sides[i].backend.next(primary)?;
+            o[i] = cursors[i].next(primary)?;
             if let Some(o) = &o[i]
                 && refused[i].is_none()
             {
@@ -689,7 +732,7 @@ pub fn resume<'a>(
         }
     };
     let located = |verdict: Verdict, window: Option<Window>| Located {
-        strategy: Strategy::Lockstep,
+        strategy,
         verdict,
         window,
     };
@@ -707,8 +750,9 @@ pub fn resume<'a>(
                 "the sides agree from the checkpoints at {c}"
             )));
         }
+        drop(cursors);
         let [e, a] = sides;
-        return lockstep(plan, scenario, e, a);
+        return locate(plan, scenario, e, a, None);
     };
     let d = at;
     let first = d.saturating_sub(w);
@@ -740,7 +784,7 @@ pub fn resume<'a>(
         };
         kept[i].push(o);
         for _ in 0..w {
-            match sides[i].backend.next(primary) {
+            match cursors[i].next(primary) {
                 Ok(Some(o)) => kept[i].push(o),
                 Ok(None) => break,
                 Err(f) => {

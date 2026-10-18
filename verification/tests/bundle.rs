@@ -4,7 +4,6 @@
 mod common;
 
 use common::*;
-use std::cell::Cell;
 use systemscope_verify::backend::Backend;
 
 use systemscope_verify::bundle::{
@@ -17,7 +16,7 @@ use systemscope_verify::compare::Outcome;
 use systemscope_verify::error::EngineError;
 use systemscope_verify::locate::record_index;
 use systemscope_verify::profile::{Plan, Role, plan};
-use systemscope_verify::report::{from_origins, same_engine};
+use systemscope_verify::report::{Builder, from_origins, same_engine};
 use systemscope_verify::result::{ResultOutcome, StateEvidence, VerificationResult};
 
 fn the_plan() -> Plan {
@@ -48,9 +47,8 @@ fn bundle(inputs: &[InputVariant; 2], origins: [Option<&Checkpoint>; 2]) -> Bund
     write(
         &the_plan(),
         &scenario(),
-        &backend,
+        Builder::same(&backend, config()),
         inputs.clone(),
-        config(),
         origins,
     )
     .unwrap()
@@ -64,8 +62,7 @@ fn replayed(b: &Bundle) -> Result<VerificationResult, ReplayError> {
         Case {
             plan: &plan,
             scenario: &scenario,
-            config: config(),
-            make: &backend,
+            sides: Builder::same(&backend, config()),
         },
     )
 }
@@ -124,9 +121,8 @@ fn every_origin_finds_what_same_engine_finds() {
             let r = from_origins(
                 &the_plan(),
                 &scenario(),
-                &backend,
+                Builder::same(&backend, config()),
                 inputs.clone(),
-                config(),
                 origins,
             );
             // The scans' own origins may differ; what they find does not.
@@ -155,12 +151,24 @@ fn an_origin_past_the_window_or_an_agreement_from_a_checkpoint_is_an_error() {
     let inputs = diverging();
     let ks = checkpoints(&inputs);
     let past = [Some(covering(&ks[0], 6)), Some(covering(&ks[1], 6))];
-    let r = from_origins(&the_plan(), &scenario(), &backend, inputs, config(), past);
+    let r = from_origins(
+        &the_plan(),
+        &scenario(),
+        Builder::same(&backend, config()),
+        inputs,
+        past,
+    );
     assert!(matches!(r.verdict, Err(EngineError::Internal(_))), "{r:?}");
     let same = [InputVariant::None, InputVariant::None];
     let ks = checkpoints(&same);
     let at = [Some(covering(&ks[0], 2)), Some(covering(&ks[1], 2))];
-    let r = from_origins(&the_plan(), &scenario(), &backend, same, config(), at);
+    let r = from_origins(
+        &the_plan(),
+        &scenario(),
+        Builder::same(&backend, config()),
+        same,
+        at,
+    );
     assert!(matches!(r.verdict, Err(EngineError::Internal(_))), "{r:?}");
     // Checkpoints that cover different boundaries, or one the other side's start does not
     // reproduce, are a desync.
@@ -178,9 +186,8 @@ fn an_origin_past_the_window_or_an_agreement_from_a_checkpoint_is_an_error() {
         let r = from_origins(
             &the_plan(),
             &scenario(),
-            &backend,
+            Builder::same(&backend, config()),
             diverging(),
-            config(),
             origins,
         );
         assert!(
@@ -256,9 +263,8 @@ fn only_a_compared_outcome_is_a_reproducer() {
     let w = write(
         &the_plan(),
         &scenario(),
-        &backend,
+        Builder::same(&backend, config()),
         failing,
-        config(),
         [None, None],
     );
     assert!(matches!(w, Err(EngineError::BackendFailed(_))), "{w:?}");
@@ -358,8 +364,7 @@ fn checkpoints_must_belong_to_their_side_and_restore() {
             Case {
                 plan: &plan,
                 scenario,
-                config,
-                make: &backend,
+                sides: Builder::same(&backend, config),
             },
         )
     };
@@ -374,23 +379,13 @@ fn checkpoints_must_belong_to_their_side_and_restore() {
 
 #[test]
 fn an_auxiliary_divergence_bundle_holds_its_windows() {
-    // Every call of `make` alternates the sides, and the actual side's bytes are shifted.
-    let calls = Cell::new(0);
-    let make = || {
-        calls.set(calls.get() + 1);
-        if calls.get() % 2 == 1 {
-            backend()
-        } else {
-            shifted_backend()
-        }
-    };
+    // Only the actual side's auxiliary bytes are shifted.
     let same = [InputVariant::None, InputVariant::None];
     let b = write(
         &the_plan(),
         &scenario(),
-        &make,
+        shifted_sides(),
         same,
-        config(),
         [None, None],
     )
     .unwrap();
@@ -407,8 +402,7 @@ fn an_auxiliary_divergence_bundle_holds_its_windows() {
     let case = Case {
         plan: &plan,
         scenario: &scenario,
-        config: config(),
-        make: &make,
+        sides: shifted_sides(),
     };
     assert_eq!(replay(&b, case).unwrap(), r);
 }
@@ -462,9 +456,8 @@ fn a_larger_local_budget_changes_nothing() {
         from_origins(
             &the_plan(),
             &scenario(),
-            &backend,
+            Builder::same(&backend, config),
             inputs.clone(),
-            config,
             origins,
         )
     };

@@ -12,12 +12,15 @@ use systemscope_contracts::time::{Duration, SimulationClock};
 use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
 use systemscope_runtime::topology::TopologyBuilder;
-use systemscope_verify::backend::Side;
+use systemscope_verify::backend::{Backend, Capabilities, Capability, Side};
 use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch};
+use systemscope_verify::error::EngineError;
+use systemscope_verify::observation::Observation;
 use systemscope_verify::observation::ObservedValue;
 use systemscope_verify::profile::{
     ComparisonProfile, FieldSpec, KindSpec, Requirement, StreamSpec, Support,
 };
+use systemscope_verify::report::{Builder, Make};
 use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
 
 /// Marks the counter's state in snapshot bytes, so a test patch can find it.
@@ -287,6 +290,73 @@ pub fn shifted_backend() -> RuntimeBackend {
             })
         }),
     )
+}
+
+/// A backend that can only record whole streams, as Spike: a [`backend`] that never steps,
+/// snapshots, restores, or reports state.
+pub struct PostRun(pub RuntimeBackend);
+
+impl Backend for PostRun {
+    fn describe(&self) -> BackendId {
+        BackendId {
+            name: "post-run".to_owned(),
+            ..self.0.describe()
+        }
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        let keep = [
+            Capability::ArchStream,
+            Capability::EffectStream,
+            Capability::DeterministicReplay,
+        ];
+        self.0
+            .capabilities()
+            .into_iter()
+            .filter(|c| keep.contains(c))
+            .collect()
+    }
+
+    fn support(&self) -> Support {
+        self.0.support()
+    }
+
+    fn start(
+        &mut self,
+        scenario: &Scenario,
+        input: &InputVariant,
+        config: &BackendRunConfig,
+        profile: &ComparisonProfile,
+    ) -> Result<(), EngineError> {
+        self.0.start(scenario, input, config, profile)
+    }
+
+    fn next(&mut self, _stream: &str) -> Result<Option<Observation>, EngineError> {
+        Err(EngineError::Unsupported("next".to_owned()))
+    }
+
+    fn record(&mut self, stream: &str) -> Result<Vec<Observation>, EngineError> {
+        self.0.record(stream)
+    }
+}
+
+/// A [`PostRun`] side.
+pub fn post_run() -> Box<dyn Backend> {
+    Box::new(PostRun(backend()))
+}
+
+/// [`backend`] against [`shifted_backend`]: only the auxiliary stream differs.
+pub fn shifted_sides() -> [Builder<'static>; 2] {
+    [
+        Builder {
+            make: Make::Runtime(&backend),
+            config: config(),
+        },
+        Builder {
+            make: Make::Runtime(&shifted_backend),
+            config: config(),
+        },
+    ]
 }
 
 pub fn backend() -> RuntimeBackend {

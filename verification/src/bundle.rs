@@ -17,9 +17,8 @@ use crate::compare::{Comparison, Divergence, Outcome, StreamResult, Verdict};
 use crate::error::EngineError;
 use crate::observation::Observation;
 use crate::profile::{ComparisonProfile, Plan, Role};
-use crate::report::from_origins;
+use crate::report::{Builder, Make, from_origins};
 use crate::result::VerificationResult;
-use crate::runtime::RuntimeBackend;
 
 /// The manifest's `format`.
 pub const FORMAT: &str = "systemscope-reproducer";
@@ -547,23 +546,21 @@ fn obs_path(r: Role) -> String {
 pub fn write(
     plan: &Plan,
     scenario: &Scenario,
-    make: &dyn Fn() -> RuntimeBackend,
+    sides: [Builder<'_>; 2],
     inputs: [InputVariant; 2],
-    config: BackendRunConfig,
     origins: [Option<&Checkpoint>; 2],
 ) -> Result<Bundle, EngineError> {
-    bundled(plan, scenario, make, inputs, config, origins).map(|(b, _)| b)
+    bundled(plan, scenario, sides, inputs, origins).map(|(b, _)| b)
 }
 
 pub(crate) fn bundled(
     plan: &Plan,
     scenario: &Scenario,
-    make: &dyn Fn() -> RuntimeBackend,
+    sides: [Builder<'_>; 2],
     inputs: [InputVariant; 2],
-    config: BackendRunConfig,
     origins: [Option<&Checkpoint>; 2],
 ) -> Result<(Bundle, VerificationResult), EngineError> {
-    let result = from_origins(plan, scenario, make, inputs.clone(), config, origins);
+    let result = from_origins(plan, scenario, sides, inputs.clone(), origins);
     let comparison = match &result.verdict {
         Ok(Verdict::Compared(c)) => c,
         Ok(Verdict::Incomparable(why)) => {
@@ -574,21 +571,21 @@ pub(crate) fn bundled(
         Err(e) => return Err(e.clone()),
     };
     let mut entries = BTreeMap::new();
-    let mut sides = Vec::new();
+    let mut entries_of = Vec::new();
     for i in 0..2 {
-        let b = make();
+        let b = sides[i].make.build();
         if let Some(c) = origins[i] {
             entries.insert(checkpoint_path(ROLES[i]), c.to_bytes());
         }
         if inputs[i] != InputVariant::None {
             entries.insert(input_path(ROLES[i]), inputs[i].to_bytes());
         }
-        sides.push(SideEntry {
+        entries_of.push(SideEntry {
             role: ROLES[i],
             backend: b.describe(),
             capabilities: b.capabilities(),
             input: inputs[i].identity(),
-            config,
+            config: sides[i].config,
             origin: origins[i]
                 .and_then(|c| c.mark(&plan.profile.primary.stream).map(|m| m.covered)),
         });
@@ -611,7 +608,7 @@ pub(crate) fn bundled(
     let manifest = Manifest {
         scenario: scenario.clone(),
         profile: ProfileEntry::of(&plan.profile),
-        sides: sides.try_into().expect("two sides"),
+        sides: entries_of.try_into().expect("two sides"),
         outcome: comparison.outcome(),
         primary_divergence,
         entries: entries
@@ -660,18 +657,16 @@ impl fmt::Display for ReplayError {
 
 impl std::error::Error for ReplayError {}
 
-/// The case a bundle must record: the caller's plan, scenario, canonical replay
-/// configuration, and backends.
+/// The case a bundle must record: the caller's plan, scenario, and each side's backend and
+/// canonical replay configuration.
 #[derive(Clone, Copy)]
 pub struct Case<'a> {
     /// The plan.
     pub plan: &'a Plan,
     /// The common scenario.
     pub scenario: &'a Scenario,
-    /// Both sides' canonical replay configuration.
-    pub config: BackendRunConfig,
-    /// Builds a side's backend.
-    pub make: &'a dyn Fn() -> RuntimeBackend,
+    /// The expected and the actual side.
+    pub sides: [Builder<'a>; 2],
 }
 
 /// The replay material of a valid bundle.
@@ -693,8 +688,7 @@ fn material(bundle: &Bundle, case: Case<'_>) -> Result<(Manifest, Material), Eng
     let Case {
         plan,
         scenario,
-        config,
-        make,
+        sides,
     } = case;
     let corrupt = |why: String| EngineError::CorruptReproducer(why);
     let get = |path: &str| {
@@ -755,7 +749,8 @@ fn material(bundle: &Bundle, case: Case<'_>) -> Result<(Manifest, Material), Eng
     let mut checkpoints = [None, None];
     for (i, s) in m.sides.iter().enumerate() {
         let r = role(s.role);
-        let b = make();
+        let config = sides[i].config;
+        let b = sides[i].make.build();
         if s.backend != b.describe() || s.capabilities != b.capabilities() {
             return Err(corrupt(format!("the {r} backend is not the one recorded")));
         }
@@ -775,6 +770,10 @@ fn material(bundle: &Bundle, case: Case<'_>) -> Result<(Manifest, Material), Eng
             continue;
         };
         let path = checkpoint_path(s.role);
+        // Only a SystemScope runtime restores, and re-derives, a checkpoint.
+        let Make::Runtime(make) = sides[i].make else {
+            return Err(corrupt(format!("the {r} backend cannot restore {path}")));
+        };
         let c = Checkpoint::from_bytes(get(&path)?).map_err(|e| corrupt(format!("{path}: {e}")))?;
         if c.execution != execution_id(scenario, &inputs[i], &s.backend) {
             return Err(corrupt(format!("{path} belongs to another execution")));
@@ -835,10 +834,9 @@ pub fn replay(bundle: &Bundle, case: Case<'_>) -> Result<VerificationResult, Rep
     let Case {
         plan,
         scenario,
-        config,
-        make,
+        sides,
     } = case;
-    let (again, result) = bundled(plan, scenario, make, m.inputs, config, origins)
+    let (again, result) = bundled(plan, scenario, sides, m.inputs, origins)
         .map_err(|_| ReplayError::Differs(RESULT.to_owned()))?;
     // The result first: the manifest and the evidence follow from it.
     let order = std::iter::once(RESULT).chain(again.entries.keys().map(String::as_str));
