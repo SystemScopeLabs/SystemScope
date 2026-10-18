@@ -90,6 +90,9 @@ pub const SPIKE_LOGS: &str = "target/spike-logs";
 /// Tests compare SystemScope against it without Spike; `cargo xtask spike verify`
 /// requires the installed Spike to write it again, byte for byte.
 pub const SIMPLE_LOG: &str = "tests/rv32/spike/rv32ui-simple.log";
+/// The committed log of `add`, like [`SIMPLE_LOG`]: the Spike side of SK-1
+/// (`docs/m4-design.md` §25.1).
+pub const ADD_LOG: &str = "tests/rv32/spike/rv32ui-add.log";
 /// The committed log of the generated program for seed 0, like [`SIMPLE_LOG`].
 pub const PROGEN_LOG: &str = "tests/rv32/spike/progen-0000000000000000.log";
 /// The committed start of the `-l` log of one misaligned-access program: its
@@ -1804,9 +1807,9 @@ impl Diff {
 }
 
 /// Checks a Spike installed by the build script in `dir`, run as `spike`: the stamp, the
-/// source checkout at the pin, and the version line; then runs `simple` through the
-/// differential and requires its log to equal the committed [`SIMPLE_LOG`]. Returns what
-/// it checked, or every failure.
+/// source checkout at the pin, and the version line; then runs `simple` and `add` through
+/// the differential and requires their logs to equal the committed [`SIMPLE_LOG`] and
+/// [`ADD_LOG`]. Returns what it checked, or every failure.
 pub fn verify_install(root: &Path, dir: &Path, spike: &Path) -> Result<Vec<String>, Vec<String>> {
     let mut checked = Vec::new();
     let mut errors = Vec::new();
@@ -1885,28 +1888,28 @@ version {SPIKE_VERSION_LINE}
         Err(e) => errors.push(format!("cannot run {}: {e}", spike.display())),
     }
 
-    // The smoke run: the pinned Spike's log of `simple` is the committed one.
+    // The smoke runs: the pinned Spike's logs of `simple` and `add` are the committed ones.
     if errors.is_empty() {
-        let log = format!("{SPIKE_LOGS}/simple.log");
-        let smoke = Manifest::read(root).and_then(|m| {
-            let fixture = m
-                .selected
-                .iter()
-                .find(|f| f.name == "simple")
-                .ok_or("the manifest does not select simple")?;
-            differential(root, fixture, spike, &log).verdict?;
-            let (ours, committed) = (fs::read(root.join(&log)), fs::read(root.join(SIMPLE_LOG)));
-            match (ours, committed) {
-                (Ok(a), Ok(b)) if a == b => Ok(()),
-                (Ok(_), Ok(_)) => Err(format!("{log} differs from {SIMPLE_LOG}")),
-                (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+        for (name, path) in [("simple", SIMPLE_LOG), ("add", ADD_LOG)] {
+            let log = format!("{SPIKE_LOGS}/{name}.log");
+            let smoke = Manifest::read(root).and_then(|m| {
+                let fixture = m
+                    .selected
+                    .iter()
+                    .find(|f| f.name == name)
+                    .ok_or(format!("the manifest does not select {name}"))?;
+                differential(root, fixture, spike, &log).verdict?;
+                let (ours, committed) = (fs::read(root.join(&log)), fs::read(root.join(path)));
+                match (ours, committed) {
+                    (Ok(a), Ok(b)) if a == b => Ok(()),
+                    (Ok(_), Ok(_)) => Err(format!("{log} differs from {path}")),
+                    (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+                }
+            });
+            match smoke {
+                Ok(()) => checked.push(format!("{name} matches, and its Spike log equals {path}")),
+                Err(e) => errors.push(format!("the smoke run of {name}: {e}")),
             }
-        });
-        match smoke {
-            Ok(()) => checked.push(format!(
-                "simple matches, and its Spike log equals {SIMPLE_LOG}"
-            )),
-            Err(e) => errors.push(format!("the smoke run of simple: {e}")),
         }
         // A generated program, whose whole log is committed, and a trap program, whose
         // log up to and just past the trap is.

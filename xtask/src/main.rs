@@ -60,15 +60,18 @@
 //!   and builds the pinned Spike into `<dir>` (default `target/spike`) with
 //!   `tests/rv32/build-spike.sh`, then runs `verify`.
 //! - `spike verify [<dir>]`: checks the Spike in `<dir>`: its stamp, its source checkout
-//!   at the pin, its version line, and a smoke run of `simple` whose log must equal the
-//!   committed one. Prints the binary's BLAKE3.
+//!   at the pin, its version line, and smoke runs of `simple` and `add` whose logs must
+//!   equal the committed ones. Prints the binary's BLAKE3.
 //! - `spike diff [<dir>]`: `verify`, then M1-A3: every selected fixture's retirements on
 //!   SystemScope against Spike's, then the generated programs of the fixed seeds, then
 //!   the misaligned-access programs, which must all match; then the directed M2 CSR and
 //!   `MRET` programs with the M2 CPU profile against Spike with Zicsr, which must match
 //!   too; then the directed M3 privilege and Sv32 programs with the M3 CPU profile, each
-//!   up to its first exception taken in M. Spike's logs go to `target/spike-logs`, and
-//!   the generated ELFs to `target/spike-logs/progen`, `privgen`, and `vmgen`.
+//!   up to its first exception taken in M. Every comparison runs through the M4 stream
+//!   compare. Then SK-1 (`docs/m4-design.md` §25.1): its minimized reproducer must
+//!   diverge as selected and replay with a second Spike run from
+//!   `target/spike-logs/sk1.repro`. Spike's logs go to `target/spike-logs`, and the
+//!   generated ELFs to `target/spike-logs/progen`, `privgen`, and `vmgen`.
 //! - `spike random [<dir>]`: `verify`, then one generated program, for the seed in
 //!   `M1_PROGEN_SEED` (decimal or `0x` hex), against Spike. The nightly workflow runs it.
 //!
@@ -116,7 +119,7 @@ use systemscope_rv32::spike::{
 use systemscope_rv32::{
     BUILD_SCRIPT, FIXTURE_DIR, MANIFEST_PATH, Rv32iProfile, SELECTED, upstream,
 };
-use systemscope_rv32::{csrgen, privgen, vmgen};
+use systemscope_rv32::{csrgen, privgen, spike_adapter, vmgen};
 
 const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m1-golden bless | verify | emit <dir> | check <dir>\n       \
@@ -1106,6 +1109,17 @@ fn spike_diff(dir: &Path) -> ExitCode {
     println!(
         "M3 Sv32: every directed Sv32 program (4 KiB pages, megapages, invalid PTEs,          permissions with SUM and MXR, Svade, page and access faults, SFENCE.VMA) retires          exactly as on Spike {SPIKE_COMMIT} with --priv={SPIKE_PRIV_M3}, delegated page          faults included, up to the same exception taken in M"
     );
+    println!(
+        "M4: each of the comparisons above agrees through the M4 stream compare, with \
+         Spike's commit log as a post-run backend"
+    );
+    match spike_adapter::run_sk1(&root(), &spike_binary(dir), SPIKE_LOGS) {
+        Ok(line) => println!("M4 SK-1: {line}"),
+        Err(e) => {
+            eprintln!("M4 SK-1 fails: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     ExitCode::SUCCESS
 }
 

@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use systemscope_contracts::trace::Value;
+use systemscope_rv32::spike_adapter::injective_rs1;
 use systemscope_verify::backend::Backend;
 use systemscope_verify::bundle::{Bundle, Case, read_dir, replay, write_dir};
 use systemscope_verify::case::{InputVariant, MediaPatch, StatePatch};
@@ -103,20 +104,6 @@ fn cpu_patch(event_index: u64, field: &str, old: u32, new: u32) -> InputVariant 
 fn sp1(r: &Reference) -> Result<InputVariant, String> {
     let pc = r.u32(1, "pc")?;
     Ok(cpu_patch(r.event(0)?, "pc", pc, pc ^ 0x4))
-}
-
-/// `rs1` of an `ADD`, `SUB`, `XOR`, `ADDI`, or `XORI` with `rd` and `rs1` not `x0`, and
-/// `rs2 ≠ rs1` for `SUB` and `XOR` (§25.1).
-fn injective_rs1(insn: u32) -> Option<u32> {
-    let (opcode, rd, funct3) = (insn & 0x7f, (insn >> 7) & 0x1f, (insn >> 12) & 0x7);
-    let (rs1, rs2, funct7) = ((insn >> 15) & 0x1f, (insn >> 20) & 0x1f, insn >> 25);
-    let ok = match (opcode, funct3, funct7) {
-        (0x13, 0 | 4, _) => true,
-        (0x33, 0, 0) => true,
-        (0x33, 0, 0x20) | (0x33, 4, 0) => rs2 != rs1,
-        _ => false,
-    };
-    (ok && rd != 0 && rs1 != 0).then_some(rs1)
 }
 
 /// SP-2: `x[rs1] ^= 1` before `r`, the first U-mode retirement of an injective

@@ -1,35 +1,43 @@
 //! Spike under the M4 verification engine (`docs/m4-design.md` §8.2, §9.2, §28.1): the
 //! Spike adapter, a post-run backend over the existing strict commit-log parsers; the
-//! four Spike profile versions, whose rules are the existing differentials'; and the
-//! SystemScope side, a runtime backend on the runner's platform.
+//! four Spike profile versions, whose rules are the existing differentials'; the
+//! SystemScope side, a runtime backend on the runner's platform; and SK-1, the Spike-side
+//! controlled divergence (§25.1).
 //!
 //! The adapter never re-executes and shares no decoding code with the SystemScope side
 //! (§8.4): Spike's stream is read from its log alone.
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use systemscope_contracts::trace::Value;
 use systemscope_elf::LoadImage;
+use systemscope_runtime::snapshot::component_states;
 use systemscope_rv32i::Rv32iProfile;
 use systemscope_verify::backend::{Backend, Capabilities, Capability, Side};
-use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario};
-use systemscope_verify::compare::{StreamResult, Verdict};
+use systemscope_verify::bundle::{Bundle, Case, read_dir, replay, write_dir};
+use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch};
+use systemscope_verify::compare::{Comparison, Divergence, StreamResult, Verdict};
 use systemscope_verify::error::EngineError;
 use systemscope_verify::locate::{Located, locate};
+use systemscope_verify::minimize::{Minimized, minimize};
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::{
-    ComparisonProfile, FieldSpec, KindSpec, Requirement, StreamSpec, Support, plan,
+    ComparisonProfile, FieldSpec, KindSpec, Plan, Requirement, StreamSpec, Support, plan,
 };
+use systemscope_verify::report::{Builder, Make};
+use systemscope_verify::result::VerificationResult;
 use systemscope_verify::runtime::RuntimeBackend;
 
+use crate::manifest::load;
 use crate::projection::{EXCEPTION_FIELDS, HALT_TRAP, RETIRE_FIELDS, Rv32Projection, WRITE_TOHOST};
-use crate::runner::{self, SEED};
+use crate::runner::{self, CPU, SEED};
 use crate::spike::{
     Event, Mem, Retire, SPIKE_CAUSES, SPIKE_CAUSES_M3, SPIKE_COMMIT, SPIKE_INSTRUCTIONS_M3,
-    SPIKE_ISA, SPIKE_ISA_M2, SPIKE_PRIV, SPIKE_PRIV_M3, SpikeTrap, parse_spike_l_log,
-    parse_spike_log, parse_spike_m3_log, run_spike,
+    SPIKE_ISA, SPIKE_ISA_M2, SPIKE_PRIV, SPIKE_PRIV_M3, SpikeTrap, elf_symbol, parse_spike_l_log,
+    parse_spike_log, parse_spike_m3_log, run_spike, spike_args,
 };
-use crate::{MAX_INSTRUCTIONS, hex};
+use crate::{FIXTURE_DIR, MAX_INSTRUCTIONS, hex};
 
 /// The SystemScope side's safety budget, in events: far above any program's run to its
 /// instruction limit.
@@ -481,8 +489,52 @@ pub fn scenario(suite: Suite, image: &LoadImage) -> Scenario {
     }
 }
 
+/// The CPU's path on the runner's platform, which names the patchable fields:
+/// `soc.cpu0/pc` and `soc.cpu0/x1` to `soc.cpu0/x31`.
+pub const CPU_PATH: &str = "soc.cpu0";
+
+/// Patches one 32-bit CPU field of runner-platform snapshot bytes after checking its old
+/// value. The CPU's state starts with its configuration (clock, entry, instruction limit:
+/// 16 bytes), then `pc` and `x1` to `x31`, each a little-endian word.
+pub fn patch(bytes: &mut [u8], p: &StatePatch) -> Result<(), String> {
+    let field = p
+        .field
+        .strip_prefix(CPU_PATH)
+        .and_then(|f| f.strip_prefix('/'))
+        .ok_or_else(|| format!("{} is not a CPU field", p.field))?;
+    let word = match field {
+        "pc" => 0,
+        x => x
+            .strip_prefix('x')
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|n| (1..32).contains(n))
+            .ok_or_else(|| format!("{} is not patchable", p.field))?,
+    };
+    let value = |v: &Value| match v {
+        Value::U64(v) => u32::try_from(*v).map_err(|_| format!("{v:#x} is not 32 bits")),
+        other => Err(format!("{other:?} is not a U64")),
+    };
+    let (old, new) = (value(&p.old)?, value(&p.new)?);
+    let states = component_states(bytes).map_err(|e| e.to_string())?;
+    let (_, _, cpu) = states
+        .iter()
+        .find(|(id, _, _)| *id == CPU.0)
+        .ok_or("the snapshot has no CPU")?;
+    let at = cpu.as_ptr() as usize - bytes.as_ptr() as usize + 16 + 4 * word;
+    let held = bytes
+        .get(at..at + 4)
+        .map(|w| u32::from_le_bytes(w.try_into().expect("four bytes")))
+        .ok_or("the CPU state is too short")?;
+    if held != old {
+        return Err(format!("{} is {held:#x}, not {old:#x}", p.field));
+    }
+    bytes[at..at + 4].copy_from_slice(&new.to_le_bytes());
+    Ok(())
+}
+
 /// The SystemScope side: `image` on the runner's platform with `suite`'s CPU profile,
-/// read by [`Rv32Projection`] for a program whose `tohost`, if any, is `tohost`.
+/// read by [`Rv32Projection`] for a program whose `tohost`, if any, is `tohost`, and able
+/// to apply state patches to the CPU.
 pub fn systemscope(suite: Suite, image: &LoadImage, tohost: Option<u32>) -> RuntimeBackend {
     let (image, cpu) = (image.clone(), suite.cpu());
     RuntimeBackend::new(
@@ -497,6 +549,7 @@ pub fn systemscope(suite: Suite, image: &LoadImage, tohost: Option<u32>) -> Runt
         }),
         Box::new(move || Box::new(Rv32Projection::new(tohost))),
     )
+    .with_patch(Box::new(patch))
 }
 
 /// Locates SystemScope's run of `image`, the actual side `ours`, against Spike, the
@@ -544,4 +597,214 @@ pub fn agreed(
         },
         other => Err(format!("Spike and SystemScope do not compare: {other:?}")),
     }
+}
+
+/// `rs1` of an injective instruction (§25.1): an `ADD`, `SUB`, `XOR`, `ADDI`, or `XORI`
+/// with `rd` and `rs1` not `x0`, and `rs2 ≠ rs1` for `SUB` and `XOR`. Flipping bit 0 of
+/// `x[rs1]` always changes its `rd_value`.
+pub fn injective_rs1(insn: u32) -> Option<u32> {
+    let (opcode, rd, funct3) = (insn & 0x7f, (insn >> 7) & 0x1f, (insn >> 12) & 0x7);
+    let (rs1, rs2, funct7) = ((insn >> 15) & 0x1f, (insn >> 20) & 0x1f, insn >> 25);
+    let ok = match (opcode, funct3, funct7) {
+        (0x13, 0 | 4, _) => true,
+        (0x33, 0, 0) => true,
+        (0x33, 0, 0x20) | (0x33, 4, 0) => rs2 != rs1,
+        _ => false,
+    };
+    (ok && rd != 0 && rs1 != 0).then_some(rs1)
+}
+
+/// The SK-1 fixture.
+pub const SK1_ELF: &str = "rv32ui-add.elf";
+
+/// The SK-1 reproducer's checkpoint density: a SystemScope checkpoint after every
+/// boundary, so it starts exactly the report window before the divergence.
+pub const SK1_EVERY: u64 = 1;
+
+/// SK-1 (§25.1): `rv32ui-add` under the rv32ui Spike profile, Spike the expected side from
+/// its initial state, SystemScope the actual side with `x[rs1] ^= 1` after boundary
+/// `r − 1`, where `r` is the first retirement of an injective instruction. The expected
+/// first divergence is `arch[r]`, `retire`, field `rd_value`.
+#[derive(Clone, Debug)]
+pub struct Sk1 {
+    /// The fixture's image.
+    pub image: LoadImage,
+    /// Its `tohost`.
+    pub tohost: u32,
+    /// The patched boundary.
+    pub r: u64,
+    /// The SystemScope side's input variant.
+    pub patch: InputVariant,
+}
+
+impl Sk1 {
+    /// Selects SK-1 from SystemScope's unmodified `arch` stream of the committed fixture
+    /// under `root`, a pure function of the stream: reset leaves the registers 0, and only
+    /// retirements write them.
+    pub fn select(root: &Path) -> Result<Sk1, String> {
+        let path = root.join(FIXTURE_DIR).join(SK1_ELF);
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let image = load("add", &bytes)?;
+        let tohost = elf_symbol(&bytes, "tohost").ok_or("rv32ui-add has no tohost")?;
+        let suite = Suite::Rv32ui;
+        let mut b = systemscope(suite, &image, Some(tohost));
+        let e = |e: EngineError| e.to_string();
+        b.start(
+            &scenario(suite, &image),
+            &InputVariant::None,
+            &config(),
+            &suite.profile(),
+        )
+        .map_err(e)?;
+        let word = |o: &Observation, field: &str| match o.field(field) {
+            Some(ObservedValue::Present(Value::U64(v))) => Ok(*v as u32),
+            other => Err(format!("arch[{}].{field} is {other:?}", o.ordinal)),
+        };
+        let mut x = [0u32; 32];
+        while let Some(o) = b.next("arch").map_err(e)? {
+            if let Some(rs1) = injective_rs1(word(&o, "insn")?).filter(|_| o.ordinal > 0) {
+                let event_index = b
+                    .event_index("arch", o.ordinal - 1)
+                    .ok_or("no event before the patched boundary")?;
+                let old = x[rs1 as usize];
+                return Ok(Sk1 {
+                    image,
+                    tohost,
+                    r: o.ordinal,
+                    patch: InputVariant::State(StatePatch {
+                        event_index,
+                        field: format!("{CPU_PATH}/x{rs1}"),
+                        old: Value::U64(old.into()),
+                        new: Value::U64((old ^ 1).into()),
+                    }),
+                });
+            }
+            if let Some(ObservedValue::Present(Value::U64(rd))) = o.field("rd") {
+                x[*rd as usize] = word(&o, "rd_value")?;
+            }
+        }
+        Err("rv32ui-add retires no injective instruction".to_owned())
+    }
+
+    /// Both sides' input variants.
+    pub fn inputs(&self) -> [InputVariant; 2] {
+        [InputVariant::None, self.patch.clone()]
+    }
+
+    /// The scenario.
+    pub fn scenario(&self) -> Scenario {
+        scenario(Suite::Rv32ui, &self.image)
+    }
+
+    /// The plan.
+    pub fn plan(&self) -> Result<Plan, String> {
+        let spike = SpikeBackend::new(Suite::Rv32ui, Source::Log(String::new()), None);
+        let ours = systemscope(Suite::Rv32ui, &self.image, Some(self.tohost));
+        plan(&Suite::Rv32ui.profile(), &spike.support(), &ours.support())
+            .map_err(|e| format!("{e:?}"))
+    }
+
+    /// Calls `f` with both sides: Spike reading its log from `source`, and SystemScope.
+    fn with_sides<T>(&self, source: &Source, f: impl FnOnce([Builder<'_>; 2]) -> T) -> T {
+        let tohost = Some(self.tohost);
+        let spike = || -> Box<dyn Backend> {
+            Box::new(SpikeBackend::new(Suite::Rv32ui, source.clone(), tohost))
+        };
+        let ours = || systemscope(Suite::Rv32ui, &self.image, tohost);
+        f([
+            Builder {
+                make: Make::Other(&spike),
+                config: Suite::Rv32ui.spike_config(),
+            },
+            Builder {
+                make: Make::Runtime(&ours),
+                config: config(),
+            },
+        ])
+    }
+
+    /// The reproducer, minimized with a SystemScope checkpoint every `every` boundaries;
+    /// Spike, which cannot restore, starts from its initial state (§17.2).
+    pub fn minimized(&self, source: &Source, every: u64) -> Result<Minimized, String> {
+        let (plan, scenario) = (self.plan()?, self.scenario());
+        self.with_sides(source, |sides| {
+            minimize(&plan, &scenario, sides, self.inputs(), every).map_err(|e| e.to_string())
+        })
+    }
+
+    /// Requires `result` to be the selector's divergence: `arch[r]`, `retire`, field
+    /// `rd_value`.
+    pub fn check(&self, result: &VerificationResult) -> Result<(), String> {
+        if let Ok(Verdict::Compared(Comparison {
+            primary:
+                StreamResult::Diverged {
+                    ordinal,
+                    divergence: Divergence::Fields { kind, fields },
+                    ..
+                },
+            ..
+        })) = &result.verdict
+            && *ordinal == self.r
+            && kind == "retire"
+            && fields.iter().map(|f| f.name.as_str()).eq(["rd_value"])
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "SK-1 must diverge at arch[{}], retire, rd_value, not as {:?}",
+            self.r, result.verdict
+        ))
+    }
+
+    /// Replays `bundle` with Spike reading its log from `source`.
+    pub fn replay(&self, bundle: &Bundle, source: &Source) -> Result<VerificationResult, String> {
+        let (plan, scenario) = (self.plan()?, self.scenario());
+        self.with_sides(source, |sides| {
+            let case = Case {
+                plan: &plan,
+                scenario: &scenario,
+                sides,
+            };
+            replay(bundle, case).map_err(|e| format!("{e:?}"))
+        })
+    }
+}
+
+/// SK-1 against the Spike executable `spike`, run in `root` with its log under `logs`
+/// (relative to `root`): the reproducer minimized by [`Sk1::minimized`] must diverge as
+/// the selector says, and, written to `logs/sk1.repro` and read back, replay with a second
+/// run of Spike. Returns what it checked.
+pub fn run_sk1(root: &Path, spike: &Path, logs: &str) -> Result<String, String> {
+    let sk1 = Sk1::select(root)?;
+    let log = format!("{logs}/sk1/add.log");
+    let elf = format!("{FIXTURE_DIR}/{SK1_ELF}");
+    let source = Source::Run {
+        spike: spike.to_owned(),
+        root: root.to_owned(),
+        args: spike_args(sk1.image.entry, &elf, &log),
+        log,
+    };
+    let m = sk1.minimized(&source, SK1_EVERY)?;
+    sk1.check(&m.result)?;
+    let dir = root.join(logs).join("sk1.repro");
+    let _ = fs::remove_dir_all(&dir);
+    write_dir(&m.bundle, &dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let bundle = read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let again = sk1.replay(&bundle, &source)?;
+    if again != m.result {
+        return Err("the replayed reproducer's result differs".to_owned());
+    }
+    let InputVariant::State(p) = &sk1.patch else {
+        return Err("SK-1 patches no state".to_owned());
+    };
+    Ok(format!(
+        "rv32ui-add with {} ^= 1 after boundary {} is located at arch[{}], retire, rd_value, \
+         by stream compare against Spike {SPIKE_COMMIT}; its reproducer, SystemScope from \
+         boundary {} and Spike from its initial state, replays from {}",
+        p.field,
+        sk1.r - 1,
+        sk1.r,
+        m.origins[1].map_or("0".to_owned(), |c| c.to_string()),
+        dir.display()
+    ))
 }
