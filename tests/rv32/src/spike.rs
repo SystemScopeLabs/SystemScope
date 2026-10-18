@@ -60,6 +60,7 @@ use systemscope_rv32i::{Rv32iProfile, csr, privilege};
 use crate::manifest::{Fixture, Manifest, load};
 use crate::progen::{self, ExpectedTrap, MISALIGNED, Program};
 use crate::runner::{self, CPU, End, Finished, PASS_CAUSE, Start};
+use crate::spike_adapter::{Source, Suite, agreed, machine};
 use crate::{FIXTURE_DIR, MAX_INSTRUCTIONS, RAM_BASE, RAM_SIZE, SELECTED, hex};
 use crate::{csrgen, privgen, vmgen};
 
@@ -700,7 +701,15 @@ fn run_both(
         (Rv32iProfile::M1, false),
         executed,
     )?;
-    judge_pass(&finished, &parse_spike_log(&text)?, image.entry, tohost)
+    let theirs = parse_spike_log(&text)?;
+    judge_pass(
+        &finished,
+        &image,
+        Rv32iProfile::M1,
+        &theirs,
+        image.entry,
+        tohost,
+    )
 }
 
 /// Runs `image` traced on SystemScope with the CPU `profile`, then the ELF at `elf` on
@@ -776,19 +785,29 @@ fn our_stream(finished: &Finished) -> Result<SystemScopeStream, String> {
         .and_then(from_trace)
 }
 
-/// The verdict for a program that ends at the passing `write_tohost`: the streams are
-/// equal, Spike's ends at the boundary, and SystemScope then halts on the `ECALL` right
-/// after it with the M1-A2 pass rule, `instret` equal to the record count, and the
-/// registers Spike's writes leave. Returns the record count.
+/// The verdict for a program that ends at the passing `write_tohost`: SystemScope's run
+/// of `image` with the CPU `profile` agrees with Spike's stream through the M4 engine
+/// (`docs/m4-design.md` §28.1) over every record, Spike's stream ends at the boundary, and
+/// SystemScope's traced run `finished` then halts on the `ECALL` right after it with the
+/// M1-A2 pass rule, `instret` equal to the record count, and the registers Spike's writes
+/// leave. Returns the record count.
 pub fn judge_pass(
     finished: &Finished,
+    image: &LoadImage,
+    profile: Rv32iProfile,
     theirs: &[Retire],
     entry: u32,
     tohost: u32,
 ) -> Result<usize, String> {
     let ours = our_stream(finished)?;
-    compare(&ours.retires, theirs)?;
+    let suite = match profile {
+        Rv32iProfile::M1 => Suite::Rv32ui,
+        _ => Suite::M2,
+    };
+    let parsed = Source::Parsed(theirs.iter().copied().map(machine).collect(), None);
+    let compared = agreed(suite, image, parsed, Some(tohost))?;
     let n = check_boundary(theirs, entry, tohost)?;
+    check_compared(compared, n)?;
     runner::judge(&finished.outcome).map_err(|e| format!("SystemScope: {e}"))?;
     let last = theirs[n - 1].pc;
     match (&ours.trap, &finished.outcome.end) {
@@ -802,6 +821,16 @@ pub fn judge_pass(
     }
     check_end_state(finished, theirs)?;
     Ok(n)
+}
+
+/// The M4 comparison compared `n` observations, as many as the existing differential.
+fn check_compared(compared: u64, n: usize) -> Result<(), String> {
+    if compared != n as u64 {
+        return Err(format!(
+            "the M4 comparison compared {compared} observations, not {n}"
+        ));
+    }
+    Ok(())
 }
 
 /// SystemScope retired exactly `theirs`, and its registers are those Spike's writes leave.
@@ -1015,18 +1044,32 @@ fn instruction_line(line: &str) -> Result<(u32, u32), String> {
     }
 }
 
-/// The verdict for a trap program: the streams are equal up to the trap, both sides trap
-/// on the same instruction with the same cause and `tval`, and that trap is `expected`.
-/// SystemScope retired exactly Spike's records, with the registers they leave. Returns
-/// the record count.
+/// The verdict for a trap program: SystemScope's run of `image` with the CPU `profile`
+/// agrees with Spike's stream through the M4 engine up to and including the trap, both
+/// sides trap on the same instruction with the same cause and `tval`, and that trap is
+/// `expected`. SystemScope's traced run `finished` retired exactly Spike's records, with
+/// the registers they leave. Returns the record count.
 pub fn judge_trap(
     finished: &Finished,
+    image: &LoadImage,
+    profile: Rv32iProfile,
     theirs: &[Retire],
     trap: &SpikeTrap,
     expected: &ExpectedTrap,
 ) -> Result<usize, String> {
     let ours = our_stream(finished)?;
-    compare(&ours.retires, theirs)?;
+    let suite = match profile {
+        Rv32iProfile::M1 => Suite::Misaligned,
+        _ => Suite::M2,
+    };
+    let events = theirs.iter().copied().map(machine).collect();
+    let compared = agreed(
+        suite,
+        image,
+        Source::Parsed(events, Some(trap.clone())),
+        None,
+    )?;
+    check_compared(compared, theirs.len() + 1)?;
     let spike_cause = SPIKE_CAUSES
         .iter()
         .find(|(ours, _)| *ours == expected.cause)
@@ -1139,9 +1182,11 @@ fn run_program(
         (None, _) => {
             let tohost =
                 elf_symbol(&program.elf, "tohost").ok_or(format!("{elf} has no tohost symbol"))?;
-            judge_pass(&finished, &theirs, image.entry, tohost)
+            judge_pass(&finished, &image, profile, &theirs, image.entry, tohost)
         }
-        (Some(expected), Some(trap)) => judge_trap(&finished, &theirs, &trap, expected),
+        (Some(expected), Some(trap)) => {
+            judge_trap(&finished, &image, profile, &theirs, &trap, expected)
+        }
         (Some(_), None) => Err("Spike's log has no trap".to_owned()),
     }
 }
@@ -1563,12 +1608,14 @@ pub fn from_trace_m3(trace: &Trace) -> Result<SystemScopeEvents, String> {
     Ok(out)
 }
 
-/// The verdict for an M3 program: the event streams are equal up to the first exception
-/// taken in M, both sides take it at the same instruction with the same cause and `tval`,
-/// and it is `expected`. SystemScope halts on it, having retired exactly Spike's
-/// retirements, with the registers they leave. Returns the event count.
+/// The verdict for an M3 program: SystemScope's run of `image` agrees with Spike's event
+/// stream through the M4 engine up to and including the first exception taken in M, both
+/// sides take it at the same instruction with the same cause and `tval`, and it is
+/// `expected`. SystemScope's traced run `finished` halts on it, having retired exactly
+/// Spike's retirements, with the registers they leave. Returns the event count.
 pub fn judge_m3(
     finished: &Finished,
+    image: &LoadImage,
     theirs: &[Event],
     trap: &SpikeTrap,
     expected: &ExpectedTrap,
@@ -1578,7 +1625,9 @@ pub fn judge_m3(
         .as_ref()
         .ok_or_else(|| "SystemScope recorded no trace".to_owned())
         .and_then(from_trace_m3)?;
-    compare(&ours.events, theirs)?;
+    let parsed = Source::Parsed(theirs.to_vec(), Some(trap.clone()));
+    let compared = agreed(Suite::M3, image, parsed, None)?;
+    check_compared(compared, theirs.len() + 1)?;
     let spike_cause = SPIKE_CAUSES_M3
         .iter()
         .find(|(ours, _)| *ours == expected.cause)
@@ -1637,7 +1686,7 @@ fn run_m3_program(
         executed,
     )?;
     let (theirs, trap) = parse_spike_m3_log(&text)?;
-    judge_m3(&finished, &theirs, &trap, expected)
+    judge_m3(&finished, &image, &theirs, &trap, expected)
 }
 
 /// The directed M3.2 programs against Spike (`docs/m3-design.md` §15.3), with the M3 CPU
@@ -2478,6 +2527,10 @@ core   0: exception trap_machine_ecall, epc 0x80000050
         assert_eq!(MISALIGNED[TRAP_LOG_CASE].name, "lw-1");
     }
 
+    fn image(program: &Program) -> LoadImage {
+        load(&program.name, &program.elf).unwrap()
+    }
+
     fn traced(program: &Program) -> Finished {
         let image = load(&program.name, &program.elf).unwrap();
         runner::execute(
@@ -2494,24 +2547,59 @@ core   0: exception trap_machine_ecall, epc 0x80000050
         let tohost = elf_symbol(&program.elf, "tohost").unwrap();
         let theirs = parse_spike_log(PROGEN_LOG).unwrap();
         let finished = traced(&program);
+        let image = image(&program);
         assert_eq!(
-            judge_pass(&finished, &theirs, RAM_BASE, tohost),
+            judge_pass(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                RAM_BASE,
+                tohost
+            ),
             Ok(theirs.len())
         );
         // Another program's run is not this log's.
         let other = traced(&progen::generate(1));
-        assert!(judge_pass(&other, &theirs, RAM_BASE, tohost).is_err());
+        assert!(judge_pass(&other, &image, Rv32iProfile::M1, &theirs, RAM_BASE, tohost).is_err());
         // Nor is a log cut before the boundary, or one ending at another tohost.
         let cut = &theirs[..theirs.len() - 1];
-        assert!(judge_pass(&finished, cut, RAM_BASE, tohost).is_err());
-        assert!(judge_pass(&finished, &theirs, RAM_BASE, tohost + 8).is_err());
-        assert!(judge_pass(&finished, &theirs, RAM_BASE + 4, tohost).is_err());
+        assert!(judge_pass(&finished, &image, Rv32iProfile::M1, cut, RAM_BASE, tohost).is_err());
+        assert!(
+            judge_pass(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                RAM_BASE,
+                tohost + 8
+            )
+            .is_err()
+        );
+        assert!(
+            judge_pass(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                RAM_BASE + 4,
+                tohost
+            )
+            .is_err()
+        );
         // SystemScope's end must follow: the ECALL after the boundary, `instret`, and the
         // registers Spike's writes leave.
         let mut finished = finished;
         let doctored = |finished: &mut Finished, doctor: &dyn Fn(&mut Finished)| {
             doctor(finished);
-            judge_pass(finished, &theirs, RAM_BASE, tohost)
+            judge_pass(
+                finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                RAM_BASE,
+                tohost,
+            )
         };
         let end = finished.outcome.end.clone();
         let End::Trap { cause, pc, tval } = end.clone() else {
@@ -2528,7 +2616,17 @@ core   0: exception trap_machine_ecall, epc 0x80000050
         finished.outcome.instret -= 1;
         assert!(doctored(&mut finished, &|f| bump(f, "x8")).is_err());
         bump(&mut finished, "x8");
-        assert!(judge_pass(&finished, &theirs, RAM_BASE, tohost).is_ok());
+        assert!(
+            judge_pass(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                RAM_BASE,
+                tohost
+            )
+            .is_ok()
+        );
     }
 
     /// Flips bit 0 of register `name` in the CPU's final view, doing or undoing a change
@@ -2616,11 +2714,29 @@ core   0: exception trap_machine_ecall, epc 0x80000050
     #[test]
     fn a_misaligned_program_matches_its_committed_trap() {
         let (finished, theirs, trap, expected) = lw_1();
-        assert_eq!(judge_trap(&finished, &theirs, &trap, &expected), Ok(5));
+        let image = image(&progen::misaligned(&MISALIGNED[TRAP_LOG_CASE]).0);
+        assert_eq!(
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                &trap,
+                &expected
+            ),
+            Ok(5)
+        );
         let wrong = |doctor: &dyn Fn(&mut SpikeTrap, &mut ExpectedTrap)| {
             let (mut trap, mut expected) = (trap.clone(), expected.clone());
             doctor(&mut trap, &mut expected);
-            judge_trap(&finished, &theirs, &trap, &expected)
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                &trap,
+                &expected,
+            )
         };
         // Spike traps otherwise.
         assert!(wrong(&|t, _| t.cause = "trap_load_access_fault".to_owned()).is_err());
@@ -2650,27 +2766,87 @@ core   0: exception trap_machine_ecall, epc 0x80000050
         assert!(wrong(&|_, e| e.cause = "NoSuchCause").is_err());
         // Spike's stream is short of the trap, or stores another value: the traps and end
         // registers agree, and only the stream differs.
-        assert!(judge_trap(&finished, &theirs[..4], &trap, &expected).is_err());
+        assert!(
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs[..4],
+                &trap,
+                &expected
+            )
+            .is_err()
+        );
         let mut stored = theirs.clone();
         let Mem::Store { value, .. } = &mut stored[3].mem else {
             panic!("{}", stored[3])
         };
         *value ^= 1;
-        assert!(judge_trap(&finished, &stored, &trap, &expected).is_err());
+        assert!(
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &stored,
+                &trap,
+                &expected
+            )
+            .is_err()
+        );
         // SystemScope's `instret` or registers disagree with Spike's stream.
         let mut finished = finished;
         finished.outcome.instret += 1;
-        assert!(judge_trap(&finished, &theirs, &trap, &expected).is_err());
+        assert!(
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                &trap,
+                &expected
+            )
+            .is_err()
+        );
         finished.outcome.instret -= 1;
         bump(&mut finished, "x8");
-        assert!(judge_trap(&finished, &theirs, &trap, &expected).is_err());
+        assert!(
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                &trap,
+                &expected
+            )
+            .is_err()
+        );
         bump(&mut finished, "x8");
-        assert_eq!(judge_trap(&finished, &theirs, &trap, &expected), Ok(5));
+        assert_eq!(
+            judge_trap(
+                &finished,
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                &trap,
+                &expected
+            ),
+            Ok(5)
+        );
         // SystemScope's run is not this program's.
         let other = traced(&progen::misaligned(&MISALIGNED[TRAP_LOG_CASE + 1]).0);
-        assert!(judge_trap(&other, &theirs, &trap, &expected).is_err());
+        assert!(judge_trap(&other, &image, Rv32iProfile::M1, &theirs, &trap, &expected).is_err());
         // A passing program's run is no trap program's.
-        assert!(judge_trap(&traced(&progen::generate(0)), &theirs, &trap, &expected).is_err());
+        assert!(
+            judge_trap(
+                &traced(&progen::generate(0)),
+                &image,
+                Rv32iProfile::M1,
+                &theirs,
+                &trap,
+                &expected
+            )
+            .is_err()
+        );
     }
 
     /// A fetch fault has no instruction line in Spike's log: the trap line stands alone,

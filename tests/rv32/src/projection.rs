@@ -21,7 +21,7 @@ pub const HALT_TRAP: &str = "halt-trap";
 
 /// The stop rule of the riscv-tests environment: the stream ends with the first word store
 /// to `tohost + 4` after a word store to `tohost`, the end of `write_tohost`, or at the
-/// halting trap if it comes first.
+/// halting trap if it comes first. A program without a `tohost` ends at the halting trap.
 pub const WRITE_TOHOST: &str = "write-tohost";
 
 /// The `retire` fields, in observation order.
@@ -121,12 +121,11 @@ impl Rv32Projection {
     }
 
     /// Accepts profiles whose `arch` stream starts at the first boundary and that stop at
-    /// [`HALT_TRAP`], or at [`WRITE_TOHOST`] for a program with a `tohost`.
+    /// [`HALT_TRAP`] or [`WRITE_TOHOST`].
     pub fn begin(&mut self, profile: &ComparisonProfile) -> Result<(), String> {
         self.at_tohost = match profile.stop_rule.as_str() {
             HALT_TRAP => false,
-            WRITE_TOHOST if self.tohost.is_some() => true,
-            WRITE_TOHOST => return Err("write-tohost without a tohost".to_owned()),
+            WRITE_TOHOST => true,
             rule => return Err(format!("stop rule {rule}")),
         };
         match profile.streams().find(|s| s.stream == "arch") {

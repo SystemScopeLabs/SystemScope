@@ -47,7 +47,8 @@ pub enum Suite {
     /// `-l` log.
     Misaligned,
     /// The M2 CSR programs: retirements with their CSR writes, to `write_tohost` or the
-    /// trap taken in M before it, from a `-l` log.
+    /// trap taken in M before it, from a `-l` log. A program without a `tohost` ends at its
+    /// trap.
     M2,
     /// The M3 privilege and Sv32 programs: retirements with their mode, and delegated
     /// exceptions, to the exception taken in M. `paddr` is not compared: Spike's log names
@@ -333,7 +334,8 @@ impl Backend for SpikeBackend {
 }
 
 /// Spike's events as `arch` observations under `profile`, ending at its stop rule: the
-/// trap taken in M, appended as the final `exception`, or `write_tohost`.
+/// trap taken in M, appended as the final `exception`, or `write_tohost` for a program
+/// with a `tohost`.
 fn observations(
     suite: Suite,
     profile: &ComparisonProfile,
@@ -341,15 +343,16 @@ fn observations(
     events: Vec<Event>,
     trap: Option<SpikeTrap>,
 ) -> Result<Vec<Observation>, EngineError> {
-    let at_tohost = match (profile.stop_rule.as_str(), tohost) {
-        (HALT_TRAP, _) => None,
-        (WRITE_TOHOST, Some(t)) => Some(t),
-        (rule, _) => {
+    let written = match profile.stop_rule.as_str() {
+        HALT_TRAP => false,
+        WRITE_TOHOST => true,
+        rule => {
             return Err(EngineError::Internal(format!(
-                "the Spike adapter cannot apply stop rule {rule} here"
+                "the Spike adapter cannot apply stop rule {rule}"
             )));
         }
     };
+    let at_tohost = tohost.filter(|_| written);
     let mut out = Vec::new();
     let mut place = |kind: &str, fields: Vec<(&str, ObservedValue)>| {
         let Some(spec) = profile.primary.kind(kind) else {
@@ -408,7 +411,7 @@ fn observations(
     let Some(trap) = trap else {
         return Err(EngineError::BackendFailed(match at_tohost {
             Some(_) => "Spike's stream ends before write_tohost".to_owned(),
-            None => "Spike's log has no trap taken in M".to_owned(),
+            None => "Spike's stream ends before a trap taken in M".to_owned(),
         }));
     };
     let causes = match suite {

@@ -340,10 +340,13 @@ fn write_tohost_ends_the_stream_after_its_second_store() {
         report_window: 3,
     };
     const TOHOST: u64 = 0x8000_1000;
-    assert_eq!(
-        Rv32Projection::default().begin(&profile(WRITE_TOHOST)),
-        Err("write-tohost without a tohost".to_owned())
-    );
+    // Without a tohost, only the halting trap ends it.
+    let mut p = Rv32Projection::default();
+    assert_eq!(p.begin(&profile(WRITE_TOHOST)), Ok(()));
+    for r in [store(TOHOST, 4), store(TOHOST + 4, 4)] {
+        project(&mut p, r).unwrap();
+    }
+    assert!(!p.finished());
     let mut p = Rv32Projection::new(Some(TOHOST as u32));
     assert_eq!(p.begin(&profile(WRITE_TOHOST)), Ok(()));
     // A store to tohost + 4 before tohost, a narrow store, and a load do not end it.

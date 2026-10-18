@@ -199,7 +199,7 @@ fn a_stream_without_its_end_fails_on_the_spike_side() {
     let (retires, _) = parse_spike_l_log(&log(TRAP_LOG)).unwrap();
     let no_trap = Source::Parsed(retires.into_iter().map(machine).collect(), None);
     let err = agreed(Suite::Misaligned, &lw_1(), no_trap, None).unwrap_err();
-    assert!(err.contains("no trap taken in M"), "{err}");
+    assert!(err.contains("before a trap taken in M"), "{err}");
     // An unparsable log.
     let garbage = Source::Log(format!("{}garbage\n", log(SIMPLE_LOG)));
     let err = agreed(Suite::Rv32ui, &image, garbage, Some(tohost)).unwrap_err();
