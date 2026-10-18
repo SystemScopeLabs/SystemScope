@@ -554,3 +554,17 @@ fn step_event_dispatches_one_event() {
     let e = bad.next("arch").and_then(|_| bad.next("arch")).unwrap_err();
     assert_eq!(bad.step_event(), Err(e));
 }
+
+#[test]
+fn the_build_sees_the_input_variant() {
+    // The counter's build refuses media patches; the adapter itself never applies them.
+    let media = InputVariant::Media(systemscope_verify::case::MediaPatch {
+        offset: 0,
+        old: vec![0],
+        new: vec![1],
+    });
+    assert_eq!(
+        failure(&mut backend(), media, 1_000),
+        EngineError::BackendFailed("the counter has no media".to_owned())
+    );
+}

@@ -47,6 +47,50 @@ pub struct StatePatch {
     pub new: Value,
 }
 
+/// A media patch: bytes of the scenario's program or disk image, replaced before the
+/// run (§25.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaPatch {
+    /// The byte offset of the patch.
+    pub offset: u64,
+    /// The bytes the image must hold there.
+    pub old: Vec<u8>,
+    /// The bytes written, as many as `old`.
+    pub new: Vec<u8>,
+}
+
+impl MediaPatch {
+    /// Applies the patch to `image` after checking the bytes it replaces.
+    pub fn apply(&self, image: &mut [u8]) -> Result<(), String> {
+        if self.old.len() != self.new.len() {
+            return Err(format!(
+                "media patch: {} old bytes, {} new",
+                self.old.len(),
+                self.new.len()
+            ));
+        }
+        let len = image.len();
+        let at = usize::try_from(self.offset).ok();
+        let held = at
+            .and_then(|at| image.get_mut(at..at.checked_add(self.old.len())?))
+            .ok_or_else(|| {
+                format!(
+                    "media patch: {} bytes at {:#x} are outside the {len}-byte image",
+                    self.old.len(),
+                    self.offset,
+                )
+            })?;
+        if *held != self.old[..] {
+            return Err(format!(
+                "media patch: the image holds {held:02x?} at {:#x}, not {:02x?}",
+                self.offset, self.old
+            ));
+        }
+        held.copy_from_slice(&self.new);
+        Ok(())
+    }
+}
+
 /// A side's canonical change to the common scenario.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum InputVariant {
@@ -55,6 +99,8 @@ pub enum InputVariant {
     None,
     /// A field of a checkpoint is patched.
     State(StatePatch),
+    /// The scenario's media is patched before the run.
+    Media(MediaPatch),
 }
 
 impl InputVariant {
@@ -69,6 +115,12 @@ impl InputVariant {
                 e.str(&p.field);
                 p.old.encode(&mut e);
                 p.new.encode(&mut e);
+            }
+            InputVariant::Media(p) => {
+                e.u8(2);
+                e.u64(p.offset);
+                e.bytes(&p.old);
+                e.bytes(&p.new);
             }
         }
         *blake3::hash(e.as_bytes()).as_bytes()

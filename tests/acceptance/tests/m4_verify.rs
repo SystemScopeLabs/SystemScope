@@ -11,13 +11,13 @@ use systemscope_contracts::trace::Value;
 use systemscope_rv32::m3::Scenario;
 use systemscope_rv32::workspace_root;
 use systemscope_verify::backend::{Backend, Side, run};
-use systemscope_verify::case::{InputVariant, StatePatch};
+use systemscope_verify::case::{InputVariant, MediaPatch, StatePatch};
 use systemscope_verify::compare::{
     Divergence, Outcome, Recorded, Recording, StreamResult, Verdict, compare, compare_recordings,
     naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
-use systemscope_verify::latent::{SameSide, first_state_divergence};
+use systemscope_verify::latent::{SameSide, StateDivergence, first_state_divergence};
 use systemscope_verify::locate::{
     Index, Located, Strategy, lockstep, record_index, search, stream_compare,
 };
@@ -185,15 +185,21 @@ fn locate_everywhere(
 
 /// Runs the patched side and checks that the comparator, and the naive oracle, put the
 /// first divergence at `ordinal`, as every locator strategy does against `b`, and that
-/// the sides' states first differ in the CPU at the patch (§12.4). Returns the
-/// divergence, the patched side's failures after it, if any, and the lockstep result.
+/// a state patch's sides first differ in state in the CPU at the patch (§12.4). Returns
+/// the divergence, the patched side's failures after it, if any, the lockstep result,
+/// and the first state divergence up to the divergent observation.
 fn diverge(
     fixture: &Fixture,
     b: &RuntimeBackend,
     expected: &Recorded,
     input: InputVariant,
     ordinal: u64,
-) -> (Divergence, Vec<(Role, EngineError)>, Located) {
+) -> (
+    Divergence,
+    Vec<(Role, EngineError)>,
+    Located,
+    StateDivergence,
+) {
     let (located, indexes) = locate_everywhere(fixture, b, expected, input.clone());
     let (a, actual) = record(fixture, input.clone());
     // The scan ends where either side emits the divergent observation.
@@ -202,23 +208,41 @@ fn diverge(
         .into_iter()
         .max()
         .unwrap();
-    let InputVariant::State(p) = &input else {
-        unreachable!()
+    let scan = |scope: &[&str]| {
+        let (mut x, mut y) = (verify::backend(fixture), verify::backend(fixture));
+        first_state_divergence(
+            &the_plan(b),
+            &verify::scenario(fixture),
+            same(&mut x, InputVariant::None, &indexes[0]),
+            same(&mut y, input.clone(), &indexes[1]),
+            scope,
+            until,
+        )
+        .unwrap()
     };
-    let (mut x, mut y) = (verify::backend(fixture), verify::backend(fixture));
-    let state = first_state_divergence(
-        &the_plan(b),
-        &verify::scenario(fixture),
-        same(&mut x, InputVariant::None, &indexes[0]),
-        same(&mut y, input.clone(), &indexes[1]),
-        until,
-    )
-    .unwrap();
-    assert!(state.origin < p.event_index, "{state:?}");
-    assert_eq!(
-        (state.event, &state.differing[..]),
-        (Some(p.event_index), &[CPU_PATH.to_owned()][..])
-    );
+    let state = scan(&[]);
+    if let InputVariant::State(p) = &input {
+        assert!(state.origin < p.event_index, "{state:?}");
+        assert_eq!(
+            (state.event, &state.differing[..]),
+            (Some(p.event_index), &[CPU_PATH.to_owned()][..])
+        );
+    }
+    if let InputVariant::Media(_) = &input {
+        // The disk's media identity differs from the start; RAM first differs at the
+        // DMA write of the patched bytes, and the CPU only later.
+        assert_eq!(
+            (state.origin, state.event, &state.differing[..]),
+            (0, Some(0), &["soc.disk".to_owned()][..])
+        );
+        let (ram, cpu) = (scan(&["soc.ram"]), scan(&[CPU_PATH]));
+        let (Some(r), Some(c)) = (ram.event, cpu.event) else {
+            panic!("{ram:?} {cpu:?}")
+        };
+        assert!(0 < r && r < c && c <= until, "{ram:?} {cpu:?}");
+        assert_eq!(ram.differing, ["soc.ram"]);
+        assert_eq!(cpu.differing, [CPU_PATH]);
+    }
     let b = a;
     assert_eq!(
         naive_first_divergence(&expected[0], &actual.streams[0]),
@@ -243,7 +267,7 @@ fn diverge(
     };
     assert_eq!((stream.as_str(), at), ("arch", ordinal));
     assert_eq!(located.divergence(), Some((ordinal, &divergence)));
-    (divergence, c.failures, located)
+    (divergence, c.failures, located, state)
 }
 
 fn same<'a>(
@@ -268,13 +292,14 @@ fn expect_field(
     input: InputVariant,
     ordinal: u64,
     field: &str,
-) {
-    let (divergence, failures, _) = diverge(fixture, b, expected, input, ordinal);
+) -> StateDivergence {
+    let (divergence, failures, _, state) = diverge(fixture, b, expected, input, ordinal);
     let Divergence::Fields { kind, fields } = divergence else {
         panic!("{divergence:?}")
     };
     assert_eq!((kind.as_str(), fields[0].name.as_str()), ("retire", field));
     assert!(failures.is_empty(), "{failures:?}");
+    state
 }
 
 #[test]
@@ -414,7 +439,7 @@ fn sp3_a_patched_stvec_diverges_at_the_handler() {
     assert_eq!(u32_field(&arch[e + 1], "insn"), 0x140F_9FF3);
     let event = b.event_index("arch", e as u64 - 1).unwrap();
     let input = patch(event, "stvec", stvec, stvec ^ 0x4);
-    let (divergence, failures, located) = diverge(&fixture, &b, &expected, input, e as u64 + 1);
+    let (divergence, failures, located, _) = diverge(&fixture, &b, &expected, input, e as u64 + 1);
     assert_eq!(
         divergence,
         Divergence::Kind {
@@ -519,4 +544,103 @@ fn sp1_states_differ_in_the_patched_pc() {
             assert!(read, "{path} {source}");
         }
     }
+}
+
+fn le32(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+}
+
+/// Entry 0 of the executable table, `hello`: the disk offset of the word at its ELF's
+/// `e_entry`, inside a `PT_LOAD` segment's file bytes, and `e_entry` (m3-design §8.1).
+fn hello_entry(disk: &[u8]) -> (u64, u32) {
+    let le16 = |b: &[u8], at: usize| usize::from(u16::from_le_bytes([b[at], b[at + 1]]));
+    assert_eq!(le32(disk, 0), 0x3058_5353, "SSX0");
+    let (lba, len) = (le32(disk, 0x10) as usize, le32(disk, 0x14) as usize);
+    let elf = &disk[lba * 512..][..len];
+    let entry = le32(elf, 0x18);
+    let (phoff, size, count) = (le32(elf, 0x1C) as usize, le16(elf, 0x2A), le16(elf, 0x2C));
+    let offset = (0..count)
+        .map(|i| &elf[phoff + i * size..])
+        .find_map(|ph| {
+            let (kind, offset, vaddr, filesz) =
+                (le32(ph, 0), le32(ph, 4), le32(ph, 8), le32(ph, 16));
+            let inside = entry >= vaddr && entry + 4 <= vaddr + filesz;
+            (kind == 1 && inside).then_some(offset + entry - vaddr)
+        })
+        .expect("e_entry inside a PT_LOAD segment");
+    ((lba * 512) as u64 + u64::from(offset), entry)
+}
+
+/// The first `arch` ordinal where `hello`, pid 1, is current, in U-mode, at `entry`:
+/// `os.process.create` gives its entry, and the last `os.process.switch` at or before a
+/// boundary's event the current pid.
+fn hello_starts(b: &RuntimeBackend, expected: &Recorded, entry: u32) -> u64 {
+    let os = &expected[2];
+    let created = os
+        .iter()
+        .find(|o| o.kind == "create" && u32_field(o, "pid") == 1)
+        .expect("hello is created");
+    assert_eq!(u32_field(created, "entry"), entry);
+    let switches: Vec<(u64, u32)> = os
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.kind == "switch")
+        .map(|(k, o)| (b.event_index("os", k as u64).unwrap(), u32_field(o, "to")))
+        .collect();
+    let x = expected[0].iter().enumerate().position(|(i, o)| {
+        let event = b.event_index("arch", i as u64).unwrap();
+        let current = switches.iter().take_while(|(e, _)| *e <= event).last();
+        is(o, "priv", Value::U64(0))
+            && is(o, "pc", Value::U64(entry.into()))
+            && current.is_some_and(|(_, pid)| *pid == 1)
+    });
+    x.expect("hello starts") as u64
+}
+
+/// Replaces `hello`'s entry word on the disk with `new` of the word it holds.
+fn code_patch(disk: &[u8], new: impl Fn(u32) -> u32) -> (InputVariant, u32) {
+    let (at, entry) = hello_entry(disk);
+    let old = le32(disk, at as usize);
+    let input = InputVariant::Media(MediaPatch {
+        offset: at,
+        old: old.to_le_bytes().to_vec(),
+        new: new(old).to_le_bytes().to_vec(),
+    });
+    (input, entry)
+}
+
+/// CB-1: `hello`'s first instruction becomes `addi x0, x0, 0`, or `addi x0, x0, 1` if it
+/// already is that; `arch[x]` differs in `insn`.
+#[test]
+fn cb1_a_patched_code_word_diverges_at_its_first_retirement() {
+    let fixture = fixture();
+    let (b, expected) = complete(&fixture, InputVariant::None);
+    let (input, entry) = code_patch(&fixture.disk, |w| {
+        if w == 0x0000_0013 {
+            0x0010_0013
+        } else {
+            0x0000_0013
+        }
+    });
+    let x = hello_starts(&b, &expected, entry);
+    expect_field(&fixture, &b, &expected, input, x, "insn");
+}
+
+/// CB-2: `hello`'s first instruction becomes 0, an illegal instruction delegated to S;
+/// `arch[x]` is an exception where the expected side retires.
+#[test]
+fn cb2_an_illegal_code_word_diverges_as_an_exception() {
+    let fixture = fixture();
+    let (b, expected) = complete(&fixture, InputVariant::None);
+    let (input, entry) = code_patch(&fixture.disk, |_| 0);
+    let x = hello_starts(&b, &expected, entry);
+    let (divergence, failures, _, _) = diverge(&fixture, &b, &expected, input, x);
+    assert_eq!(
+        divergence,
+        Divergence::Kind {
+            expected: "retire".to_owned(),
+            actual: "exception".to_owned(),
+        }
+    );
+    assert!(failures.is_empty(), "{failures:?}");
 }

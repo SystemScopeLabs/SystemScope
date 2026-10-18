@@ -46,8 +46,10 @@ pub trait Projection {
     fn finished(&self) -> bool;
 }
 
-/// Builds the runtime of a scenario, elaborated and not yet initialized.
-pub type Build = Box<dyn Fn(&Scenario) -> Result<Runtime, String>>;
+/// Builds the runtime of a scenario under a side's input variant, elaborated and not yet
+/// initialized. A build applies [`InputVariant::Media`] to the scenario's media, or
+/// refuses it; it may ignore the other variants, which the adapter applies.
+pub type Build = Box<dyn Fn(&Scenario, &InputVariant) -> Result<Runtime, String>>;
 /// Makes a fresh projection.
 pub type MakeProjection = Box<dyn Fn() -> Box<dyn Projection>>;
 /// Applies a state patch to runtime snapshot bytes, checking the old value.
@@ -181,6 +183,7 @@ struct Session {
     runtime: Runtime,
     shared: Rc<RefCell<Shared>>,
     scenario: Scenario,
+    input: InputVariant,
     execution: [u8; 32],
     budget: u64,
     events: u64,
@@ -345,7 +348,7 @@ impl Session {
         let failed = |why: String| EngineError::BackendFailed(format!("state patch: {why}"));
         let mut bytes = self.runtime.snapshot().map_err(|e| failed(e.to_string()))?;
         patch(&mut bytes[..], p).map_err(failed)?;
-        let mut fresh = build(&self.scenario).map_err(failed)?;
+        let mut fresh = build(&self.scenario, &self.input).map_err(failed)?;
         fresh
             .restore(&bytes)
             .map_err(|e| failed(format!("the patched checkpoint was refused: {e}")))?;
@@ -434,12 +437,12 @@ impl Backend for RuntimeBackend {
     ) -> Result<(), EngineError> {
         self.session = None;
         let patch = match input {
-            InputVariant::None => None,
+            InputVariant::None | InputVariant::Media(_) => None,
             InputVariant::State(p) if self.patch.is_some() => Some(p.clone()),
             InputVariant::State(_) => return Err(EngineError::Unsupported("state patch")),
         };
         let shared = shared(&self.projection, profile, 0, |_| (0, [0; 32]))?;
-        let mut runtime = (self.build)(scenario).map_err(EngineError::BackendFailed)?;
+        let mut runtime = (self.build)(scenario, input).map_err(EngineError::BackendFailed)?;
         runtime.add_observer(Box::new(Tap(Rc::clone(&shared))));
         runtime
             .init()
@@ -448,6 +451,7 @@ impl Backend for RuntimeBackend {
             runtime,
             shared,
             scenario: scenario.clone(),
+            input: input.clone(),
             execution: execution_id(scenario, input, &self.id),
             budget: config.budget,
             events: 0,
@@ -592,7 +596,8 @@ impl Backend for RuntimeBackend {
             let m = c.mark(name).expect("checked above");
             (m.covered, m.prefix)
         })?;
-        let mut runtime = (self.build)(&s.scenario).map_err(EngineError::BackendFailed)?;
+        let mut runtime =
+            (self.build)(&s.scenario, &s.input).map_err(EngineError::BackendFailed)?;
         runtime
             .restore(&c.state)
             .map_err(|e| EngineError::BackendFailed(format!("restore: {e}")))?;

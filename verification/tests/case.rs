@@ -4,7 +4,7 @@
 use systemscope_contracts::trace::Value;
 use systemscope_verify::backend::{Backend, Capabilities, Capability};
 use systemscope_verify::case::{
-    BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch, execution_id,
+    BackendId, BackendRunConfig, InputVariant, MediaPatch, Scenario, StatePatch, execution_id,
 };
 use systemscope_verify::checkpoint::Checkpoint;
 use systemscope_verify::error::EngineError;
@@ -89,8 +89,71 @@ fn an_input_variant_identity_covers_the_whole_patch() {
         edit(&mut p);
         ids.push(InputVariant::State(p).identity());
     }
+    let media = || MediaPatch {
+        offset: 8,
+        old: vec![1, 2],
+        new: vec![3, 4],
+    };
+    let edits: [fn(&mut MediaPatch); 4] = [
+        |p| p.offset = 9,
+        |p| p.old[1] = 5,
+        |p| p.new[0] = 5,
+        // The lengths are encoded: moving a byte from old to new is another patch.
+        |p| {
+            p.old = vec![1];
+            p.new = vec![2, 3, 4];
+        },
+    ];
+    ids.push(InputVariant::Media(media()).identity());
+    for edit in edits {
+        let mut p = media();
+        edit(&mut p);
+        ids.push(InputVariant::Media(p).identity());
+    }
     distinct(&ids);
     assert_eq!(state(1).identity(), state(1).identity());
+    let mut e = systemscope_contracts::canonical::Encoder::new();
+    e.u8(2);
+    e.u64(8);
+    e.bytes(&[1, 2]);
+    e.bytes(&[3, 4]);
+    assert_eq!(
+        InputVariant::Media(media()).identity(),
+        *blake3::hash(e.as_bytes()).as_bytes()
+    );
+}
+
+#[test]
+fn a_media_patch_checks_the_bytes_it_replaces() {
+    let patch = |offset, old: &[u8], new: &[u8]| MediaPatch {
+        offset,
+        old: old.to_vec(),
+        new: new.to_vec(),
+    };
+    let mut image = vec![0, 1, 2, 3];
+    patch(2, &[2, 3], &[7, 8]).apply(&mut image).unwrap();
+    assert_eq!(image, [0, 1, 7, 8]);
+    patch(0, &[], &[]).apply(&mut image).unwrap();
+    patch(4, &[], &[]).apply(&mut image).unwrap();
+    assert_eq!(image, [0, 1, 7, 8]);
+    for (p, why) in [
+        (patch(0, &[0], &[1, 2]), "media patch: 1 old bytes, 2 new"),
+        (
+            patch(3, &[8, 0], &[1, 1]),
+            "media patch: 2 bytes at 0x3 are outside the 4-byte image",
+        ),
+        (
+            patch(u64::MAX, &[0], &[1]),
+            "media patch: 1 bytes at 0xffffffffffffffff are outside the 4-byte image",
+        ),
+        (
+            patch(1, &[1, 2], &[0, 0]),
+            "media patch: the image holds [01, 07] at 0x1, not [01, 02]",
+        ),
+    ] {
+        assert_eq!(p.apply(&mut image), Err(why.to_owned()));
+        assert_eq!(image, [0, 1, 7, 8]);
+    }
 }
 
 #[test]

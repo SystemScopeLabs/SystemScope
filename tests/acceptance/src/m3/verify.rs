@@ -6,7 +6,7 @@ use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_rv32::m3;
 use systemscope_rv32::m3ref::{self, Config};
 use systemscope_rv32::projection::{self, HALT_TRAP, Rv32Projection};
-use systemscope_verify::case::{BackendId, BackendRunConfig, Scenario, StatePatch};
+use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch};
 use systemscope_verify::observation::ObservedValue;
 use systemscope_verify::profile::{
     ComparisonProfile, FieldSpec, KindSpec, Requirement, StreamSpec, Support,
@@ -165,7 +165,8 @@ pub fn config() -> BackendRunConfig {
 }
 
 /// A SystemScope backend on the frozen `m3-reference` with `fixture`'s disk, able to
-/// apply state patches to the CPU, and reading state with the portable decoder.
+/// apply media patches to the disk and state patches to the CPU, and reading state with
+/// the portable decoder.
 pub fn backend(fixture: &Fixture) -> RuntimeBackend {
     let fixture = fixture.clone();
     RuntimeBackend::new(
@@ -174,7 +175,15 @@ pub fn backend(fixture: &Fixture) -> RuntimeBackend {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             build: super::SCENARIO.to_owned(),
         },
-        Box::new(move |_| Ok(fixture.platform())),
+        Box::new(move |_, input| match input {
+            InputVariant::Media(p) => {
+                let mut disk = fixture.disk.clone();
+                p.apply(&mut disk)?;
+                m3ref::build(&fixture.firmware, &disk, &Config::frozen())
+                    .map_err(|e| format!("the patched m3-reference does not build: {e}"))
+            }
+            _ => Ok(fixture.platform()),
+        }),
         Box::new(|| Box::new(M3Projection::default())),
     )
     .with_patch(Box::new(patch))

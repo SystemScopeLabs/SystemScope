@@ -244,7 +244,10 @@ pub fn id() -> BackendId {
 pub fn backend_with(halts: bool, bad_at: Option<u64>) -> RuntimeBackend {
     RuntimeBackend::new(
         id(),
-        Box::new(move |_| Ok(runtime(halts, bad_at))),
+        Box::new(move |_, input| match input {
+            InputVariant::Media(_) => Err("the counter has no media".to_owned()),
+            _ => Ok(runtime(halts, bad_at)),
+        }),
         Box::new(|| Box::new(CounterProjection::default())),
     )
 }

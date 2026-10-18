@@ -6,6 +6,7 @@ mod common;
 use common::*;
 use systemscope_verify::backend::Backend;
 use systemscope_verify::case::InputVariant;
+use systemscope_verify::error::EngineError;
 use systemscope_verify::latent::{SameSide, StateDivergence, first_state_divergence};
 use systemscope_verify::locate::{Index, record_index};
 use systemscope_verify::profile::{Plan, Role, plan};
@@ -28,7 +29,12 @@ fn index(input: &InputVariant, every: u64) -> Index {
     .unwrap()
 }
 
-fn scan(input: &InputVariant, every: u64, until: u64) -> StateDivergence {
+fn scoped(
+    input: &InputVariant,
+    every: u64,
+    scope: &[&str],
+    until: u64,
+) -> Result<StateDivergence, EngineError> {
     let (ie, ia) = (index(&InputVariant::None, every), index(input, every));
     let (mut x, mut y): (RuntimeBackend, RuntimeBackend) = (backend(), backend());
     first_state_divergence(
@@ -36,9 +42,13 @@ fn scan(input: &InputVariant, every: u64, until: u64) -> StateDivergence {
         &scenario(),
         same(&mut x, &InputVariant::None, &ie),
         same(&mut y, input, &ia),
+        scope,
         until,
     )
-    .unwrap()
+}
+
+fn scan(input: &InputVariant, every: u64, until: u64) -> StateDivergence {
+    scoped(input, every, &[], until).unwrap()
 }
 
 fn same<'a>(
@@ -88,4 +98,19 @@ fn equal_sides_and_a_short_scan_find_nothing() {
     let input = patch_n(6, 6, 7);
     assert_eq!(scan(&input, 2, 5), none(4));
     assert_eq!(scan(&input, 0, 6), found(0, 6));
+}
+
+#[test]
+fn a_scope_compares_only_its_components() {
+    let input = patch_n(5, 5, 6);
+    for every in [0, 1, 4] {
+        assert_eq!(
+            scoped(&input, every, &["counter"], LIMIT).unwrap(),
+            scan(&input, every, LIMIT)
+        );
+    }
+    assert_eq!(
+        scoped(&input, 1, &["nothing"], LIMIT),
+        Err(EngineError::Internal("no component nothing".to_owned()))
+    );
 }
