@@ -1131,7 +1131,7 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 to M4.5 are complete. M4.6 is next. M4 as a whole is in progress.
+**Status:** M4.0 to M4.6 are complete. M4.7 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
@@ -1141,8 +1141,8 @@ Why the targets are safe:
 | **M4.3** | complete | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
 | **M4.4** | complete | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
 | **M4.5** | complete | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
-| **M4.6** | next | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
-| **M4.7** | planned | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
+| **M4.6** | complete | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
+| **M4.7** | next | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
 | **M4.8** | planned | Exit audit | docs |
 
 No step implements an RTL backend, a native kernel, or any UI.
@@ -1343,3 +1343,22 @@ M4.5 implemented prefix and replay-window minimization (`verification/src/minimi
 On `m3-reference`, SP-1 to CB-2 are minimized at the report's density, 133 boundaries, and at 16. Each side's origin is its own index's latest checkpoint covering at most `d − w`: at 133, SP-3's at 133 and the others' initial states; at 16, the last multiple of 16 at most `d − w` wherever one exists, SP-1 starting from its initial state. Every minimized bundle replays byte for byte and finds the same-engine report's verdict, window, and state differences. The agreement case starts from the initial states.
 
 Engine mutants of `minimize.rs` and `report::searched` (the class "minimizer accepts a different divergence signature", §25.2): the first run generated 18, caught 13, found 4 unviable, and missed 1, deleting the predicate's arm so that an exact verdict comparison decided. That comparison is equivalent while the ordinal cannot move, so the check became `accepts`, tested on a candidate whose ordinal moved. The rerun of `minimize.rs` generated 20, caught 18, found 2 unviable, and missed none.
+
+### 30.6 M4.6
+
+M4.6 ran the Spike differentials through the M4 engine. The engine now verifies sides that do not share a backend: `locate` takes stream compare when a side cannot step, and `report`, `minimize`, and bundle `replay` build each side from its own builder, the runtime adapter or another backend (`report::Make`). `tests/rv32/src/spike_adapter.rs` adds the Spike backend, record-only with `ArchStream` and `DeterministicReplay`, from a Spike run, a committed log, or parsed events; the four Spike profile versions; and the `rv32.*` projection's write-tohost stop rule. The judges of `spike diff` take their verdict from the M4 stream compare, and SK-1 runs against the committed log in the tests and against the pinned Spike in `cargo xtask spike diff`. It revised the design in these places.
+
+| Section | Revision | Why |
+|---|---|---|
+| §6.5, Spike profiles | Four version-1 profiles, primary `arch`, `w = 3`, `paddr` excluded: `spike-rv32ui` (write-tohost, `retire` only), `spike-misaligned` (halting trap, exceptions compared), `spike-m2-csr` (write-tohost, CSR fields), and `spike-m3-privilege` (halting trap, privilege and CSR fields) | the existing comparisons' rules, unchanged, as §6.5 requires: each profile compares exactly the fields its suite compared before |
+| §6.5, write-tohost | The stream ends after the first word store to `tohost + 4` that follows a word store to `tohost`; later records are ignored. Without a `tohost` symbol it ends only at the halting trap | the riscv-tests `write_tohost` sequence, and what `spike::compare` stopped at |
+| §11.4, stream compare | The locator takes stream compare whenever one side cannot step, whichever side it is | the Spike side is the expected side in every Spike comparison and in SK-1 |
+| §17.2, heterogeneous origins | A side without `checkpoint` starts from its initial state; the other side's origin is its own latest checkpoint at most `d − w` | Spike records its whole stream, so only SystemScope's origin can move |
+| §25.1, SK-1 | `r` is the first injective `retire` with ordinal greater than 0, the patch is at the event of boundary `r − 1`, and its old value is `x[rs1]` as the earlier `retire`s wrote it. The patcher (`spike_adapter::patch`) sets `pc` and `x1` to `x31` in the M1 CPU's snapshot after checking the old value | the patch needs a boundary before `r`; the selector reads only the stream, as §25.1 requires |
+| §28.1, Spike comparisons | Each comparison's `compared` count is the program's retirements, plus the trap for the misaligned and M3 programs | the M4 counts check that the whole stream was compared, not only that it agreed |
+
+**Spike through M4.** On the pinned Spike `19609434`, all 157 comparisons `Agree`: rv32ui 40 (13,268 compared observations), generated 64 (22,344), misaligned 9 (45), M2 CSR 20 (372), M3 privilege 13 (557), and M3 Sv32 11 (2,618). The committed logs of `simple`, the generated program, the misaligned `lw-1`, and `rv32ui-add` agree in the tests without Spike; `spike verify` requires the pinned Spike to reproduce `simple`'s and `add`'s logs byte for byte.
+
+**SK-1.** On `rv32ui-add`, `r` is 35: `x11 ^= 1` after boundary 34 is located by stream compare at `arch[35]`, `retire`, field `rd_value`, which the naive oracle confirms. Minimized with a SystemScope checkpoint after every boundary, the bundle starts SystemScope from boundary 32, `r − w`, and Spike from its initial state; it validates, replays the same result, and is refused against a Spike stream with that retirement's value changed. `cargo xtask spike diff` writes it to `target/spike-logs/sk1.repro`, reads it back, and replays it with a second Spike run. The **Capabilities** criterion of §28.2 is exercised: SystemScope ↔ SystemScope by checkpoint search since M4.2, SystemScope ↔ Spike by stream compare.
+
+**Engine mutants.** cargo-mutants on the M4.6 changes to `locate.rs`, `report.rs`, `bundle.rs`, and `minimize.rs` caught 37 and found 11 unviable, with none missed. `tests/rv32` is excluded from mutation runs (`.cargo/mutants.toml`); the Spike adapter is covered by the committed-log tests and the real-Spike CI job.
