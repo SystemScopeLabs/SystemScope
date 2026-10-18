@@ -873,7 +873,7 @@ CI: every entry replays; its recomputed result must equal the committed result.b
   - an `Agree` entry: "these two backends continue to agree under this profile", after a fix.
 
   Both are checked by canonical equality of `result.bin`.
-- **Seeded campaigns** (D10) run the existing generators over explicit seed lists. Any divergence becomes a scratch bundle for review. The nightly seed stays printed and reproducible, as in M0 and M1.
+- **Seeded campaigns** (D10) run the existing generators over explicit seed lists. Any divergence becomes a scratch bundle for review. The nightly seed stays printed and reproducible, as in M0 and M1. M4.7's campaigns are in §30.7.
 
 ---
 
@@ -941,7 +941,8 @@ verification/            systemscope-verify (new, D7)
 tests/rv32/              projections of rv32.* records; Spike adapter (next to the existing parsers)
 tests/acceptance/        m3-reference projections for os.* and effect streams; decoder-backed state source
 xtask/                   cargo xtask verify locate | diff | replay | minimize | corpus
-tests/verification/      corpus/ (canonical directory bundles, §18) and engine self-tests (M4.7)
+tests/verification/      corpus/ (canonical directory bundles, §18), expected/ (committed streams, §25.2),
+                         equivalent-mutants.txt (§25.2)
 ```
 
 - **Why a new crate, not `tests/acceptance`?** The engine is a product capability that M5, M6, and M7 will use. The acceptance crate is the frozen M0–M3 harness with its golden files. Keeping them apart stops M7 from depending on test harnesses.
@@ -1131,7 +1132,7 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 to M4.6 are complete. M4.7 is next. M4 as a whole is in progress.
+**Status:** M4.0 to M4.7 are complete. M4.8 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
@@ -1142,8 +1143,8 @@ Why the targets are safe:
 | **M4.4** | complete | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
 | **M4.5** | complete | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
 | **M4.6** | complete | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
-| **M4.7** | next | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
-| **M4.8** | planned | Exit audit | docs |
+| **M4.7** | complete | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
+| **M4.8** | next | Exit audit | docs |
 
 No step implements an RTL backend, a native kernel, or any UI.
 
@@ -1362,3 +1363,51 @@ M4.6 ran the Spike differentials through the M4 engine. The engine now verifies 
 **SK-1.** On `rv32ui-add`, `r` is 35: `x11 ^= 1` after boundary 34 is located by stream compare at `arch[35]`, `retire`, field `rd_value`, which the naive oracle confirms. Minimized with a SystemScope checkpoint after every boundary, the bundle starts SystemScope from boundary 32, `r − w`, and Spike from its initial state; it validates, replays the same result, and is refused against a Spike stream with that retirement's value changed. `cargo xtask spike diff` writes it to `target/spike-logs/sk1.repro`, reads it back, and replays it with a second Spike run. The **Capabilities** criterion of §28.2 is exercised: SystemScope ↔ SystemScope by checkpoint search since M4.2, SystemScope ↔ Spike by stream compare.
 
 **Engine mutants.** cargo-mutants on the M4.6 changes to `locate.rs`, `report.rs`, `bundle.rs`, and `minimize.rs` caught 37 and found 11 unviable, with none missed. `tests/rv32` is excluded from mutation runs (`.cargo/mutants.toml`); the Spike adapter is covered by the committed-log tests and the real-Spike CI job.
+
+### 30.7 M4.7
+
+M4.7 added the verification campaigns and the regression corpus. `verification/src/recorded.rs` adds the recorded backend, which replays committed streams: record-only with `DeterministicReplay` and the stream capabilities it holds, refusing any input variant and any other scenario or profile. The acceptance crate commits `m3-reference`'s expected streams and judges the source mutants against them (`tests/acceptance/src/m3/expected.rs`, `mutants.rs`), replays the corpus (`corpus.rs`), and runs the fault-injection campaign (`m3/faults.rs`). `tests/rv32/src/spike_adapter.rs` runs the Spike campaign. It revised the design in these places.
+
+| Section | Revision | Why |
+|---|---|---|
+| §25.2, expected side | The expected side of a source-mutant case is the recorded backend over `tests/verification/expected/m3-reference/` (`arch.obs`, `effect.obs`, `os.obs`, each the canonical observation evidence of one stream), not a second build. `cargo xtask m4-expected bless` writes them; `verify` requires this build to reproduce them byte for byte, and the source-mutant workflow runs it before any mutant | a mutated build is one process; the unmodified side cannot run in it. The committed streams are reviewed like golden files |
+| §25.2, targets | Each target includes the private helpers its function calls: `execute_alu` with `op_imm`, `shift`, and `op_reg`; `execute_control` with `taken`; `complete_memory` with `complete_load` and `complete_store` | the frozen functions delegate their logic to them, so without them the class has almost no mutants. The classes and functions are unchanged |
+| §25.2, how mutants run | `cargo xtask m4-mutants run <target>` runs cargo-mutants 27.1 with `--no-config` (every operator, not `.cargo/mutants.toml`'s weekly filters), `--in-place` (the contracts path dependency is outside the tree), and `--baseline=skip`, after its own unmutated run of the case: cargo-mutants' baseline tests the mutated package, not `--test-package`. The source-mutants workflow runs every target on demand and on pull requests that change a target or the case | a targeted check of exactly the frozen functions, run where its cost belongs |
+| §25.2, detection | The case (`expected::judge`) fails with `Diverged`, `AuxiliaryDivergence`, or `BackendFailed`, each named in its message; a crash or a timeout is detected too. A `Diverged` primary result must equal the naive oracle's; a mismatch is an engine failure, never a detection | the summary reads each fate from cargo-mutants' logs, and an `AuxiliaryDivergence` is a detection the primary stream does not see |
+| §18, campaigns | Only `progen` takes a seed: the Spike campaign compares seeds 64 to 127, the 64 after the fixed seeds. The directed M2 and M3 generators (`csrgen`, `privgen`, `vmgen`) are fixed lists, already compared in full | there is nothing to seed in them |
+| §25.2, equivalent mutants | A mutant is equivalent when `m3-reference` cannot observe it: equivalent for any input, or behavior the workload never exercises, each reason stated and, for instruction classes, checked against the committed `arch` stream | §25.2 defines equivalence by `m3-reference`'s observable behavior, and the frozen workload exercises a small part of RV32I |
+| §18, fault injection | A fault seed draws a boundary past the first, a register `x1` to `x31`, and a bit (BLAKE3 context `SystemScope 2026-10 m4 fault injection v1`, path `m4.faults`). The flip is a state patch after the event of the boundary before, its old value the register as the earlier `retire`s wrote it | the M4.1 state patch, drawn from the stream alone, as SK-1's selector is |
+
+**Recorded backend.** Engine mutants of `recorded.rs`: 18 generated, 14 caught, 4 unviable, none missed.
+
+**Expected streams.** `arch.obs` is 463,628 bytes (2,200 observations), `effect.obs` 2,815, and `os.obs` 5,611. They are canonical, so they are byte-identical on Linux and Windows, and `.gitattributes` keeps them binary.
+
+**Corpus.** `tests/verification/corpus/` holds `agree`, the agreement case, and `sp2`, SP-2's minimized bundle, both copied from `cargo xtask m4-repro emit` after review. Each entry must be the `m3-reference` profile and `Agree` or `Diverged`, and must replay to its committed `result.bin` byte for byte: the `m4_corpus` test and `cargo xtask corpus replay`. CONTRIBUTING describes promotion, as for golden files.
+
+**Source mutants.** cargo-mutants 27.1 generated 154 mutants for the nine targets: 63 diverge on `arch`, 6 stop a side (`BackendFailed`), 11 are unviable, and 74 are listed as equivalent in `tests/verification/equivalent-mutants.txt`. None agrees unlisted, none crashes or hangs, and every `Diverged` primary result equals the naive oracle's. `cargo xtask m4-mutants summarize` prints the per-mutant list.
+
+| Target | Class | Generated | Diverged | BackendFailed | Unviable | Equivalent |
+|---|---|---|---|---|---|---|
+| alu | ALU result | 36 | 2 | 0 | 1 | 33 |
+| control | control flow | 20 | 7 | 0 | 1 | 12 |
+| memory | load and store completion | 8 | 0 | 2 | 3 | 3 |
+| commit | retirement record fields | 9 | 5 | 1 | 2 | 1 |
+| exception | exception delivery | 7 | 7 | 0 | 0 | 0 |
+| sret | privilege return | 2 | 2 | 0 | 0 | 0 |
+| sv32 | Sv32 translation | 61 | 35 | 0 | 1 | 25 |
+| syscall | syscall dispatch | 5 | 4 | 0 | 1 | 0 |
+| schedule | scheduling | 6 | 1 | 3 | 2 | 0 |
+| **total** | | **154** | **63** | **6** | **11** | **74** |
+
+The equivalents, by reason:
+
+- **Equivalent for any input (5).** `|` replaced with `^` where the operands are disjoint bits: the store value fold in `commit_fields` (`(v << 8) | b`), the Sv32 physical address (page number and offset), and the reserved-flag mask of a pointer PTE.
+- **Instructions `m3-reference` never retires (48).** Its ALU instructions are LUI, AUIPC, and ADDI; its only branch is BNE; its loads are LW and LBU; it retires no JALR. The test `m3_reference_retires_only_the_listed_instructions` reads this from the committed `arch` stream. So no mutant of SLTI, SLTIU, XORI, ORI, ANDI, any shift, any OP instruction (33), BEQ, BLT, BGE, BLTU, BGEU (9), JALR's target alignment (3), or LB, LH, LHU (3) can show.
+- **Off the CPU's path (11).** `sv32_translate`, the synchronous walk, is called only by tests; the CPU walks the page table through its bus protocol and `sv32::step`.
+- **PTEs `m3-reference` never walks (10).** Every walked PTE is valid and never W without R; pointers are walked only at level 1, with D, A, and U clear; S-mode accesses hit leaves with U clear; loads hit leaves with R set; `SUM` and `MXR` stay clear; and the one page fault is a U-mode store to a leaf with neither W nor D. Each listed mutant of `sv32::step` changes only an operator whose result those PTEs cannot change. The walked PTEs were measured by instrumenting `sv32::step` once; they are listed in the file.
+
+`m3-reference` is a small hand-written workload, so 69 of the 74 equivalents are behavior it does not exercise, not mutants the engine fails to see. Widening it is outside M4: the workload, its golden file, and its expected streams are frozen (§28.1, §28.2 **No regression**). The Spike suites and the `rv32i` unit tests cover those instructions and PTE cases.
+
+**Fault injection.** The 32 fixed seeds, run in every CI test run, each located by checkpoint search, a checkpoint every 133 boundaries, and by the naive oracle, with equal primary results: 13 diverge, each at or after its fault's boundary, and 19 agree, the fault masked. None stops a side. The pinned findings are a test; the nightly workflow injects its seed as `M4_FAULT_SEED`.
+
+**Spike campaign.** `cargo xtask spike campaign`, run by the Linux `spike` CI job: on the pinned Spike `19609434`, the 64 programs of seeds 64 to 127 agree through the M4 stream compare, 22,429 observations compared. A divergence is minimized, SystemScope with a checkpoint after every boundary, written to `target/spike-logs/campaign/<program>.repro`, replayed, and fails the job; a test checks that path on a doctored Spike stream. The nightly `spike random` seed stays as before.
