@@ -742,8 +742,7 @@ A reproducer has the following **logical contents**, frozen at M4.0:
 | actual-side replay material | optional checkpoint; optional input-variant bytes |
 | expected observation evidence | optional canonical primary-stream observations, expected side (below) |
 | actual observation evidence | optional canonical primary-stream observations, actual side |
-| verification result (`result.bin`) | the canonical `VerificationResult` (§6.7): `Diverged`, `Agree`, or `AuxiliaryDivergence` |
-| predecessor slice | optional (§15) |
+| verification result (`result.bin`) | the canonical `VerificationResult` (§6.7): `Diverged`, `Agree`, or `AuxiliaryDivergence`, with its predecessor slices (§15) |
 
 **Physical form.** In M4 these contents are persisted as a **canonical directory bundle** (D9). A single-file container is a possible future transport or packaging form, outside the M4 contract. If one is ever added, it must wrap exactly these logical contents and keep the §16.2 requirements: canonical bytes, an integrity hash for every entry, corruption detection, cross-OS reproducibility, and no host-local data.
 
@@ -760,9 +759,9 @@ The directory layout:
 │   └─ input.bin        optional
 ├─ expected.obs         optional: canonical primary-stream observation evidence, expected side
 ├─ actual.obs           optional: canonical primary-stream observation evidence, actual side
-├─ result.bin           the canonical VerificationResult (§6.7): outcome, primary divergence if any,
-│                       field diffs, auxiliary evidence, state evidence
-└─ slice.bin            optional: the relevant-predecessor slice (§15)
+└─ result.bin           the canonical VerificationResult (§6.7): outcome, primary divergence if any,
+                        field diffs, auxiliary evidence, state and trace evidence, and the
+                        relevant-predecessor slices (§15)
 ```
 
 **Outcome-dependent contents.** A reproducer bundle records one of three outcomes: `Diverged`, `Agree`, or `AuxiliaryDivergence`. Normal corpus entries are `Diverged` or `Agree` (§18).
@@ -783,7 +782,7 @@ The directory layout:
 
 `manifest.json` records:
 - the bundle format version;
-- the common scenario identity: platform, CPU profile, program or disk BLAKE3s, seed;
+- the common scenario: platform, topology hash, CPU profile, program or disk BLAKE3, repository-relative locator, seed;
 - the comparison profile: name, version, identity, primary and auxiliary streams, stop rule;
 - for each side:
   - its role;
@@ -802,7 +801,7 @@ A side without a checkpoint replays from its initial state. The manifest says so
 - **Portable and canonical.** Every binary entry uses the M0 §4.5 primitives, fixed-width and little-endian. The JSON rendering is deterministic, as the golden files are (`the_golden_files_are_host_independent`): fixed key order, LF line endings, one fixed layout, and no host-dependent values. It never depends on JSON object or map iteration order.
 - **Byte identity.** The same comparison case, comparison profile, and canonical replay configuration give byte-identical bundles on Linux and Windows (§6.6). A bundle's bytes never depend on the local run configuration used for analysis.
 - **No host data.** There are no absolute paths, user names, host names, timestamps, or thread counts. Fixture references are by BLAKE3 and a repository-relative path.
-- **Corruption detection.** On load, every entry must match its manifest BLAKE3. Each checkpoint must belong to its side's `ExecutionId`, and its `state` must pass `Runtime::restore`'s full validation, plus the platform checks where a decoder exists. Any failure is `CorruptReproducer` (§20), and nothing runs.
+- **Corruption detection.** On load, every entry must match its manifest BLAKE3. The bundle holds exactly the entries its outcome and sides call for. Its scenario, profile, canonical replay configuration, and backends must be the replaying case's. Each checkpoint must belong to its side's `ExecutionId`, its `state` must pass `Runtime::restore`'s full validation, plus the platform checks where a decoder exists, and it must be the checkpoint the side's own run takes after as many events. Any failure is `CorruptReproducer` (§20), and nothing runs.
 - **Replay.** Each side is rebuilt independently:
 
   ```text
@@ -840,7 +839,7 @@ A candidate still fails **the same way** when its primary-stream first divergenc
 ### 17.2 M4: Prefix and Window Minimization
 
 - **Prefix:** the minimal failing prefix is the first divergence itself. Every boundary before it agrees, by definition.
-- **Replay window:** choose, for each side that can restore, its latest checkpoint covering at most the divergence's primary ordinal, so the bundle replays the fewest events. This uses the checkpoint index only.
+- **Replay window:** choose, for each side that can restore, its latest checkpoint covering at most the divergence's primary ordinal minus the report window, so the bundle replays the fewest events and still holds the whole window. This uses the checkpoint index only.
 - Both are exact and deterministic, and neither changes the scenario.
 
 ### 17.3 Deferred Beyond M4: Scenario Reduction
@@ -1131,7 +1130,7 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 to M4.3 are complete. M4.4 is next. M4 as a whole is in progress.
+**Status:** M4.0 to M4.4 are complete. M4.5 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
@@ -1139,8 +1138,8 @@ Why the targets are safe:
 | **M4.1** | complete | Observation and comparison core: `systemscope-verify` crate, observations, canonical encoding, prefix digest, comparator, SystemScope runtime adapter and `rv32.*` projection; controlled divergences on the same backend (state patch), naive oracle | code, tests |
 | **M4.2** | complete | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
 | **M4.3** | complete | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
-| **M4.4** | next | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
-| **M4.5** | planned | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
+| **M4.4** | complete | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
+| **M4.5** | next | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
 | **M4.6** | planned | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
 | **M4.7** | planned | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
 | **M4.8** | planned | Exit audit | docs |
@@ -1185,7 +1184,7 @@ M4.1's projection must reproduce exactly these per-kind counts. A mismatch is a 
 - [ ] **Agreement.** The unmodified `reference` scenario compared with itself gives `Agree`, with 2,200 compared primary observations.
 - [ ] **Structured diff.** The state and trace diff at the divergence is deterministic: two runs produce byte-identical canonical reports.
 - [ ] **Reproducer.** Every case yields a canonical directory bundle that rebuilds each side independently and whose replay, under its canonical replay configuration, produces a byte-identical `result.bin`. Every corrupted variant of it is refused (§25.3).
-- [ ] **Minimization.** For SP-1 to CB-2, the minimized bundle's origin on each side is that side's latest checkpoint covering at most the divergence's primary ordinal, and it replays the same result.
+- [ ] **Minimization.** For SP-1 to CB-2, the minimized bundle's origin on each side is that side's latest checkpoint covering at most the divergence's primary ordinal minus the report window, and it replays the same result.
 - [ ] **Cross-OS.** For SP-1 to CB-2 and the agreement case, verification results and bundles are byte-identical on Linux and Windows in CI (§28.1).
 - [ ] **Corpus.** `tests/verification/corpus/` holds at least one `Diverged` entry (SP-2) and one `Agree` entry (the agreement case), promoted by review, and CI replays every entry.
 - [ ] **Capabilities.** The locator is exercised on a snapshot-capable pair (SystemScope ↔ SystemScope) and a snapshot-incapable pair (SystemScope ↔ Spike). Both return the oracle's answer.
@@ -1309,3 +1308,23 @@ On `m3-reference`, both CB cases first differ in RAM at event 4,116 and in the C
 - `scan`, `record + from - b.len()` to `record - from - b.len()`: `from` is 0 unless the window is larger than `SLICE_RECORDS`, since the ring holds at most the larger of the two.
 - `scan`, the ring's `b.len() > ring` to `==`: not equivalent. Once the ring overshoots its size, it keeps every record, and the result is unchanged. The one difference is a ring that lands on its size exactly and then sees its first differing record first in the next event. Each counter event starts with an equal wake dispatch, so the counter cannot show it. It stays missed.
 - `Session::inspect`, the guard `r.events == 0` to true: a state read runs only the observe point at tick 0, after refusing when an event at tick 0 is pending, so it never runs an event. The guard is a defense.
+
+### 30.4 M4.4
+
+M4.4 implemented the reproducer bundle (`verification/src/bundle.rs`): its manifest, writer, validation, and replay, the directory form, and replay from checkpoint origins (`locate::resume`, `report::from_origins`). `cargo xtask m4-repro emit | check | replay` and the `m4-cross-os` CI job check that both operating systems write the same bundles and replay each other's. It revised the design in these places. Each revision is a correction or a detail the frozen text left open, not a new decision.
+
+| Section | Revision | Why |
+|---|---|---|
+| §16.1, slice | No `slice.bin`: the predecessor slices stay in `result.bin` | §30.3 put them in the verification result, and a second copy could disagree with it |
+| §16.1, manifest | Hand-rendered JSON: `format` `systemscope-reproducer`, `version` 1, the scenario with its topology hash and locator, the profile, each side (role, backend, capability names, input identity, `replay_config`, and `origin`, `"initial"` or `{"checkpoint": covered}`), the outcome, `primary_divergence` with `kind` one of `kind`, `fields`, or `ended`, and every other entry's path and BLAKE3 in path order. A manifest is accepted only as exactly its own rendering | the golden files' style. Re-rendering refuses reordered keys, extra keys, and any other layout |
+| §16.1, entries | `input.bin` is the input variant's canonical encoding, whose BLAKE3 is its identity, present only when the variant is not `None`. Each `.obs` is magic `SSVO`, version 1, the first ordinal, and the window's observations | the identity hashes the same bytes the bundle holds |
+| §16.2, replay | The result is a function of the bundle alone: both sides step from their origins in lockstep, and a side without a checkpoint steps from its initial state to the other's origin and must reproduce its prefix digest there. The state and trace scans start from the same origins. Only the first divergence and its window are independent of the origins: a scan's own origin is part of its evidence | `same_engine`'s result depends on its index's checkpoints, which a bundle does not hold |
+| §16.2, origins | A checkpoint origin must cover at most `d − w` primary boundaries, so the window is whole. An `Agree` or `AuxiliaryDivergence` bundle starts from the initial states | the window starts at `d − w`, and an agreement compares every observation |
+| §16.2, corruption | The replaying caller gives the case: plan, scenario, canonical replay configuration, and backends. Each checkpoint is also re-derived: the side's own run must take the same checkpoint after as many events. A replay that recomputes different bytes is reported by entry, apart from corruption | the manifest cannot hash itself, so its fields are checked against the case. A checkpoint's auxiliary marks never reach the result, so only re-derivation finds them changed |
+| §17.2, §28.2 | "at most the divergence's primary ordinal" becomes "at most the divergence's primary ordinal minus the report window" | the window starts at `d − w` |
+| §20 | `CorruptReproducer` is engine error tag 4 in `result.bin` | the result's encoding needed a tag for it |
+| §30.2 | Persisted indexes stay deferred. A bundle holds at most one checkpoint per side | nothing in M4.4 reads an index back |
+
+On `m3-reference`, the agreement case, SP-1 to SP-3, CB-1, and CB-2 each bundle from the initial states, and each divergence also from both sides' checkpoints at `d − w` and from the actual side's alone. Every bundle replays byte for byte and finds the same-engine report's verdict, window, and state differences. The cross-OS set is the agreement case, SP-1, and CB-1 from the initial states, and CB-1 from checkpoints at 61 of its 64 boundaries, about 380 KB. On the counter, every byte of the manifest flipped, every byte of every other entry flipped with and without its hash updated, each entry truncated or removed, an extra entry, another execution's checkpoint, a truncated snapshot, and another scenario or replay configuration are refused.
+
+**Engine mutants.** cargo-mutants on `bundle.rs`, `report.rs`, and `locate::resume` generates 145 mutants: 113 caught, 22 unviable, and 10 missed. Four of the missed were checks the canonical rendering already makes, such as lowercase hex digits and the `initial` string, or a count the decoder bounds anyway, and those checks are gone. Tests now cover the others: escaped control characters in a manifest string, `ReplayError`'s messages, a manifest naming another backend or capability set, and an `AuxiliaryDivergence` bundle with its auxiliary windows. A rerun on the affected functions generates 50 mutants: 44 caught, 6 unviable, and none missed. A larger local budget gives the same result bytes (§25.3).
