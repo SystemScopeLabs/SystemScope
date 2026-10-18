@@ -18,7 +18,7 @@ use systemscope_verify::compare::{
 use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::ObservedValue;
 use systemscope_verify::profile::{
-    ComparisonProfile, FieldSpec, KindSpec, Requirement, StreamSpec, Support, plan,
+    ComparisonProfile, FieldSpec, KindSpec, Requirement, Role, StreamSpec, Support, plan,
 };
 use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
 
@@ -296,7 +296,7 @@ fn failure(b: &mut RuntimeBackend, input: InputVariant, budget: u64) -> EngineEr
         input,
         config: BackendRunConfig { budget },
     };
-    run(&plan, &scenario(), side).unwrap_err()
+    run(&plan, &scenario(), side).complete().unwrap_err()
 }
 
 #[test]
@@ -330,7 +330,9 @@ fn identical_sides_agree_to_the_stop_rule() {
 fn observations_follow_the_profile_and_count_only_compared_kinds() {
     let mut b = backend();
     let plan = plan(&profile(), &b.support(), &b.support()).unwrap();
-    let recorded = run(&plan, &scenario(), side(&mut b, InputVariant::None)).unwrap();
+    let recorded = run(&plan, &scenario(), side(&mut b, InputVariant::None))
+        .complete()
+        .unwrap();
     let arch = &recorded[0];
     // Twelve retirements; the two `interrupt`s are not compared and take no ordinal.
     assert_eq!(arch.len(), LIMIT as usize);
@@ -368,11 +370,15 @@ fn a_state_patch_diverges_at_the_next_boundary() {
     for boundary in [0, 4, 9] {
         let mut e = backend();
         let plan = plan(&profile(), &e.support(), &e.support()).unwrap();
-        let expected = run(&plan, &scenario(), side(&mut e, InputVariant::None)).unwrap();
+        let expected = run(&plan, &scenario(), side(&mut e, InputVariant::None))
+            .complete()
+            .unwrap();
         let event = e.event_index("arch", boundary).unwrap();
         let n = boundary + 1;
         let mut a = backend();
-        let actual = run(&plan, &scenario(), side(&mut a, patch_n(event, n, n + 1))).unwrap();
+        let actual = run(&plan, &scenario(), side(&mut a, patch_n(event, n, n + 1)))
+            .complete()
+            .unwrap();
         let oracle = naive_first_divergence(&expected[0], &actual[0]);
         assert_eq!(oracle, Some(boundary + 1), "{boundary}");
         let Verdict::Compared(c) = compare(&plan, &expected, &actual).unwrap() else {
@@ -431,7 +437,7 @@ fn a_state_patch_needs_a_patcher() {
     let mut b = backend_with(true, None);
     let plan = plan(&profile(), &b.support(), &b.support()).unwrap();
     assert_eq!(
-        run(&plan, &scenario(), side(&mut b, patch_n(1, 1, 2))),
+        run(&plan, &scenario(), side(&mut b, patch_n(1, 1, 2))).complete(),
         Err(EngineError::Unsupported("state patch"))
     );
 }
@@ -452,7 +458,7 @@ fn a_side_that_misses_the_stop_rule_fails() {
         input: InputVariant::None,
         config: BackendRunConfig { budget: LIMIT },
     };
-    assert!(run(&plan, &scenario(), exact).is_ok());
+    assert!(run(&plan, &scenario(), exact).complete().is_ok());
     let mut endless = backend_with(false, None);
     assert_eq!(
         failure(&mut endless, InputVariant::None, 1_000),
@@ -518,8 +524,44 @@ fn observing_changes_nothing() {
     while plain.step().unwrap().is_some() {}
     let mut b = backend();
     let plan = plan(&profile(), &b.support(), &b.support()).unwrap();
-    run(&plan, &scenario(), side(&mut b, InputVariant::None)).unwrap();
+    run(&plan, &scenario(), side(&mut b, InputVariant::None))
+        .complete()
+        .unwrap();
     let observed = b.runtime().unwrap();
     assert_eq!(observed.state_digest(), plain.state_digest());
     assert_eq!(observed.execution_digest(), plain.execution_digest());
+}
+
+#[test]
+fn a_divergence_before_the_patched_side_fails_is_reported() {
+    // n = 11 becomes 12 after boundary 10, so the counter passes its limit without the
+    // halt, and its queue drains; its retirement 11 already differs.
+    let mut e = backend();
+    let plan = plan(&profile(), &e.support(), &e.support()).unwrap();
+    run(&plan, &scenario(), side(&mut e, InputVariant::None));
+    let event = e.event_index("arch", 10).unwrap();
+    let (mut e, mut a) = (backend(), backend());
+    let verdict = verify(
+        &profile(),
+        &scenario(),
+        side(&mut e, InputVariant::None),
+        side(&mut a, patch_n(event, 11, 12)),
+    )
+    .unwrap();
+    let Verdict::Compared(c) = verdict else {
+        panic!("{verdict:?}")
+    };
+    assert!(matches!(
+        c.primary,
+        StreamResult::Diverged { ordinal: 11, .. }
+    ));
+    assert_eq!(
+        c.failures,
+        [(
+            Role::Actual,
+            EngineError::BackendFailed(
+                "the event queue drained after 12 events, before the stop rule".to_owned()
+            )
+        )]
+    );
 }

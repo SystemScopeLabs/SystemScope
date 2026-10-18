@@ -3,8 +3,8 @@
 
 use systemscope_contracts::trace::Value;
 use systemscope_verify::compare::{
-    Comparison, Divergence, FieldDiff, Outcome, Recorded, StreamResult, Verdict, compare,
-    naive_first_divergence,
+    Comparison, Divergence, FieldDiff, Outcome, Recorded, Recording, StreamResult, Verdict,
+    compare, compare_recordings, naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::{Observation, ObservedValue, PrefixDigest};
@@ -485,4 +485,109 @@ fn the_profile_identity_covers_every_rule() {
 fn the_naive_oracle_finds_no_divergence_in_equal_streams() {
     assert_eq!(naive_first_divergence(&arch(), &arch()), None);
     assert_eq!(naive_first_divergence(&[], &[]), None);
+}
+
+fn done(streams: Recorded) -> Recording {
+    Recording {
+        streams,
+        failure: None,
+    }
+}
+
+fn failed(streams: Recorded, why: &str) -> Recording {
+    Recording {
+        streams,
+        failure: Some(EngineError::BackendFailed(why.to_owned())),
+    }
+}
+
+#[test]
+fn complete_recordings_compare_as_complete_streams() {
+    let (e, a) = (vec![arch(), effect()], vec![arch(), effect()]);
+    assert_eq!(
+        compare_recordings(&full_plan(), &done(e.clone()), &done(a.clone())),
+        compare(&full_plan(), &e, &a)
+    );
+    assert_eq!(done(e.clone()).complete(), Ok(e));
+    assert_eq!(
+        failed(a, "x").complete(),
+        Err(EngineError::BackendFailed("x".to_owned()))
+    );
+}
+
+#[test]
+fn a_divergence_before_a_failure_is_still_reported() {
+    let mut actual = arch();
+    actual[1].fields[0].1 = u(50);
+    // The actual side fails after three observations, past its divergence at 1.
+    let verdict = compare_recordings(
+        &full_plan(),
+        &done(vec![arch(), effect()]),
+        &failed(vec![actual[..3].to_vec(), Vec::new()], "budget"),
+    )
+    .unwrap();
+    let Verdict::Compared(c) = verdict else {
+        panic!("{verdict:?}")
+    };
+    assert_eq!(c.outcome(), Outcome::Diverged);
+    assert!(matches!(
+        c.primary,
+        StreamResult::Diverged { ordinal: 1, .. }
+    ));
+    assert!(c.auxiliary.is_empty());
+    assert_eq!(
+        c.failures,
+        [(
+            Role::Actual,
+            EngineError::BackendFailed("budget".to_owned())
+        )]
+    );
+}
+
+#[test]
+fn a_failure_with_no_divergence_before_it_is_the_result() {
+    // A stream cut short by a failure makes no length divergence.
+    for (e, a) in [
+        (
+            done(vec![arch(), effect()]),
+            failed(vec![arch()[..3].to_vec()], "a"),
+        ),
+        (failed(vec![Vec::new()], "e"), done(vec![arch(), effect()])),
+        (
+            failed(vec![arch()], "e"),
+            failed(vec![arch()[..2].to_vec()], "a"),
+        ),
+    ] {
+        let first = e.failure.clone().or(a.failure.clone()).unwrap();
+        assert_eq!(compare_recordings(&full_plan(), &e, &a), Err(first));
+    }
+    // Both failed after a divergence: both failures are evidence, expected first.
+    let mut actual = arch();
+    actual[0].fields[0].1 = u(50);
+    let Ok(Verdict::Compared(c)) = compare_recordings(
+        &full_plan(),
+        &failed(vec![arch()], "e"),
+        &failed(vec![actual], "a"),
+    ) else {
+        panic!()
+    };
+    let roles: Vec<Role> = c.failures.iter().map(|f| f.0).collect();
+    assert_eq!(roles, [Role::Expected, Role::Actual]);
+}
+
+#[test]
+fn an_incomparable_prefix_before_a_failure_is_incomparable() {
+    let mut actual = arch();
+    actual[1].fields[0].1 = ObservedValue::Absent;
+    assert!(matches!(
+        compare_recordings(
+            &full_plan(),
+            &done(vec![arch(), effect()]),
+            &failed(vec![actual], "a"),
+        ),
+        Ok(Verdict::Incomparable(Incomparable::AbsentRequired {
+            ordinal: 1,
+            ..
+        }))
+    ));
 }

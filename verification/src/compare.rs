@@ -92,6 +92,9 @@ pub struct Comparison {
     pub auxiliary: Vec<StreamResult>,
     /// The optional fields neither compared nor read, from the plan.
     pub not_compared: Vec<String>,
+    /// The sides that failed before the stop rule, after the primary divergence they
+    /// both recorded; the auxiliary streams are then not compared.
+    pub failures: Vec<(Role, EngineError)>,
 }
 
 impl Comparison {
@@ -144,7 +147,63 @@ pub fn compare(
         primary,
         auxiliary: results,
         not_compared: plan.not_compared.clone(),
+        failures: Vec::new(),
     }))
+}
+
+/// One side's recording: what it observed, and why it stopped before the stop rule, if it
+/// did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recording {
+    /// The observations, one stream per profile stream, the primary first.
+    pub streams: Recorded,
+    /// The failure that ended the side early.
+    pub failure: Option<EngineError>,
+}
+
+impl Recording {
+    /// The streams of a side that reached the stop rule, or its failure.
+    pub fn complete(self) -> Result<Recorded, EngineError> {
+        match self.failure {
+            None => Ok(self.streams),
+            Some(e) => Err(e),
+        }
+    }
+}
+
+/// Compares two recordings (§20). When both sides reached the stop rule, this is
+/// [`compare`]. When a side failed first, only the primary observations both sides
+/// recorded are compared: a divergence among them is still the first divergence, never
+/// hidden by the failure, and is reported with the failures as evidence. Without one, the
+/// first failure is the result, never a divergence: a stream cut short by a failure makes
+/// no length divergence.
+pub fn compare_recordings(
+    plan: &Plan,
+    expected: &Recording,
+    actual: &Recording,
+) -> Result<Verdict, EngineError> {
+    let failures: Vec<(Role, EngineError)> = [(Role::Expected, expected), (Role::Actual, actual)]
+        .into_iter()
+        .filter_map(|(role, r)| r.failure.clone().map(|e| (role, e)))
+        .collect();
+    let Some((_, first)) = failures.first().cloned() else {
+        return compare(plan, &expected.streams, &actual.streams);
+    };
+    fn primary(r: &Recording) -> &[Observation] {
+        r.streams.first().map_or(&[], Vec::as_slice)
+    }
+    let (e, a) = (primary(expected), primary(actual));
+    let common = e.len().min(a.len());
+    match compare_stream(&plan.profile.primary, &e[..common], &a[..common])? {
+        Err(why) => Ok(Verdict::Incomparable(why)),
+        Ok(primary @ StreamResult::Diverged { .. }) => Ok(Verdict::Compared(Comparison {
+            primary,
+            auxiliary: Vec::new(),
+            not_compared: plan.not_compared.clone(),
+            failures,
+        })),
+        Ok(StreamResult::Agree { .. }) => Err(first),
+    }
 }
 
 /// Compares one stream. An observation that breaks the projection's contract with the
