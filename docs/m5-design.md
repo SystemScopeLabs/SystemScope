@@ -70,6 +70,7 @@ M5 has three parts:
 | D7 | Primary comparisons use timing-invariant streams: per-process outcomes, declared final memory, and per-process syscall results. They never use a global interleaving | §13 |
 | D8 | Each racy variant is a planted bug with a known correct counterpart. M5's detection is measured on those pairs | §12.3 |
 | D9 | Minimization shrinks the perturbation itself, besides M4's prefix and window | §16 |
+| D10 | Tie order uses a rank-major `sequence`, so contracts and `EventKey` do not change. `WFI` stays illegal, and an idle hart spins in the trampoline | §7.3, §11.3 |
 
 ## 4. What M0–M4 Provide
 
@@ -108,7 +109,11 @@ A perturbation `P` has three independent parts. A run's perturbation is fixed at
 
 `P.latency` maps link and component paths to a replacement `LinkLatency`. Examples are the disk's `Cycles { cpu, 16 }` becoming `Cycles { cpu, 3 }`, or a bus link becoming `Cycles { cpu, 2 }`.
 
-- It changes the configuration only. The components need no code change.
+- It changes the configuration only, so the components need no code change. It reaches two places, and only the platform builder knows both:
+  - link latencies, which are in the topology: the trace header and `topology_hash`;
+  - targets' response latencies, such as `RamConfig::latency` or `BlockMediaConfig::latency`, which are component configuration and are stored in snapshots.
+
+  So A is an input of the platform builder (`m5ref::Config`), not of the runtime. An A-perturbed run is a different topology or configuration by construction.
 - Every override must keep the component's own invariants (§20). For example, a target's response latency must stay a whole number of cycles of its domain.
 - It is the coarsest mechanism and the cheapest to explain. A campaign samples overrides from declared ranges per path.
 
@@ -116,10 +121,10 @@ A perturbation `P` has three independent parts. A run's perturbation is fixed at
 
 `P.jitter = { seed, max, scope }` adds `j` extra cycles to a message's delivery, with `0 ≤ j ≤ max`. Here `j` is drawn from a stream derived from `seed`, the link, and the message's per-link ordinal. So it does not depend on the order in which links are used.
 
-- The runtime applies it when it turns a `ScheduleWhen` from a link delivery into a key. Components see only a later delivery.
+- The runtime applies it in `Ctx::try_send`, after `add_latency`, when a link delivery becomes a tick. Components see only a later delivery. Self-wakes (`wake_self`) do not cross a link and are never jittered.
 - `scope` lists the links it applies to. Device and DMA links are the default. Bus-to-RAM links are left out unless named, because they multiply the campaign cost without adding new interleavings.
-- Jitter only delays. It never reorders two messages on the same link (FIFO per link), because `mem.v1` and `irq.v0` assume in-order delivery.
-- The per-link ordinals are runtime state. They are stored in the snapshot, so a restore continues the same jitter stream.
+- Jitter only delays. It never reorders two messages on the same link (FIFO per link), because `mem.v1` and `irq.v0` assume in-order delivery. A jittered delivery tick is therefore `max(tick + j, last)`, where `last` is the link's latest delivery tick. Equal ticks keep sequence order.
+- Each link's message ordinal and latest delivery tick are runtime state. They are stored in the snapshot of a perturbed session, so a restore continues the same jitter stream. An unperturbed session's snapshot layout is unchanged (§19).
 
 ### 7.3 C: Tie Order
 
@@ -127,11 +132,16 @@ A perturbation `P` has three independent parts. A run's perturbation is fixed at
 
 - It exposes components that rely on the order of simultaneous events: for example, a device's completion and a CPU fetch in the same `Request` phase.
 - It must keep every runtime rule: an event is never scheduled before the one being dispatched, and `Init` and `Observe` keep their positions.
-- **(open) Mechanism.** The contracts `EventKey` defines dispatch order as `(tick, phase, sequence)`, and its canonical encoding is part of every trace and golden digest. There are two ways to do this:
-  - (C1) the runtime draws `sequence` from a seeded permutation of the values pending at that `(tick, phase)`, so `EventKey` and its encoding do not change;
-  - (C2) contracts adds a rank field, which unperturbed runs leave at 0, and the M0–M4 golden files must still stay byte-identical.
+- **Mechanism: a rank-major `sequence`.** In a C-perturbed session, the runtime assigns `sequence = rank << 40 | counter`:
+  - `counter` is the existing counter (`next_sequence`), so sequences stay unique and are assigned in scheduling order in their low bits;
+  - `rank` is a 24-bit draw from the tie seed and the counter;
+  - for an event scheduled into the `(tick, phase)` being dispatched, `rank` is drawn from `[current rank, 2^24)`, so its key is always after the current event's.
 
-  C1 keeps the contracts pin. C2 is simpler to reason about but needs a pin bump and a proof that the encoding does not change. The freeze picks one after a spike in M5.1.
+  The scheduler still dispatches in strict `EventKey` order, and every key is after the last dispatched one. `EventKey`, its encoding, and the scheduler's heap are unchanged, and so is the contracts pin. An unperturbed session has `rank = 0`, so `sequence = counter` exactly, as in M0–M4.
+- **What it revises.** m0-design S4 ("assigned in scheduling order") holds for `counter`, not for the whole `sequence`, in a C-perturbed session. S6 applies to `counter` below `2^40`. Restore's checks (m0-design §7) compare `counter` with `next_sequence`. The contracts doc comment "Global scheduling order" stays true of the low bits, and it can be clarified without a code change.
+- **Rejected alternatives.**
+  - Popping ties out of key order would break S4's dispatch rule and restore's `EventBeforeCursor` check.
+  - A rank field in `EventKey` would change its canonical encoding, and with it every M0–M4 trace and golden digest.
 
 ### 7.4 Identity and Recording
 
@@ -168,7 +178,7 @@ The `M5` profile is `M3` plus delegated S-level external interrupts. Every other
 - **Eligibility.** Interrupts are sampled after a retirement, as in M2. SEI is taken when `SEIP & SEIE` and, if delegated, `priv < S || (priv = S && SIE)`. If not delegated, it is taken in M under the M-level rule. MEI keeps priority over SEI.
 - **Delivery to S.** `sepc ← pc`, `scause ← 0x8000_0009`, `stval ← 0`, `SPP ← priv`, `SPIE ← SIE`, `SIE ← 0`, `priv ← S`, `pc ← stvec.BASE`. It emits `rv32.interrupt` with `to = S`.
 - **Why delegation (D3).** The trampoline runs in S with `SIE = 0`. A delegated SEI that becomes pending there waits until `SRET` sets `SIE ← SPIE` and drops to U. It is then taken at the first U boundary, atomically, with no window. An M-mode firmware forwarding the interrupt in software has a window between unmasking and `SRET` where an interrupt is lost. The modeled kernel cannot touch CSRs to close that window.
-- **Lines.** The interrupt controller's output drives a new CPU input, `seip`, through the existing `irq.v0` protocol. `m2-reference` and `m3-reference` keep driving `meip`.
+- **Lines.** The `M5` profile adds a second `irq.v0` target port, `sirq`, which drives the external part of `SEIP`. The interrupt controller is unchanged: in `m5-reference`, its `cpu` output is linked to `sirq` instead of `irq`. `m2-reference` and `m3-reference` keep driving `irq` (MEI).
 - **Snapshot.** The `M5` profile adds `mideleg.SEI`, `mie.SEIE`, and the M-writable `mip.SEIP` to the CPU snapshot as a new schema. Schemas for `M1`–`M3` are unchanged.
 
 ## 10. Timer Device
@@ -182,7 +192,7 @@ The `M5` profile is `M3` plus delegated S-level external interrupts. Every other
 | `0x8` | `STATUS`: bit 0 `EXPIRED`; writing 1 clears it and drops the line | RW1C |
 
 - It expires by scheduling one wake for `COMPARE` cycles ahead. It does not tick every cycle, so an idle timer costs nothing.
-- Its expiry is a message like any other, so jitter (B) and tie order (C) apply to it. Perturbing the timer is how a campaign moves preemption points.
+- Its expiry is a self-wake, which is never jittered. Its line to the interrupt controller is an `irq.v0` link, so jitter (B) on that link and tie order (C) move it. So does A on its `COMPARE` default. Perturbing those is how a campaign moves preemption points.
 - **Why not CLINT (D4).** `mtime`/`mtimecmp` interrupt in M, and only M-mode software or Sstc can rearm them. The modeled kernel works only through memory (m3-design §6.1), so it would need firmware help on every tick, and that firmware path brings back the forwarding window of §9. A memory-mapped timer on the interrupt controller needs no CPU change beyond §9, and the M6 native kernel can use the same device.
 
 ## 11. Kernel Additions
@@ -195,6 +205,7 @@ The kernel's execution model is unchanged (m3-design §6.3). It still runs one o
   - **Timer:** acknowledge `STATUS`, then preempt (§11.2);
   - **Block controller:** acknowledge `ACK`, then wake the waiting process (§11.3).
 - Boot, done by the firmware stub in M (§12.1), sets `mideleg.SEI` and `sie.SEIE`. Afterwards no CSR changes, and masking is only `sstatus.SIE` in the trampoline.
+- The kernel's access whitelist (m3-design §6.3) gains the interrupt controller's and the timer's windows. At boot the kernel writes the controller's `ENABLE` for both sources.
 
 ### 11.2 Preemption
 
@@ -209,7 +220,7 @@ A new syscall (the number is chosen in M5.3 from the Linux-numbered range; **(op
 - **On completion** (the interrupt), the kernel copies the block from staging to the caller's buffer with its own accesses, sets `a0 = 0`, and appends the caller to the run queue.
 - **Errors** are as in M3's load path: a controller error gives `-EIO`.
 - **One request in flight.** A second `blk_read` while the controller is busy blocks the caller in a FIFO wait queue. This is a deliberate shared resource.
-- **If every process is blocked**, the kernel parks the hart in the trampoline's idle loop (a `WFI`-free spin in S with `SIE = 1`) until an interrupt. **(open)** The other option is to make `WFI` legal in S in the `M5` profile. That costs a Spike-comparison exclusion (m3-design §5.1).
+- **If every process is blocked**, the kernel sets the trap frame's action to a new `Idle`. The trampoline then sets `SIE` and spins in S until an interrupt. The interrupt enters the trampoline normally, and the kernel ignores the saved spin context. `WFI` stays illegal, as in `M3` (D10).
 
 ### 11.4 Shared Page
 
@@ -220,7 +231,7 @@ A new syscall (the number is chosen in M5.3 from the Linux-numbered range; **(op
 ### 11.5 Snapshot and Trace
 
 - The kernel's snapshot schema grows: the `Blocked` state, the block wait queue, the timer configuration, and the shared frame. M3's schema is unchanged and still restores.
-- New records: `os.preempt { pid }`, `os.block { pid, lba }`, `os.wake { pid }`, `os.interrupt { sources }`, and `os.final { word, value }` at shutdown.
+- New records, in the existing naming: `os.process.preempt { pid }`, `os.process.block { pid, lba }`, `os.process.wake { pid }`, `os.interrupt { sources }`, and `os.final { word, value }` at shutdown. Dispatch stays `os.process.switch`.
 
 ## 12. `m5-reference`
 
@@ -268,7 +279,7 @@ R5 is a kernel input variant, which is a configuration flag of the modeled kerne
 ### 13.1 The `outcome` Stream
 
 `outcome` is a new stream projected from the `os` and UART records. Its observations are grouped per process in pid order, and in event order within each process. Each observation is one of:
-- `out { pid, bytes }`, one per `write` (its bytes, not their UART order);
+- `out { pid, bytes }`, one per `write`. The bytes are the `platform.uart.tx` records emitted between that syscall's `os.syscall.enter` and `os.syscall.exit`. A kernel operation runs while the CPU is held, so nothing else can write the UART in between;
 - `ret { pid, nr, value }`, one per syscall in the time-invariant set (§13.2);
 - `end { pid, status | fault }`;
 - `final { word, value }`, from the shutdown dump.
@@ -301,7 +312,7 @@ Both profiles use M4's stop rules and report window.
 
 A divergence in `outcome` is a symptom. The cause is an interleaving. M5 adds evidence to connect them. It is evidence, never a verdict (m4-design §15).
 
-- **The schedule stream.** Each `os.dispatch`, `os.preempt`, `os.block`, and `os.wake`, with the event index and the `instret` of the preempted process. It is projected from the `os` records.
+- **The schedule stream.** Each `os.process.switch`, `os.process.preempt`, `os.process.block`, and `os.process.wake`, with the event index and the preempted process's saved `sepc`. It is projected from the `os` records.
 - **First differing decision.** The engine compares the two sides' schedule streams and reports the first decision that differs. It reports both sides' records around it and the perturbation elements that applied up to that event (§7.4).
 - **Per-process trace.** For the diverging process, M4's state diff at the outcome divergence is shown, together with the shared-page words it read since its last dispatch. Those words come from the trace's memory records, through M4's slice links.
 
@@ -323,7 +334,7 @@ Coverage measures what a workload and a campaign exercised. It is a report, neve
 
 ## 18. Reproducer
 
-M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. The manifest lists it with its identity, and replay builds each side with it. An M4 bundle without it means the empty perturbation, so every M4 bundle and corpus entry stays valid unchanged. The bundle format version is bumped only if the manifest schema needs it. **(open)**
+M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It is not a new `InputVariant`: a planted race's side carries a media patch and a perturbation at once, and `InputVariant` holds one input. The manifest lists it with its identity, and replay builds each side with it. An M4 bundle without it means the empty perturbation, so every M4 bundle and corpus entry stays valid unchanged. The bundle format version is bumped only if the manifest schema needs it. **(open)**
 
 ## 19. Determinism and Compatibility
 
@@ -335,7 +346,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. The 
 ## 20. Failure Model
 
 - An invalid perturbation fails construction: an unknown path, an override that breaks a component invariant, or a jitter scope naming a non-link. It never fails mid-run.
-- A perturbed run that faults the session (a component fault, a protocol violation) is a finding, reported as M4's `BackendFailed` with the perturbation. A model must tolerate every delivery time its protocol allows. A failure there is a model bug that M5 has found.
+- A perturbed run that faults the session (a component fault, a protocol violation) is a finding, reported as M4's `BackendFailed` with the perturbation. A model must tolerate every delivery time its protocol allows. A failure there is a model bug that M5 has found. No M0–M4 test has ever delivered a response later than its configured latency. M5.1 therefore runs every existing reference scenario under B before any new workload exists.
 - Planted race R5 halts at `max_instructions`. M4 reports that as the stop rule's outcome, a divergence in `end`.
 
 ## 21. Validation
@@ -349,7 +360,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. The 
 
 - The `M5` profile, `SimpleTimer`, and the kernel additions are systemscope components. They need no contract change.
 - `irq.v0` already carries a level line. `seip` is a new CPU port using it.
-- Perturbation A and B are runtime-internal. C may need a contracts change (§7.3, **(open)**). If it does, the pin moves once in M5.1, with the M0–M4 golden files proving that the encoding is unchanged.
+- A is a builder input. B and C are runtime-internal (§7.3). The contracts pin does not move in M5.
 
 ## 23. Architecture Risks
 
@@ -357,15 +368,15 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. The 
 2. **Ineffective perturbation.** A mechanism may never move an interrupt or preemption. Mitigation: perturbation coverage (§17) measures it per mechanism.
 3. **False positives from the workload.** A program whose output legitimately depends on timing would look like a race. Mitigation: the `outcome` stream groups by process, and §8 lists exactly what is invariant. Every program is reviewed against it, and the unpatched campaign must agree.
 4. **Kernel complexity.** Preemption and blocking add states to a kernel that M3 kept small. Mitigation: the pure core (m3-design §6.3) is extended and tested without a runtime first. R5 checks that the tests can see a kernel race.
-5. **Tie order and runtime invariants.** C touches the scheduler. Mitigation: it is the last mechanism (M5.6), behind the open decision of §7.3.
+5. **Tie order and runtime invariants.** C changes how the scheduler assigns `sequence`. Mitigation: it is the last mechanism (M5.6), and a property test checks the scheduler's rules S1–S6 and restore under random C seeds.
 
 ## 24. Open Questions
 
 | # | Question | Draft answer |
 |---|---|---|
-| O1 | Tie-order mechanism: C1 (runtime permutation of `sequence`) or C2 (contracts rank field) | C1 if the spike shows that the runtime can keep every rule. Otherwise C2 with a pin bump |
+| O1 | Tie-order mechanism | **Decided (D10):** a rank-major `sequence` (§7.3) |
 | O2 | `blk_read` syscall number | from the Linux-numbered range, chosen at M5.3 |
-| O3 | Idle when every process is blocked: an S spin loop or `WFI` legal in S | spin loop. It keeps the Spike `WFI` rule of M3 |
+| O3 | Idle when every process is blocked | **Decided (D10):** a spin loop in the trampoline. `WFI` would need a new CPU wait state and snapshot field, and Spike can be compared on it only with an interrupt already pending |
 | O4 | Reproducer bundle version bump | only if the manifest schema changes |
 | O5 | Seed counts and ranges per mechanism | frozen in M5.6 from measured cost |
 
@@ -374,7 +385,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. The 
 | Step | Scope | Changes |
 |---|---|---|
 | **M5.0** | Design freeze (this document) | docs |
-| **M5.1** | Perturbation core: A and B in the runtime, the encoding, identity, snapshot state, and the O1 spike; identity proven on every M0–M4 golden | code, tests |
+| **M5.1** | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
 | **M5.2** | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
 | **M5.3** | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
 | **M5.4** | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
