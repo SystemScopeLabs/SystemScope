@@ -1072,7 +1072,7 @@ Why the targets are safe:
 | nondeterministic report ordering | M4.3 |
 | minimizer accepts a different divergence signature | M4.5 |
 
-**Source mutation classes and targets.** These are mutants of production CPU and kernel code, frozen at M4.0 as classes and target functions. Each is run as a comparison case against the `m3-reference` profile: the expected side is the unmodified build, the actual side the mutated build. They are targeted checks, as in M1–M3, separate from the nightly cargo-mutants exploration (`.cargo/mutants.toml`).
+**Source mutation classes and targets.** These are mutants of production CPU and kernel code, frozen at M4.0 as classes and target functions. Each is run as a comparison case against the `m3-reference` profile: the expected side is the unmodified build, the actual side the mutated build. They are targeted checks, as in M1–M3, separate from the weekly cargo-mutants exploration (`.cargo/mutants.toml`).
 
 | Class | Target functions | Where the mutant should show |
 |---|---|---|

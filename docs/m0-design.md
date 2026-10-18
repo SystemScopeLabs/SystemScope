@@ -747,7 +747,8 @@ The clock mix is chosen on purpose. 3 GHz has a period that is not a whole numbe
 ### CI
 
 - **Blocking, on `ubuntu-latest` and `windows-latest`:** `cargo fmt --check`, `cargo check --locked`, `clippy -D warnings` with the determinism lints, `cargo machete` (these four on Linux only), then nextest with `--no-fail-fast`, doctests, AT-1, AT-2, and AT-3. A last step fails if the tests changed any file.
-- **Nightly, not blocking:** AT-1 step 1, AT-2, and AT-3 for one random seed on both operating systems (`M0_SEED`, printed), coverage, and `cargo mutants`.
+- **Nightly, not blocking:** AT-1 step 1, AT-2, and AT-3 for one random seed on both operating systems (`M0_SEED`, printed).
+- **Weekly, not blocking:** coverage, in Saturday's nightly run, and `cargo mutants`, sharded, skipped when nothing it mutates changed since the last successful scheduled run.
 - `contracts` is checked out next to `systemscope`, matching the path dependency.
 
 ### Supporting Unit and Property Tests
