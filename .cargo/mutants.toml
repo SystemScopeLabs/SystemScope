@@ -6,7 +6,29 @@ test_tool = "nextest"
 # rv32 and Spike test harness in tests/rv32 is excluded too: its mutants took half the
 # run time, and the ones that survive are gaps in the harness, not in the product.
 exclude_globs = ["tests/acceptance/**", "xtask/**", "tests/rv32/**"]
-# `|` to `^` is equivalent wherever the operands share no set bits, which is how
-# immediates, CSR images, and page-table entries are assembled; all 48 such survivors in
-# the first full run were of that kind. `|` to `&` still runs.
-exclude_re = ['replace \| with \^']
+# Mutants that are equivalent to the code, each by name so a moved line stays matched.
+exclude_re = [
+    # `|` to `^` is equivalent wherever the operands share no set bits, which is how
+    # immediates, CSR images, and page-table entries are assembled; all 48 such survivors
+    # in the first full run were of that kind. `|` to `&` still runs.
+    'replace \| with \^',
+    # A schema version of 1 replaced with 1.
+    '<impl Component for (ModeledKernel|AddressBus|DmaBlockController|SimpleIrqController|SimpleBlockMedia|MultiMasterBus|Ram|SimpleUart|ToyBus|ToyCpu|ToyDma|ToyMemory)>::snapshot_schema_version -> u32 with 1$',
+    # The chunks of a frame access sum to the frame, so no step reaches the bound.
+    'replace < with <= in Operation::data_len$',
+    # Strictly ascending creation frames: a frame listed twice is rejected after decoding
+    # anyway, by check_life's ownership pass.
+    'replace < with <= in proc_op$',
+    # A counted list in a snapshot is always followed by the bitmap, so it never fills the
+    # rest exactly, and a count past the end fails decoding its elements the same way.
+    'replace > with (==|>=) in count$',
+    # The kernel asks for an access only below the stage's step count, 1 + len here.
+    'replace match guard step <= len as usize with true in ProcOp::access$',
+    # An ENTER after boot always finds a process running: the kernel shuts down when the
+    # last one ends, and a restore rejects being up and idle with none running.
+    'replace match guard self.procs.current\(\).is_some\(\) with true in Model::start$',
+    # The ELF parser reports a prefix too short only with `needed` above the prefix length
+    # (elf/tests/user.rs pins it), so the guard against staging no more always holds.
+    'replace match guard needed > len with true in Model::staged$',
+    'replace > with >= in Model::staged$',
+]
