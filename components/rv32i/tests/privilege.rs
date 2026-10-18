@@ -355,3 +355,10 @@ proptest! {
         }
     }
 }
+
+/// The `sstatus` view's bits, as the reference harness masks `sstatus` writes with:
+/// `SIE`, `SPIE`, `SPP`, `SUM`, and `MXR`.
+#[test]
+fn the_sstatus_mask_is_the_s_view() {
+    assert_eq!(privilege::SSTATUS_MASK, 0x000c_0122);
+}

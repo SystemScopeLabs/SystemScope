@@ -519,20 +519,24 @@ fn messages_on_the_wrong_port_or_protocol_fault() {
         len: 4,
     });
     // M2: irq.v0 only on irq, mem.v1 only on mem, nothing on a port it lacks.
-    for (port, msg) in [
-        (PortId(0), level.clone()),
-        (PortId(1), resp(0)),
-        (PortId(1), req.clone()),
-        (PortId(2), level.clone()),
-        (PortId(2), resp(0)),
+    let on_mem = "rv32 cpu: message on mem is not mem.v1";
+    let on_irq = "rv32 cpu: message on irq is not irq.v0";
+    let unknown = "rv32 cpu: message on an unknown port";
+    for (port, msg, why) in [
+        (PortId(0), level.clone(), on_mem),
+        (PortId(1), resp(0), on_irq),
+        (PortId(1), req.clone(), on_irq),
+        (PortId(2), level.clone(), unknown),
+        (PortId(2), resp(0), unknown),
     ] {
         for (name, mut cpu) in parked() {
             let mut ctx = MockCtx::new();
             let before = snapshot_of(&cpu);
             let result = ctx.deliver(&mut cpu, port, msg.clone(), Phase::Complete);
-            assert!(
-                matches!(result, Err(SimError::ComponentFault(_))),
-                "{name} {port:?} {msg:?}: {result:?}"
+            assert_eq!(
+                result,
+                Err(SimError::ComponentFault(why)),
+                "{name} {port:?} {msg:?}"
             );
             quiet(&ctx);
             assert_eq!(snapshot_of(&cpu), before);

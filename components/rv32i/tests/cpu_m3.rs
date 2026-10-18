@@ -410,6 +410,7 @@ fn m3_resets_in_m_with_every_csr_zero_and_inspect_appends_priv_and_the_csrs() {
         assert_eq!(view_u(&m3, n), 0, "{n}");
     }
     assert_eq!(cpu.snapshot_schema_version(), SNAPSHOT_SCHEMA_M3);
+    assert_eq!(cpu.type_name(), "rv32i.cpu");
 }
 
 #[test]
@@ -1878,4 +1879,77 @@ fn restored_m3_cpus_continue_identically_from_every_event() {
         assert_eq!(read(&end, "scause"), 3);
         assert_eq!(read(&end, "stval"), 0x8000_1000);
     }
+}
+
+#[test]
+fn restore_ties_instret_to_the_instruction_limit() {
+    let limit_halt = |w: &mut SnapshotWriter| {
+        w.u8(5);
+        w.u8(1);
+    };
+    let at = |instret: u64, state: &dyn Fn(&mut SnapshotWriter)| {
+        forge(
+            ENTRY,
+            &[0; 31],
+            instret,
+            instret,
+            state,
+            &RESET_CSRS,
+            &RESET_M3,
+        )
+    };
+    // Halted by the limit exactly at it; still running only below it.
+    let halted = at(LIMIT, &limit_halt);
+    assert_eq!(snapshot_of(&restore_m3(&halted).unwrap()), halted);
+    assert!(restore_m3(&at(LIMIT - 1, &limit_halt)).is_err());
+    let running = at(LIMIT - 1, &fetch_issue);
+    assert_eq!(snapshot_of(&restore_m3(&running).unwrap()), running);
+    assert!(restore_m3(&at(LIMIT, &fetch_issue)).is_err());
+}
+
+#[test]
+fn a_pending_outcome_is_checked_against_translation_and_its_access() {
+    let at = |insn: u32, outcome: &dyn Fn(&mut SnapshotWriter), pa: Option<u64>| {
+        let state = |w: &mut SnapshotWriter| {
+            w.u8(4);
+            w.u8(1);
+            w.u32(insn);
+            outcome(w);
+            match pa {
+                None => w.u8(0),
+                Some(pa) => {
+                    w.u8(1);
+                    w.u64(pa);
+                }
+            }
+        };
+        let m3 = M3Csrs {
+            privilege: S,
+            ..RESET_M3
+        };
+        restore_m3(&forge(ENTRY, &[0; 31], 0, 1, state, &RESET_CSRS, &m3))
+    };
+    let trap = |code: u8| {
+        move |w: &mut SnapshotWriter| {
+            w.u8(1);
+            w.u8(code);
+            w.u32(0);
+        }
+    };
+    // With satp Bare, a load at 0 can raise its access fault (6), never its page fault
+    // (12).
+    let load = lw(1, 0, 0);
+    at(load, &trap(6), None).unwrap();
+    assert!(at(load, &trap(12), None).is_err());
+    // A retired ADDI is not an access: it carries no physical address.
+    let effect = |w: &mut SnapshotWriter| {
+        w.u8(0);
+        w.u8(1);
+        w.u8(1);
+        w.u32(1);
+        w.u32(ENTRY + 4);
+    };
+    let add = addi(1, 0, 1);
+    at(add, &effect, None).unwrap();
+    assert!(at(add, &effect, Some(0)).is_err());
 }

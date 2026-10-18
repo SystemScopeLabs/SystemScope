@@ -27,7 +27,7 @@ use crate::execute::TrapCause;
 use crate::privilege::{Privilege, SATP_MODE, SATP_PPN};
 
 /// `V`.
-pub const PTE_V: u32 = 1 << 0;
+pub const PTE_V: u32 = 1;
 /// `R`.
 pub const PTE_R: u32 = 1 << 1;
 /// `W`.

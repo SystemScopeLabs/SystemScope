@@ -72,3 +72,14 @@ proptest! {
         prop_assert_eq!(reads, walk);
     }
 }
+
+/// The PTE bits, from the privileged specification: `V`, `R`, `W`, `X`, `U`, `G`, `A`,
+/// `D` are bits 0 to 7.
+#[test]
+fn the_pte_bits_are_the_specified_ones() {
+    use systemscope_rv32i::sv32::{PTE_A, PTE_D, PTE_G, PTE_R, PTE_U, PTE_V, PTE_W, PTE_X};
+    let bits = [PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PTE_G, PTE_A, PTE_D];
+    for (i, bit) in bits.into_iter().enumerate() {
+        assert_eq!(bit, 1 << i, "bit {i}");
+    }
+}
