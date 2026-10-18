@@ -44,8 +44,12 @@ use systemscope_platform::{
     RamConfigError, RamImage, Region, Segment, SimpleBlockMedia, SimpleIrqController, SimpleUart,
     UartConfig, dma, irqc, uart,
 };
+use systemscope_runtime::jitter::{Jitter, JitterState};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
+use systemscope_runtime::snapshot::JITTERED_FORMAT_VERSION;
 use systemscope_runtime::topology::TopologyBuilder;
+
+use crate::perturb::Latencies;
 use systemscope_rv32i::{Rv32iConfig, Rv32iCpu, Rv32iProfile};
 
 use crate::runner::{self, CPU_HZ, Finished, Start};
@@ -70,6 +74,11 @@ pub const DISK: ComponentId = ComponentId(6);
 pub const PATHS: [&str; 7] = [
     "soc.cpu0", "soc.bus", "soc.ram", "soc.uart", "soc.irqc", "soc.blk", "soc.disk",
 ];
+
+/// The number of links, in declaration order (§11).
+pub const LINKS: u32 = 9;
+/// The targets whose response latency perturbation A may override.
+pub const TARGETS: [&str; 5] = ["soc.ram", "soc.uart", "soc.irqc", "soc.blk", "soc.disk"];
 
 /// The bus masters, by master index: the CPU is master 0, the block controller master 1.
 pub const MASTERS: [&str; 2] = ["cpu", "dma0"];
@@ -121,6 +130,10 @@ pub struct Config {
     pub dma_size: u64,
     /// LBAs the media fails; empty in `m2-reference`.
     pub bad_blocks: BTreeSet<u64>,
+    /// Perturbation A (`docs/m5-design.md` §7.1); empty in `m2-reference`.
+    pub latencies: Latencies,
+    /// Perturbation B (`docs/m5-design.md` §7.2); `None` in `m2-reference`.
+    pub jitter: Option<Jitter>,
 }
 
 impl Config {
@@ -137,6 +150,8 @@ impl Config {
             dma_base: u64::from(RAM_BASE),
             dma_size: u64::from(RAM_SIZE),
             bad_blocks: BTreeSet::new(),
+            latencies: Latencies::default(),
+            jitter: None,
         }
     }
 }
@@ -168,6 +183,8 @@ pub enum BuildError {
     Controller(DmaBlockControllerConfigError),
     /// The media rejected its configuration or the disk image.
     Media(BlockMediaConfigError),
+    /// A latency override is not allowed (`docs/m5-design.md` §7.1).
+    Latencies(&'static str),
     /// The topology did not elaborate.
     Elaboration(String),
 }
@@ -189,6 +206,7 @@ impl fmt::Display for BuildError {
             BuildError::Irqc(e) => write!(f, "soc.irqc: {e}"),
             BuildError::Controller(e) => write!(f, "soc.blk: {e}"),
             BuildError::Media(e) => write!(f, "soc.disk: {e}"),
+            BuildError::Latencies(why) => write!(f, "latencies: {why}"),
             BuildError::Elaboration(e) => write!(f, "elaboration: {e}"),
         }
     }
@@ -226,6 +244,11 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
         });
     }
 
+    config
+        .latencies
+        .check(LINKS, &TARGETS)
+        .map_err(BuildError::Latencies)?;
+
     let mut t = TopologyBuilder::new(SimulationClock::default());
     let cpu_clock = t
         .add_clock(
@@ -234,13 +257,15 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
             Rounding::Floor,
         )
         .expect("100 MHz divides the simulation clock");
-    let respond = LinkLatency::Cycles {
+    let respond = |path: &str| LinkLatency::Cycles {
         domain: cpu_clock,
-        k: 0,
+        k: config.latencies.respond(path, 0),
     };
-    let link = LinkLatency::Cycles {
-        domain: cpu_clock,
-        k: 1,
+    let link = |index: u32| {
+        Some(LinkLatency::Cycles {
+            domain: cpu_clock,
+            k: config.latencies.link(index, 1),
+        })
     };
 
     let cpu = Rv32iCpu::new(Rv32iConfig {
@@ -280,20 +305,22 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
     let ram = Ram::new(
         RamConfig {
             size: config.ram_size,
-            latency: respond,
+            latency: respond(PATHS[2]),
         },
         &ram_image(image),
     )
     .map_err(BuildError::Ram)?;
-    let device = SimpleUart::new(UartConfig { latency: respond });
+    let device = SimpleUart::new(UartConfig {
+        latency: respond(PATHS[3]),
+    });
     let irqc = SimpleIrqController::new(IrqControllerConfig {
         sources: IRQ_SOURCES,
-        latency: respond,
+        latency: respond(PATHS[4]),
     })
     .map_err(BuildError::Irqc)?;
     let blk = DmaBlockController::new(DmaBlockControllerConfig {
         clock: cpu_clock,
-        latency: respond,
+        latency: respond(PATHS[5]),
         capacity_blocks: config.controller_blocks,
         dma_base: config.dma_base,
         dma_size: config.dma_size,
@@ -304,7 +331,7 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
             capacity_blocks: config.media_blocks,
             latency: LinkLatency::Cycles {
                 domain: cpu_clock,
-                k: DISK_LATENCY_CYCLES,
+                k: config.latencies.respond(PATHS[6], DISK_LATENCY_CYCLES),
             },
             bad_blocks: config.bad_blocks.clone(),
         },
@@ -320,17 +347,18 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
     let blk = t.add_component(PATHS[5], Box::new(blk));
     let disk = t.add_component(PATHS[6], Box::new(disk));
 
-    t.connect((cpu, "mem"), (bus, MASTERS[0]), Some(link));
-    t.connect((bus, REGIONS[0]), (ram, "mem"), Some(link));
-    t.connect((bus, REGIONS[1]), (device, "mem"), Some(link));
-    t.connect((bus, REGIONS[2]), (irqc, "mem"), Some(link));
-    t.connect((bus, REGIONS[3]), (blk, "mem"), Some(link));
-    t.connect((blk, "dma"), (bus, MASTERS[1]), Some(link));
-    t.connect((blk, "blk"), (disk, "blk"), Some(link));
-    t.connect((blk, "irq"), (irqc, "src0"), Some(link));
-    t.connect((irqc, "cpu"), (cpu, "irq"), Some(link));
+    t.connect((cpu, "mem"), (bus, MASTERS[0]), link(0));
+    t.connect((bus, REGIONS[0]), (ram, "mem"), link(1));
+    t.connect((bus, REGIONS[1]), (device, "mem"), link(2));
+    t.connect((bus, REGIONS[2]), (irqc, "mem"), link(3));
+    t.connect((bus, REGIONS[3]), (blk, "mem"), link(4));
+    t.connect((blk, "dma"), (bus, MASTERS[1]), link(5));
+    t.connect((blk, "blk"), (disk, "blk"), link(6));
+    t.connect((blk, "irq"), (irqc, "src0"), link(7));
+    t.connect((irqc, "cpu"), (cpu, "irq"), link(8));
     t.elaborate(SessionConfig {
         seed: config.seed,
+        jitter: config.jitter,
         ..SessionConfig::default()
     })
     .map_err(|e| BuildError::Elaboration(format!("{e:?}")))
@@ -392,7 +420,7 @@ pub fn components(snapshot: &[u8]) -> Result<Vec<ComponentState>, DecodeError> {
     use systemscope_contracts::event::EventKey;
     let mut d = Decoder::new(snapshot);
     d.raw(8)?; // magic
-    d.u32()?; // format version
+    let version = d.u32()?;
     d.u64()?; // seed
     d.u64()?; // ticks per second
     d.u64()?; // max events per phase
@@ -402,6 +430,9 @@ pub fn components(snapshot: &[u8]) -> Result<Vec<ComponentState>, DecodeError> {
         d.raw(3 * 8 + 1)?;
     }
     d.raw(32)?; // topology hash
+    if version == JITTERED_FORMAT_VERSION {
+        JitterState::decode(&mut d)?;
+    }
     if d.u8()? == 1 {
         EventKey::decode(&mut d)?;
     }

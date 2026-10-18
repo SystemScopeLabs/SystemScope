@@ -56,6 +56,7 @@ pub mod m2ref;
 pub mod m3;
 pub mod m3ref;
 pub mod manifest;
+pub mod perturb;
 pub mod privgen;
 pub mod progen;
 pub mod projection;
