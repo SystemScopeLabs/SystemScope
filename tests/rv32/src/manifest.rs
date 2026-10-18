@@ -104,7 +104,7 @@ impl Fixture {
 }
 
 /// Loads a fixture for the `m1-reference` RAM and requires the entry at its base.
-pub(crate) fn load(name: &str, bytes: &[u8]) -> Result<LoadImage, String> {
+pub fn load(name: &str, bytes: &[u8]) -> Result<LoadImage, String> {
     let image = load_elf32(bytes, RAM_BASE, RAM_SIZE)
         .map_err(|e| format!("{name}: the loader rejects the ELF: {e}"))?;
     if image.entry != RAM_BASE {

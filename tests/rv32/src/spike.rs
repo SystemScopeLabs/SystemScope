@@ -726,22 +726,36 @@ fn run_sides(
     executed.0 = true;
 
     // Spike.
-    if let Some(dir) = Path::new(log).parent() {
-        fs::create_dir_all(root.join(dir)).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
-    let _ = fs::remove_file(root.join(log));
     let args = match (profile, trap) {
         (Rv32iProfile::M3, _) => spike_m3_args(image.entry, elf, log),
         (Rv32iProfile::M2, _) => spike_m2_args(image.entry, elf, log),
         (Rv32iProfile::M1, true) => spike_trap_args(image.entry, elf, log),
         (Rv32iProfile::M1, false) => spike_args(image.entry, elf, log),
     };
+    let text = run_spike(root, spike, &args, log, &mut executed.1)?;
+    Ok((finished, text))
+}
+
+/// Runs `spike` with `args` in `root`, which must write its log to `log`, relative to
+/// `root`, and nothing to stdout or stderr. Sets `executed` once Spike has run, and
+/// returns the log.
+pub fn run_spike(
+    root: &Path,
+    spike: &Path,
+    args: &[String],
+    log: &str,
+    executed: &mut bool,
+) -> Result<String, String> {
+    if let Some(dir) = Path::new(log).parent() {
+        fs::create_dir_all(root.join(dir)).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let _ = fs::remove_file(root.join(log));
     let out = Command::new(spike)
         .args(args)
         .current_dir(root)
         .output()
         .map_err(|e| format!("cannot run {}: {e}", spike.display()))?;
-    executed.1 = true;
+    *executed = true;
     if !out.status.success() || !out.stdout.is_empty() || !out.stderr.is_empty() {
         return Err(format!(
             "Spike: {}, stdout {:?}, stderr {:?}",
@@ -750,8 +764,7 @@ fn run_sides(
             String::from_utf8_lossy(&out.stderr)
         ));
     }
-    let text = fs::read_to_string(root.join(log)).map_err(|e| format!("{log}: {e}"))?;
-    Ok((finished, text))
+    fs::read_to_string(root.join(log)).map_err(|e| format!("{log}: {e}"))
 }
 
 /// SystemScope's traced run of a passing program.

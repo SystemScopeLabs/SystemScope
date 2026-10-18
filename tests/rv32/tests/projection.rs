@@ -4,7 +4,7 @@
 use systemscope_contracts::component::ComponentId;
 use systemscope_contracts::trace::{TraceAt, TraceOrigin, TraceRecord, Value};
 use systemscope_rv32::projection::{
-    EXCEPTION_FIELDS, HALT_TRAP, RETIRE_FIELDS, Rv32Projection, arch_m3, support,
+    EXCEPTION_FIELDS, HALT_TRAP, RETIRE_FIELDS, Rv32Projection, WRITE_TOHOST, arch_m3, support,
 };
 use systemscope_verify::observation::ObservedValue;
 use systemscope_verify::profile::ComparisonProfile;
@@ -314,4 +314,70 @@ fn the_projection_reports_every_field_and_checks_the_profile() {
             "csr_value"
         ]
     );
+}
+
+/// A store of `width` bytes to `addr`.
+fn store(addr: u64, width: u64) -> TraceRecord {
+    commit(
+        0,
+        vec![
+            ("addr", u(addr)),
+            ("paddr", u(addr)),
+            ("width", u(width)),
+            ("value", u(1)),
+        ],
+    )
+}
+
+#[test]
+fn write_tohost_ends_the_stream_after_its_second_store() {
+    let profile = |stop_rule: &str| ComparisonProfile {
+        name: "p".to_owned(),
+        version: 1,
+        primary: arch_m3(),
+        auxiliary: Vec::new(),
+        stop_rule: stop_rule.to_owned(),
+        report_window: 3,
+    };
+    const TOHOST: u64 = 0x8000_1000;
+    assert_eq!(
+        Rv32Projection::default().begin(&profile(WRITE_TOHOST)),
+        Err("write-tohost without a tohost".to_owned())
+    );
+    let mut p = Rv32Projection::new(Some(TOHOST as u32));
+    assert_eq!(p.begin(&profile(WRITE_TOHOST)), Ok(()));
+    // A store to tohost + 4 before tohost, a narrow store, and a load do not end it.
+    for r in [
+        store(TOHOST + 4, 4),
+        store(TOHOST, 2),
+        commit(5, vec![("addr", u(TOHOST)), ("paddr", u(TOHOST))]),
+        store(TOHOST + 4, 4),
+    ] {
+        assert_eq!(project(&mut p, r).unwrap().len(), 1);
+        assert!(!p.finished());
+    }
+    assert_eq!(project(&mut p, store(TOHOST, 4)).unwrap().len(), 1);
+    assert!(!p.finished());
+    assert_eq!(project(&mut p, store(TOHOST + 8, 4)).unwrap().len(), 1);
+    assert!(!p.finished());
+    // The second store of write_tohost is the last boundary; what follows is not read.
+    assert_eq!(project(&mut p, store(TOHOST + 4, 4)).unwrap().len(), 1);
+    assert!(p.finished());
+    assert_eq!(project(&mut p, trap()), Ok(Vec::new()));
+    assert_eq!(
+        project(&mut p, record("rv32.other", Vec::new())),
+        Ok(Vec::new())
+    );
+    // Under halt-trap, the same stores never end it.
+    let mut p = Rv32Projection::new(Some(TOHOST as u32));
+    assert_eq!(p.begin(&profile(HALT_TRAP)), Ok(()));
+    for r in [store(TOHOST, 4), store(TOHOST + 4, 4)] {
+        project(&mut p, r).unwrap();
+    }
+    assert!(!p.finished());
+    // A halting trap before write_tohost ends it too.
+    let mut p = Rv32Projection::new(Some(TOHOST as u32));
+    p.begin(&profile(WRITE_TOHOST)).unwrap();
+    assert_eq!(project(&mut p, trap()).unwrap().len(), 1);
+    assert!(p.finished());
 }

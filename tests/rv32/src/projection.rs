@@ -3,19 +3,26 @@
 //!
 //! `rv32.commit` is a `retire`, `rv32.exception` an `exception`, `rv32.interrupt` an
 //! `interrupt`, and the halting `rv32.trap` the final `exception`, taken to M, which is
-//! the `halt-trap` stop rule. Every other record is ignored; an `rv32.*` record out of
-//! shape, the instruction limit, or a record after the trap is an error.
+//! the `halt-trap` stop rule. Under the `write-tohost` stop rule, the stream also ends at
+//! the passing program's `write_tohost`. Every other record is ignored; an `rv32.*` record
+//! out of shape, the instruction limit, or a record after the trap is an error.
 
 use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_rv32i::cpu::{COMMIT_KIND, EXCEPTION_KIND, HALT_KIND, INTERRUPT_KIND, TRAP_KIND};
 use systemscope_verify::observation::ObservedValue;
+use systemscope_verify::profile::Support;
 use systemscope_verify::profile::{
     ComparisonProfile, FieldSpec, KindSpec, Requirement, StreamSpec,
 };
-use systemscope_verify::runtime::Projected;
+use systemscope_verify::runtime::{Projected, Projection};
 
 /// The stop rule: the CPU halts on a trap taken in M.
 pub const HALT_TRAP: &str = "halt-trap";
+
+/// The stop rule of the riscv-tests environment: the stream ends with the first word store
+/// to `tohost + 4` after a word store to `tohost`, the end of `write_tohost`, or at the
+/// halting trap if it comes first.
+pub const WRITE_TOHOST: &str = "write-tohost";
 
 /// The `retire` fields, in observation order.
 pub const RETIRE_FIELDS: [&str; 12] = [
@@ -93,25 +100,45 @@ pub fn arch_m3() -> StreamSpec {
 /// Reads `rv32.*` records into `arch` boundaries.
 #[derive(Clone, Debug, Default)]
 pub struct Rv32Projection {
+    /// The program's `tohost`, which [`WRITE_TOHOST`] needs.
+    tohost: Option<u32>,
+    /// Whether the profile stops at [`WRITE_TOHOST`].
+    at_tohost: bool,
+    /// Whether a word store to `tohost` has been seen.
+    armed: bool,
+    /// Whether `write_tohost` has ended the stream.
+    written: bool,
     halted: bool,
 }
 
 impl Rv32Projection {
-    /// Accepts profiles whose `arch` stream starts at the first boundary and that stop at
-    /// [`HALT_TRAP`].
-    pub fn begin(&mut self, profile: &ComparisonProfile) -> Result<(), String> {
-        if profile.stop_rule != HALT_TRAP {
-            return Err(format!("stop rule {}", profile.stop_rule));
+    /// A projection of a program whose `tohost` symbol, if any, is `tohost`.
+    pub fn new(tohost: Option<u32>) -> Rv32Projection {
+        Rv32Projection {
+            tohost,
+            ..Rv32Projection::default()
         }
+    }
+
+    /// Accepts profiles whose `arch` stream starts at the first boundary and that stop at
+    /// [`HALT_TRAP`], or at [`WRITE_TOHOST`] for a program with a `tohost`.
+    pub fn begin(&mut self, profile: &ComparisonProfile) -> Result<(), String> {
+        self.at_tohost = match profile.stop_rule.as_str() {
+            HALT_TRAP => false,
+            WRITE_TOHOST if self.tohost.is_some() => true,
+            WRITE_TOHOST => return Err("write-tohost without a tohost".to_owned()),
+            rule => return Err(format!("stop rule {rule}")),
+        };
         match profile.streams().find(|s| s.stream == "arch") {
             Some(s) if !s.window.is_empty() => Err(format!("window {}", s.window)),
             _ => Ok(()),
         }
     }
 
-    /// Whether the halting trap has been seen.
+    /// Whether the halting trap, or under [`WRITE_TOHOST`] the end of `write_tohost`, has
+    /// been seen.
     pub fn finished(&self) -> bool {
-        self.halted
+        self.halted || self.written
     }
 
     /// Projects one record; records of other components pass through untouched.
@@ -120,7 +147,7 @@ impl Rv32Projection {
         record: &TraceRecord,
         out: &mut Vec<Projected>,
     ) -> Result<(), String> {
-        if !record.kind.starts_with("rv32.") {
+        if !record.kind.starts_with("rv32.") || self.written {
             return Ok(());
         }
         let at = |why: &str| format!("{}: {why}", record.kind);
@@ -170,6 +197,17 @@ impl Rv32Projection {
                     (Some(_), Some(_)) => "store",
                     (None, Some(_)) => return Err(at("a width without an address")),
                 };
+                if let (true, Some(tohost), Some(Value::U64(4))) =
+                    (self.at_tohost, self.tohost, get("width"))
+                {
+                    match u64_of("addr")? {
+                        a if a == u64::from(tohost) => self.armed = true,
+                        a if self.armed && a == u64::from(tohost.wrapping_add(4)) => {
+                            self.written = true;
+                        }
+                        _ => {}
+                    }
+                }
                 // A CSR instruction whose write is suppressed names its CSR only; only a
                 // stored value is an architectural write.
                 let (csr, csr_value) = match get("csr_value") {
@@ -236,5 +274,27 @@ impl Rv32Projection {
             fields: fields.into_iter().map(|(n, v)| (n.to_owned(), v)).collect(),
         });
         Ok(())
+    }
+}
+
+/// The `arch` stream of an `rv32.*` runtime alone, such as the runner's platform.
+impl Projection for Rv32Projection {
+    fn support(&self) -> Support {
+        let mut s = Support::default();
+        s.streams.insert("arch".to_owned());
+        s.fields.extend(support());
+        s
+    }
+
+    fn begin(&mut self, profile: &ComparisonProfile) -> Result<(), String> {
+        Rv32Projection::begin(self, profile)
+    }
+
+    fn project(&mut self, record: &TraceRecord, out: &mut Vec<Projected>) -> Result<(), String> {
+        Rv32Projection::project(self, record, out)
+    }
+
+    fn finished(&self) -> bool {
+        Rv32Projection::finished(self)
     }
 }
