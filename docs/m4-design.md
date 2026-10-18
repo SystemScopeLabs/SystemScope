@@ -1130,14 +1130,14 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 and M4.1 are complete. M4.2 is next. M4 as a whole is in progress.
+**Status:** M4.0, M4.1, and M4.2 are complete. M4.3 is next. M4 as a whole is in progress.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
 | **M4.0** | complete | Design freeze: terminology, comparison model, comparison case and profiles (primary streams, stop rules), capability model, observation fields and ObservedValue canonical encoding v1, artifact logical contents and the directory bundle, evidence policy, corpus location, controlled divergences and mutation classes, acceptance workload and exit criteria | docs |
 | **M4.1** | complete | Observation and comparison core: `systemscope-verify` crate, observations, canonical encoding, prefix digest, comparator, SystemScope runtime adapter and `rv32.*` projection; controlled divergences on the same backend (state patch), naive oracle | code, tests |
-| **M4.2** | next | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
-| **M4.3** | planned | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
+| **M4.2** | complete | Divergence locator: lockstep scan, stream compare, checkpoint index and search, window scan; equals the naive oracle for every injection; capability-driven choice | code, tests |
+| **M4.3** | next | Structured state and trace diff: `StateView` source, m3 decoder source, derived fields; canonical and normalized trace windows; deterministic reports; relevant-predecessor slice for the recorded links | code, tests |
 | **M4.4** | planned | Reproducer bundle: format, write, validate, replay; corruption tests; cross-OS byte equality in CI | code, CI |
 | **M4.5** | planned | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
 | **M4.6** | planned | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
@@ -1253,3 +1253,30 @@ Where the state patcher lives, which §25.1 left open: the SystemScope runtime a
 The §28.1 per-kind counts are reproduced exactly: 2,176 `retire` and 24 `exception`, the 23 delegated exceptions and the halting trap.
 
 **Engine mutants.** cargo-mutants on `systemscope-verify` at the M4.1 commit generates 113 mutants: 92 caught, 20 unviable, 1 timeout, and none missed. The timeout replaces `Session::advance` with `Ok(())`, so the side never advances and never reaches the stop rule; the hang is the detection. The eight M4.1 mutation classes of §25.2 each have a named test in `verification/tests/compare.rs` and `verification/tests/runtime.rs`.
+
+### 30.2 M4.2
+
+M4.2 implemented the locator (`verification/src/locate.rs`), the checkpoint (`verification/src/checkpoint.rs`), and checkpoints in the SystemScope runtime adapter, and revised the design in these places. Each is a correction or a detail the frozen text left open, not a new decision.
+
+| Section | Revision | Why |
+|---|---|---|
+| §20 | When a side fails, each failed side's primary stream is cut where it failed, and the primary streams are compared up to the shortest cut. A side that reached the stop rule is complete, so it still ends its stream, as an `Ended` divergence. Without a divergence, the result is the failure of the side cut first, the expected side at a tie | M4.1's rule compared up to the failure of either side, so a complete side that ended before the other's failure hid a real divergence. Cutting by length makes the naive result the one a lockstep scan reaches, which stops at the first ordinal either side cannot give |
+| §20 | Auxiliary streams of a cut comparison are compared over what both sides emitted, with no length divergence (`compare_cut`) | a scan stops at the primary divergence, so the auxiliary streams are cut at an arbitrary point. They stay evidence only (§11.3) |
+| §6.6, state patch | A patch is applied when the side has dispatched `event_index` events, before it emits any later boundary; a checkpoint at or after `event_index` already holds it, and a side restored from an earlier checkpoint applies it again when it gets there | the patch is part of the input variant, so a checkpoint of the patched side must be a checkpoint of that execution |
+| §7 | `Backend` adds `emitted(stream)`, the observations already emitted and not yet taken, without advancing | after the primary divergence, a scan takes the auxiliary observations the same events emitted, never stepping further than the primary stream needs |
+| §11.3, Projection | A runtime projection holds no state across records except whether the stop rule holds | a restored side rebuilds its projection, so any other state would make a resumed stream differ from the uninterrupted one |
+| §12.3, step 2 | Each side is restored at its latest checkpoint covering at most `d − w` primary boundaries, where `w` is the report window, and replayed to `d + w`. Every replayed prefix digest up to `d` is checked against the side's index, and a mismatch is `BoundaryDesync` | the window then comes from the replay, identical to the lockstep window, and the check makes the replay confirm the digests the search relied on |
+| §12.3 | When the prefix digests agree up to the shortest cut and the cut streams have the same length, there is no known divergence: a failed side's failure is the result, as in §20, and otherwise search delegates to a lockstep scan from the initial states, labeled as search | `Agree(end) = false` is an input of the frozen algorithm; an agreement still has to compare the auxiliary streams and confirm the stop rule |
+| §12.3 | Search reports no auxiliary results and no failures after the divergence | it never replays the auxiliary streams to the divergence. The primary result and the window are identical across strategies |
+| §12.3 | An observation the plan refuses, incomparable or breaking the projection contract, is recorded in the index with its ordinal. It is the result when it comes before the divergence, as in a lockstep scan | the digest of a refused observation would otherwise make it look like an ordinary agreement or divergence |
+| §12.3, density | `record_index` takes a checkpoint every `every` primary boundaries, and leaves out one the side cannot take, such as after the stop rule | density never changes the result, so a missing checkpoint only costs replay time |
+
+Every strategy, and search at checkpoint densities 0 to 4, gives the naive comparison's primary result and the same window on random scripted executions, including divergences that reconverge, streams of different lengths, failures of either side, and incomparable observations (`verification/tests/locate_props.rs`). On `m3-reference`, the agreement and SP-1 to SP-3 give the M4.1 ordinals under lockstep, stream compare with either side recorded, and search with no checkpoints, one per 10,000 events (133 primary boundaries), and one per 997 boundaries. An m3 checkpoint is about 150 KB, and the index at one per 10,000 events about 2.4 MB. Under lockstep, SP-3 is a clean `Diverged`: the scan stops at the divergence, long before the actual side's budget runs out.
+
+Deferred: the `StateDigest` accelerator and the first state divergence (§12.4) to M4.3, persisted indexes and checkpoints to M4.4, parallel per-checkpoint evaluation, and the Spike adapter to M4.6.
+
+**Engine mutants.** cargo-mutants on `systemscope-verify` before the last test commit generates 277 mutants: 207 caught, 50 unviable, 8 timeouts, and 12 missed. The timeouts are hangs, which are the detection: six arithmetic mutants of the bisection in `last_agreeing`, `Session::advance` replaced with `Ok(())`, and the runtime adapter's `next` replaced with `Ok(None)`. Of the 12 missed, ten are now caught: a large-snapshot round trip and a forged mark count that would otherwise be read as out of order (`Checkpoint::decode`); a backend whose `emitted` reports nothing, so that an agreement must drain the auxiliary streams to the stop rule; a side without `Snapshot` indexed with a density; an empty index; and replays that end or fail before what their index recorded. One more, the choice between two refusals before the divergence, was removed with the code: the sides agree before the divergence, so both refuse at the same ordinal, and search now takes the expected side's. A rerun on the affected functions generates 61 mutants: 56 caught, 3 unviable, and 2 missed, both equivalent:
+
+- `record_index`, `every > 0` to `every >= 0`: with `every` 0, `count.is_multiple_of(0)` holds only at count 0, and a checkpoint is considered only after the first boundary, so no checkpoint is taken either way.
+- The runtime adapter's `restore`, `p.event_index > c.event_index` to `>=`: a patch is applied only when a step brings the event count to its event index, and a side restored at that index has already passed it, so the pending flag is never read.
+
