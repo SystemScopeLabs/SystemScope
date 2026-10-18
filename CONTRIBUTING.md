@@ -45,6 +45,19 @@ M0_SEED=0x1234 cargo nextest run -p systemscope-acceptance --run-ignored only
 - `cargo xtask m3-golden every-event` restores every one of the reference scenario's checkpoints, from the initial state to the final one, into a fresh platform and runs it to the end (`docs/m3-design.md` §9.2). A release build is much faster. `every-event shard <i> <n>` runs one of `n` shards of about equal cost, and CI runs eight.
 - **Do not run `m2-golden bless` or `m3-golden bless` to make a failing test pass**, and never re-bless the M0, M1, or M2 golden files for an M3 change: they must stay byte-identical to their releases. CI never blesses.
 
+## M4 Expected Streams and Regression Corpus
+
+`tests/verification/expected/m3-reference/` holds every stream of the unmodified `m3-reference` run (`arch.obs`, `effect.obs`, `os.obs`), the expected side of the source-mutant cases (`docs/m4-design.md` §25.2). `cargo xtask m4-expected verify` and the `m4_expected` tests require this build to reproduce them byte for byte. The rules of the golden files apply: `cargo xtask m4-expected bless` only for an intended change to `m3-reference`'s observations, committed on its own.
+
+`tests/verification/corpus/` is the regression corpus (`docs/m4-design.md` §18): one canonical directory bundle per entry, each `Diverged` or `Agree`. `cargo xtask corpus replay` and the `m4_corpus` tests replay every entry, and the recomputed `result.bin` must equal the committed one byte for byte. No tool writes into the corpus. To promote a reproducer:
+
+1. Write it into a scratch directory, for example with `cargo xtask m4-repro emit target/m4-repro`.
+2. Understand the divergence, and decide that it is intended as a regression case.
+3. Run `cargo xtask corpus check <dir>`, which validates and replays it and refuses any other outcome or a profile the corpus cannot replay.
+4. Copy the directory to `tests/verification/corpus/<name>/` unchanged, add `<name>` to the `m4_corpus` test, and commit it in a normal PR, saying in the body what the entry asserts.
+
+Never edit an entry by hand. When an intended change alters an entry's result, regenerate it, re-review it, and commit it on its own.
+
 ## rv32 Fixtures
 
 `tests/rv32/fixtures/` holds the 40 `rv32ui` ELFs built from the pinned `riscv-tests`, and `manifest.json`, which records their hashes and the pins (`docs/m1-design.md` §10.2, §10.6). Tests and CI only read them, so Linux and Windows run the same bytes.

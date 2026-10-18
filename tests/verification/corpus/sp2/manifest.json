@@ -1,0 +1,59 @@
+{
+  "format": "systemscope-reproducer",
+  "version": 1,
+  "scenario": {
+    "platform": "m3-reference",
+    "topology_hash": "24cc6e62454e6fb40ba6e4d9873352d2925f01ed1edf1cc665db70fbdb431f02",
+    "cpu_profile": "M3",
+    "program_blake3": "dfc505ed8cfe426b808db9144da28e603efec4030f2c22343b0567067d2f07d7",
+    "locator": "disk.img",
+    "seed": 0
+  },
+  "profile": {
+    "name": "m3-reference",
+    "version": 1,
+    "identity": "f1ac37099ae90c62e49d222b228fd75d539b7d70c98772b07c1a4b0471ad7eef",
+    "primary": "arch",
+    "auxiliary": ["effect", "os"],
+    "stop_rule": "halt-trap",
+    "report_window": 3
+  },
+  "sides": [
+    {
+      "role": "expected",
+      "backend": {
+        "name": "systemscope",
+        "version": "0.0.0",
+        "build": "m3-reference"
+      },
+      "capabilities": ["arch_stream", "effect_stream", "os_stream", "step_boundary", "deterministic_replay", "snapshot", "restore", "state"],
+      "input": "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
+      "replay_config": {"budget": 1000000},
+      "origin": "initial"
+    },
+    {
+      "role": "actual",
+      "backend": {
+        "name": "systemscope",
+        "version": "0.0.0",
+        "build": "m3-reference"
+      },
+      "capabilities": ["arch_stream", "effect_stream", "os_stream", "step_boundary", "deterministic_replay", "snapshot", "restore", "state"],
+      "input": "0abd7283975748e6ea0903b0a022279733a8f2b3a3bc030c3b5c31b5e54195a3",
+      "replay_config": {"budget": 1000000},
+      "origin": "initial"
+    }
+  ],
+  "outcome": "diverged",
+  "primary_divergence": {
+    "stream": "arch",
+    "ordinal": 65,
+    "kind": "fields"
+  },
+  "entries": [
+    {"path": "actual.obs", "blake3": "baa87b40feb8791ebab65757a9bbbcab52424f048080ddbae1b3d2c932e62edc"},
+    {"path": "actual/input.bin", "blake3": "0abd7283975748e6ea0903b0a022279733a8f2b3a3bc030c3b5c31b5e54195a3"},
+    {"path": "expected.obs", "blake3": "d2121afe918ae24a0ca73edc3dfc3d65a5c1611c0cd9d5be146b907f7a482835"},
+    {"path": "result.bin", "blake3": "93c659a58a5b56d07cadc612dcc4bea7a7856547c6ba300a8489c47e2df003ad"}
+  ]
+}

@@ -237,7 +237,7 @@ pub fn emit(fixture: &Fixture, dir: &Path) -> Result<(), String> {
 }
 
 /// Replays `b` here.
-fn replayed(fixture: &Fixture, b: &Bundle) -> Result<(), String> {
+pub fn replayed(fixture: &Fixture, b: &Bundle) -> Result<(), String> {
     let plan = the_plan(fixture)?;
     let scenario = verify::scenario(fixture);
     let make = || verify::backend(fixture);

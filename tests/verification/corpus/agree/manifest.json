@@ -1,0 +1,52 @@
+{
+  "format": "systemscope-reproducer",
+  "version": 1,
+  "scenario": {
+    "platform": "m3-reference",
+    "topology_hash": "24cc6e62454e6fb40ba6e4d9873352d2925f01ed1edf1cc665db70fbdb431f02",
+    "cpu_profile": "M3",
+    "program_blake3": "dfc505ed8cfe426b808db9144da28e603efec4030f2c22343b0567067d2f07d7",
+    "locator": "disk.img",
+    "seed": 0
+  },
+  "profile": {
+    "name": "m3-reference",
+    "version": 1,
+    "identity": "f1ac37099ae90c62e49d222b228fd75d539b7d70c98772b07c1a4b0471ad7eef",
+    "primary": "arch",
+    "auxiliary": ["effect", "os"],
+    "stop_rule": "halt-trap",
+    "report_window": 3
+  },
+  "sides": [
+    {
+      "role": "expected",
+      "backend": {
+        "name": "systemscope",
+        "version": "0.0.0",
+        "build": "m3-reference"
+      },
+      "capabilities": ["arch_stream", "effect_stream", "os_stream", "step_boundary", "deterministic_replay", "snapshot", "restore", "state"],
+      "input": "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
+      "replay_config": {"budget": 1000000},
+      "origin": "initial"
+    },
+    {
+      "role": "actual",
+      "backend": {
+        "name": "systemscope",
+        "version": "0.0.0",
+        "build": "m3-reference"
+      },
+      "capabilities": ["arch_stream", "effect_stream", "os_stream", "step_boundary", "deterministic_replay", "snapshot", "restore", "state"],
+      "input": "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213",
+      "replay_config": {"budget": 1000000},
+      "origin": "initial"
+    }
+  ],
+  "outcome": "agree",
+  "primary_divergence": null,
+  "entries": [
+    {"path": "result.bin", "blake3": "101ae401c8fd8305263b0aeee59a9c081287b3e15971ce6cb6e476351c85a370"}
+  ]
+}

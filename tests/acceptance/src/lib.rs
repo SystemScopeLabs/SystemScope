@@ -16,6 +16,7 @@
 //! doctored inputs and prove that it notices them.
 
 pub mod checkpoint;
+pub mod corpus;
 pub mod digests;
 pub mod golden;
 pub mod layout;

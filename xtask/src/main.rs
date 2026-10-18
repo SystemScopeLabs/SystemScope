@@ -50,6 +50,10 @@
 //!   prints the output and the metrics.
 //! - `m3-reference verify`: `rv32-fixtures verify` for the M3 fixtures, then `run`, then
 //!   a second run of each disk, whose digests must equal the first's.
+//! - `corpus replay`: replays every entry of the regression corpus
+//!   `tests/verification/corpus` (`docs/m4-design.md` §18) byte for byte.
+//! - `corpus check <dir>`: whether the bundle in `<dir>` can be a corpus entry. It never
+//!   writes into the corpus: promotion is a reviewed commit.
 //! - `m4-expected bless`: records every stream of the unmodified `m3-reference` into
 //!   `tests/verification/expected/m3-reference` (`docs/m4-design.md` §25.2), the expected
 //!   side of the source-mutant cases, then verifies.
@@ -102,6 +106,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+use systemscope_acceptance::corpus;
 use systemscope_acceptance::golden::{GOLDEN_PATH, Golden, MID_SNAPSHOT_PATH, describe_changes};
 use systemscope_acceptance::m1::golden as m1;
 use systemscope_acceptance::m2::golden as m2;
@@ -133,6 +138,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m3-golden bless | verify | emit <dir> | check <dir> \
                      | every-event [<from> <to> | shard <i> <n>]\n       \
                      cargo xtask m3-reference manifest | run | verify\n       \
+                     cargo xtask corpus replay | check <dir>\n       \
                      cargo xtask m4-expected bless | verify\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
@@ -191,6 +197,8 @@ fn main() -> ExitCode {
         ["m3-reference", "manifest"] => m3_manifest(),
         ["m3-reference", "run"] => m3_run(),
         ["m3-reference", "verify"] => m3_verify(),
+        ["corpus", "replay"] => corpus_replay(),
+        ["corpus", "check", dir] => corpus_check(Path::new(dir)),
         ["m4-expected", "bless"] => m4_expected_bless(),
         ["m4-expected", "verify"] => m4_expected_verify(),
         ["m4-repro", "emit", dir] => m4_emit(Path::new(dir)),
@@ -631,6 +639,39 @@ fn m3_check(dir: &Path) -> ExitCode {
 
 fn m4_fixture() -> Result<M3Fixture, Vec<String>> {
     M3Fixture::read(&root(), Scenario::Reference).map_err(|e| vec![e])
+}
+
+fn corpus_replay() -> ExitCode {
+    match m4_fixture().and_then(|f| corpus::replay(&f, &root())) {
+        Ok(entries) => {
+            for (name, outcome) in &entries {
+                println!("{name}: {outcome:?}");
+            }
+            report(
+                Ok(()),
+                &format!(
+                    "{} corpus entries in {} replay byte for byte",
+                    entries.len(),
+                    corpus::DIR
+                ),
+            )
+        }
+        Err(errors) => report(Err(errors), ""),
+    }
+}
+
+fn corpus_check(dir: &Path) -> ExitCode {
+    let result = m4_fixture().and_then(|f| corpus::check_dir(&f, dir).map_err(|e| vec![e]));
+    match result {
+        Ok(outcome) => report(
+            Ok(()),
+            &format!(
+                "{} can be a corpus entry ({outcome:?}); promote it by a reviewed commit",
+                dir.display()
+            ),
+        ),
+        Err(errors) => report(Err(errors), ""),
+    }
 }
 
 fn m4_expected_bless() -> ExitCode {
