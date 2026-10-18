@@ -1,0 +1,3 @@
+# Source mutants that m3-reference cannot observe (docs/m4-design.md §25.2): blocks of
+# comment lines giving the reason, followed by the mutants' names exactly as cargo-mutants
+# prints them. cargo xtask m4-mutants summarize requires each to be missed.

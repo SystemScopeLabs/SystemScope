@@ -8,13 +8,24 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use systemscope_verify::backend::{Backend, Side, run};
+use systemscope_verify::backend::{self, Backend, Side, run};
 use systemscope_verify::case::{BackendId, InputVariant};
+use systemscope_verify::compare::{Divergence, StreamResult, Verdict};
+use systemscope_verify::error::EngineError;
+use systemscope_verify::locate::locate;
 use systemscope_verify::observation::Observation;
 use systemscope_verify::profile::{Plan, plan};
 use systemscope_verify::recorded::{RecordedBackend, stream_bytes, stream_from_bytes};
 
 use super::{Fixture, verify};
+
+/// How [`judge`] starts a detected mutant's message. `cargo xtask m4-mutants summarize`
+/// reads it, and what follows it, from cargo-mutants' logs.
+pub const DETECTED: &str = "M4 source mutant detected:";
+
+/// How [`judge`] starts a message that the locator and the naive oracle disagree: an
+/// engine bug, never a detection.
+pub const ORACLE_MISMATCH: &str = "M4 oracle mismatch:";
 
 /// Where the expected streams are committed.
 pub const DIR: &str = "tests/verification/expected/m3-reference";
@@ -102,4 +113,92 @@ pub fn backend(fixture: &Fixture, root: &Path) -> Result<RecordedBackend, String
         &plan.profile,
         streams,
     ))
+}
+
+/// An unmodified side of an `m3-reference` case.
+fn side(backend: &mut dyn Backend) -> Side<'_> {
+    Side {
+        backend,
+        input: InputVariant::None,
+        config: verify::config(),
+    }
+}
+
+/// The source-mutant case (§25.2): this build's `m3-reference` as the actual side against
+/// the committed streams. `Ok` when every stream agrees. Otherwise the message starts with
+/// [`DETECTED`] and names the detection: `Diverged` at the first divergence, which the
+/// naive oracle must find too, `AuxiliaryDivergence`, or `BackendFailed`. A locator that
+/// disagrees with the naive oracle is [`ORACLE_MISMATCH`].
+pub fn judge(fixture: &Fixture, root: &Path) -> Result<(), String> {
+    let plan = the_plan(fixture)?;
+    let scenario = verify::scenario(fixture);
+    let mut recorded = backend(fixture, root)?;
+    let mut live = verify::backend(fixture);
+    let located = locate(&plan, &scenario, side(&mut recorded), side(&mut live), None);
+    let mut recorded = backend(fixture, root)?;
+    let mut live = verify::backend(fixture);
+    let naive = backend::verify(
+        &plan.profile,
+        &scenario,
+        side(&mut recorded),
+        side(&mut live),
+    );
+    let primary = |v: &Result<Verdict, EngineError>| match v {
+        Ok(Verdict::Compared(c)) => Some(c.primary.clone()),
+        _ => None,
+    };
+    let c = match located {
+        Ok(l) => match l.verdict {
+            Verdict::Compared(c) => c,
+            Verdict::Incomparable(why) => return Err(format!("incomparable: {why:?}")),
+        },
+        Err(EngineError::BackendFailed(why)) => {
+            return match naive {
+                Err(EngineError::BackendFailed(_)) => {
+                    Err(format!("{DETECTED} BackendFailed: {why}"))
+                }
+                other => Err(format!(
+                    "{ORACLE_MISMATCH} the locator's side failed ({why}), the naive oracle \
+                     gives {other:?}"
+                )),
+            };
+        }
+        Err(e) => return Err(format!("engine error: {e}")),
+    };
+    match &c.primary {
+        StreamResult::Diverged {
+            ordinal,
+            divergence,
+            ..
+        } => {
+            if primary(&naive).as_ref() != Some(&c.primary) {
+                return Err(format!(
+                    "{ORACLE_MISMATCH} the locator finds {:?}, the naive oracle {naive:?}",
+                    c.primary
+                ));
+            }
+            let what = match divergence {
+                Divergence::Fields { kind, fields } => {
+                    let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                    format!("{kind} {}", names.join(","))
+                }
+                Divergence::Kind { expected, actual } => format!("kind {expected}/{actual}"),
+                Divergence::Ended { .. } => "ended".to_owned(),
+            };
+            Err(format!("{DETECTED} Diverged at arch[{ordinal}], {what}"))
+        }
+        StreamResult::Agree { .. } => {
+            if let Some((_, e)) = c.failures.first() {
+                return Err(format!("{DETECTED} BackendFailed: {e}"));
+            }
+            match c.auxiliary.iter().find(|a| !a.agrees()) {
+                Some(StreamResult::Diverged {
+                    stream, ordinal, ..
+                }) => Err(format!(
+                    "{DETECTED} AuxiliaryDivergence in {stream}[{ordinal}]"
+                )),
+                _ => Ok(()),
+            }
+        }
+    }
 }

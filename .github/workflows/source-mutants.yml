@@ -1,0 +1,111 @@
+name: Source mutants
+# docs/m4-design.md §25.2: every frozen source-mutation target, each generated mutant run
+# by cargo-mutants against the source-mutant case (m3-reference against its committed
+# expected streams). On demand, and on pull requests that change a target, the case, or
+# the equivalent-mutant list. The summary fails unless every mutant is detected or listed
+# as equivalent, and the locator equals the naive oracle for each.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - components/rv32i/src/execute.rs
+      - components/rv32i/src/memory.rs
+      - components/rv32i/src/cpu.rs
+      - components/rv32i/src/privilege.rs
+      - components/rv32i/src/sv32.rs
+      - components/os/src/procop.rs
+      - components/os/src/process.rs
+      - tests/acceptance/src/m3/expected.rs
+      - tests/acceptance/src/m3/mutants.rs
+      - tests/verification/**
+      - .github/workflows/source-mutants.yml
+permissions:
+  contents: read
+concurrency:
+  group: source-mutants-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  mutants:
+    name: Source mutants (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [alu, control, memory, commit, exception, sret, sv32, syscall, schedule]
+    defaults:
+      run:
+        working-directory: systemscope
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: systemscope }
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+          save-if: ${{ strategy.job-index == 0 }}
+      - uses: taiki-e/install-action@v2
+        with: { tool: "cargo-mutants,cargo-nextest" }
+      # The unmutated build must reproduce the expected streams the mutants are judged
+      # against.
+      - name: Expected streams
+        run: cargo xtask m4-expected verify
+      - name: Run cargo-mutants on ${{ matrix.target }}
+        run: cargo xtask m4-mutants run ${{ matrix.target }} target/m4-mutants
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: source-mutants-${{ matrix.target }}
+          path: systemscope/target/m4-mutants
+          if-no-files-found: ignore
+
+  summary:
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: systemscope
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: systemscope }
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+          save-if: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: source-mutants-*
+          path: systemscope/target/m4-mutants
+          merge-multiple: true
+      - name: Summarize
+        run: |
+          set -o pipefail
+          status=0
+          cargo xtask m4-mutants summarize target/m4-mutants | tee summary.md || status=$?
+          {
+            echo "## Source mutants at ${GITHUB_SHA:0:7}"
+            echo
+            cat summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Every target must have run.
+          if grep -q ": not run$" summary.md; then
+            echo "::error::a source-mutant target did not run"
+            status=1
+          fi
+          exit "$status"

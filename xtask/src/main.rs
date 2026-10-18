@@ -54,6 +54,12 @@
 //!   `tests/verification/corpus` (`docs/m4-design.md` §18) byte for byte.
 //! - `corpus check <dir>`: whether the bundle in `<dir>` can be a corpus entry. It never
 //!   writes into the corpus: promotion is a reviewed commit.
+//! - `m4-mutants run <target> <out>`: the source mutants of one §25.2 target
+//!   (`docs/m4-design.md`), each run by cargo-mutants against the source-mutant case,
+//!   into `<out>/<target>`. The `source-mutants` workflow runs every target.
+//! - `m4-mutants summarize <out>`: the counts and every mutant's fate; fails unless every
+//!   mutant is detected or listed in `tests/verification/equivalent-mutants.txt`, and the
+//!   locator equals the naive oracle for each.
 //! - `m4-expected bless`: records every stream of the unmodified `m3-reference` into
 //!   `tests/verification/expected/m3-reference` (`docs/m4-design.md` §25.2), the expected
 //!   side of the source-mutant cases, then verifies.
@@ -112,7 +118,7 @@ use systemscope_acceptance::m1::golden as m1;
 use systemscope_acceptance::m2::golden as m2;
 use systemscope_acceptance::m3::golden as m3g;
 use systemscope_acceptance::m3::{
-    Fixture as M3Fixture, checkpoint as m3c, expected as m4x, repro as m4r,
+    Fixture as M3Fixture, checkpoint as m3c, expected as m4x, mutants as m4m, repro as m4r,
 };
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
@@ -139,6 +145,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      | every-event [<from> <to> | shard <i> <n>]\n       \
                      cargo xtask m3-reference manifest | run | verify\n       \
                      cargo xtask corpus replay | check <dir>\n       \
+                     cargo xtask m4-mutants run <target> <out> | summarize <out>\n       \
                      cargo xtask m4-expected bless | verify\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
@@ -199,6 +206,8 @@ fn main() -> ExitCode {
         ["m3-reference", "verify"] => m3_verify(),
         ["corpus", "replay"] => corpus_replay(),
         ["corpus", "check", dir] => corpus_check(Path::new(dir)),
+        ["m4-mutants", "run", target, out] => m4_mutants_run(target, out),
+        ["m4-mutants", "summarize", dir] => m4_mutants_summarize(Path::new(dir)),
         ["m4-expected", "bless"] => m4_expected_bless(),
         ["m4-expected", "verify"] => m4_expected_verify(),
         ["m4-repro", "emit", dir] => m4_emit(Path::new(dir)),
@@ -672,6 +681,90 @@ fn corpus_check(dir: &Path) -> ExitCode {
         ),
         Err(errors) => report(Err(errors), ""),
     }
+}
+
+fn m4_mutants_run(name: &str, out: &str) -> ExitCode {
+    let Some(target) = m4m::target(name) else {
+        let names: Vec<&str> = m4m::TARGETS.iter().map(|t| t.name).collect();
+        eprintln!(
+            "no source-mutant target {name}: one of {}",
+            names.join(", ")
+        );
+        return ExitCode::FAILURE;
+    };
+    // The baseline cargo-mutants skips: the case agrees on the unmutated tree.
+    let baseline = Command::new("cargo")
+        .args(["nextest", "run", "-p", "systemscope-acceptance"])
+        .args(m4m::TEST)
+        .current_dir(root())
+        .status();
+    if !baseline.is_ok_and(|s| s.success()) {
+        eprintln!("the source-mutant case fails on the unmutated tree");
+        return ExitCode::FAILURE;
+    }
+    let out = format!("{out}/{}", target.name);
+    let _ = fs::remove_dir_all(root().join(&out));
+    match Command::new("cargo")
+        .args(target.args(&out))
+        .current_dir(root())
+        .status()
+    {
+        // 0: all caught; 2: missed; 3: timeouts. The summary judges them.
+        Ok(s) if matches!(s.code(), Some(0 | 2 | 3)) => {
+            println!("{}: cargo-mutants exited {s}; summarize {out}", target.name);
+            ExitCode::SUCCESS
+        }
+        Ok(s) => {
+            eprintln!("{}: cargo-mutants failed: {s}", target.name);
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("cannot run cargo-mutants: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn m4_mutants_summarize(dir: &Path) -> ExitCode {
+    let root = root();
+    let equivalents = fs::read_to_string(root.join(m4m::EQUIVALENTS))
+        .map_err(|e| format!("{}: {e}", m4m::EQUIVALENTS))
+        .and_then(|t| m4m::parse_equivalents(&t));
+    let equivalents = match equivalents {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut runs = Vec::new();
+    for t in &m4m::TARGETS {
+        let out = dir.join(t.name);
+        if !out.join("mutants.out").exists() {
+            println!("{}: not run", t.name);
+            continue;
+        }
+        match m4m::read_outcomes(&out) {
+            Ok(m) => runs.push((t, m)),
+            Err(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    if runs.is_empty() {
+        eprintln!("no source-mutant run in {}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    println!("{}", m4m::render(&runs));
+    report(
+        match m4m::violations(&runs, &equivalents) {
+            v if v.is_empty() => Ok(()),
+            v => Err(v),
+        },
+        "every source mutant is detected or listed as equivalent, and the locator equals \
+         the naive oracle",
+    )
 }
 
 fn m4_expected_bless() -> ExitCode {
