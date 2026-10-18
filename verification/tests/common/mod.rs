@@ -6,6 +6,7 @@
 use systemscope_contracts::component::{Component, Delivered, InitContext, PortSpec, SimContext};
 use systemscope_contracts::error::SimError;
 use systemscope_contracts::event::{Phase, ScheduleWhen};
+use systemscope_contracts::observe::StateView;
 use systemscope_contracts::snapshot::{RestoreError, SnapshotReader, SnapshotWriter};
 use systemscope_contracts::time::{Duration, SimulationClock};
 use systemscope_contracts::trace::{TraceRecord, Value};
@@ -66,6 +67,14 @@ impl Component for Counter {
     }
     fn snapshot_schema_version(&self) -> u32 {
         1
+    }
+    fn inspect(&self) -> StateView {
+        StateView {
+            fields: vec![
+                ("n", Value::U64(self.n)),
+                ("halts", Value::Bool(self.halts)),
+            ],
+        }
     }
     fn snapshot(&self, w: &mut SnapshotWriter) {
         w.u64(MARK);

@@ -15,6 +15,7 @@ use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::{Observation, ObservedValue, PrefixDigest};
 use systemscope_verify::profile::{Role, plan};
 use systemscope_verify::runtime::RuntimeBackend;
+use systemscope_verify::state::{Source, StateField};
 
 fn failure(b: &mut RuntimeBackend, input: InputVariant, budget: u64) -> EngineError {
     let plan = plan(&profile(), &b.support(), &b.support()).unwrap();
@@ -245,6 +246,7 @@ fn the_adapter_declares_what_its_projection_reports() {
         Capability::DeterministicReplay,
         Capability::Snapshot,
         Capability::Restore,
+        Capability::State,
     ] {
         assert!(caps.contains(&c), "{c:?}");
     }
@@ -442,4 +444,50 @@ fn emitted_takes_queued_observations_without_advancing() {
     assert_eq!(b.emitted("arch").unwrap(), Vec::new());
     assert_eq!(b.next("arch").unwrap().unwrap().ordinal, 4);
     assert!(matches!(b.emitted("os"), Err(EngineError::Internal(_))));
+}
+
+fn counter_state(n: u64) -> Vec<StateField> {
+    let field = |field: &str, value| StateField {
+        component: "counter".to_owned(),
+        field: field.to_owned(),
+        value,
+        source: Source::Inspect,
+    };
+    vec![field("n", Value::U64(n)), field("halts", Value::Bool(true))]
+}
+
+#[test]
+fn the_state_is_read_at_the_current_boundary_without_advancing() {
+    let mut b = backend();
+    assert_eq!(
+        b.state(),
+        Err(EngineError::Internal("state before start".to_owned()))
+    );
+    let input = patch_n(4, 4, 5);
+    let whole = rest(&mut started(&input));
+    let mut b = started(&input);
+    assert_eq!(b.state(), Ok(counter_state(0)));
+    // After the fourth retirement the patch has taken the counter to 5.
+    let mut arch = Vec::new();
+    for n in [1, 2, 3, 5, 6] {
+        arch.push(b.next("arch").unwrap().unwrap());
+        let digest = b.runtime().unwrap().state_digest().unwrap();
+        let execution = b.runtime().unwrap().execution_digest();
+        assert_eq!(b.state(), Ok(counter_state(n)), "{n}");
+        assert_eq!(b.state(), Ok(counter_state(n)), "{n}");
+        assert_eq!(b.runtime().unwrap().state_digest().unwrap(), digest);
+        assert_eq!(b.runtime().unwrap().execution_digest(), execution);
+    }
+    // Reading changed nothing: the streams go on as if it never happened.
+    let [rest_arch, effect] = rest(&mut b);
+    arch.extend(rest_arch);
+    assert_eq!([arch, effect], whole);
+    assert_eq!(b.state(), Ok(counter_state(LIMIT)));
+    // A restored side reads its restored state.
+    let mut b = started(&input);
+    b.next("arch").unwrap().unwrap();
+    let c = b.checkpoint().unwrap();
+    let mut r = started(&input);
+    r.restore(&c).unwrap();
+    assert_eq!(r.state(), Ok(counter_state(1)));
 }

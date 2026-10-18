@@ -93,7 +93,7 @@ impl Observation {
 }
 
 /// Reads a contracts `Value` in the encoding traces use.
-fn decode_value(d: &mut Decoder<'_>) -> Result<Value, DecodeError> {
+pub(crate) fn decode_value(d: &mut Decoder<'_>) -> Result<Value, DecodeError> {
     Ok(match d.u8()? {
         0 => Value::U64(d.u64()?),
         1 => Value::I64(d.i64()?),

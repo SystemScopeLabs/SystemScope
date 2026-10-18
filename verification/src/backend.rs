@@ -8,6 +8,7 @@ use crate::compare::{Recorded, Recording, Verdict, compare_recordings};
 use crate::error::EngineError;
 use crate::observation::Observation;
 use crate::profile::{ComparisonProfile, Plan, Support, plan};
+use crate::state::StateField;
 
 /// What a backend can do (§7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -26,6 +27,8 @@ pub enum Capability {
     Snapshot,
     /// Resume from one of the side's own checkpoints.
     Restore,
+    /// Report the state at the current event boundary (§13).
+    State,
 }
 
 /// A backend's declared capabilities.
@@ -65,6 +68,11 @@ pub trait Backend {
     /// the checkpoint's covered count. Requires [`Capability::Restore`].
     fn restore(&mut self, _checkpoint: &Checkpoint) -> Result<(), EngineError> {
         Err(EngineError::Unsupported("restore"))
+    }
+    /// The state after the last event dispatched, in component order, without advancing.
+    /// Requires [`Capability::State`].
+    fn state(&mut self) -> Result<Vec<StateField>, EngineError> {
+        Err(EngineError::Unsupported("state"))
     }
     /// The whole stream up to the stop rule.
     fn record(&mut self, stream: &str) -> Result<Vec<Observation>, EngineError> {

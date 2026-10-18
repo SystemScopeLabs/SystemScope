@@ -5,7 +5,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 
-use systemscope_contracts::observe::Observer;
+use systemscope_contracts::component::ComponentId;
+use systemscope_contracts::observe::{Control, Observer, WorldView};
+use systemscope_contracts::time::Tick;
 use systemscope_contracts::trace::TraceRecord;
 use systemscope_runtime::runtime::Runtime;
 
@@ -15,6 +17,7 @@ use crate::checkpoint::{Checkpoint, StreamMark};
 use crate::error::EngineError;
 use crate::observation::{Observation, ObservedValue, PrefixDigest};
 use crate::profile::{ComparisonProfile, Support};
+use crate::state::{Source, StateField};
 
 /// A boundary a projection found, before the adapter places it in its stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +61,9 @@ struct Shared {
     /// Every compared stream, in name order.
     streams: BTreeMap<String, Stream>,
     error: Option<EngineError>,
+    /// The component paths, by id, while a state read is asked for; the state read.
+    reading: Option<Vec<String>>,
+    state: Option<Vec<StateField>>,
 }
 
 /// One compared stream of a running side.
@@ -146,6 +152,24 @@ struct Tap(Rc<RefCell<Shared>>);
 impl Observer for Tap {
     fn on_trace(&mut self, record: &TraceRecord) {
         self.0.borrow_mut().take(record);
+    }
+
+    fn on_observe(&mut self, _: Tick, world: &WorldView<'_>) -> Control {
+        let mut shared = self.0.borrow_mut();
+        if let Some(paths) = shared.reading.take() {
+            let mut fields = Vec::new();
+            for (id, path) in paths.iter().enumerate() {
+                let view = world.inspect(ComponentId(id as u32)).unwrap_or_default();
+                fields.extend(view.fields.into_iter().map(|(name, value)| StateField {
+                    component: path.clone(),
+                    field: name.to_owned(),
+                    value,
+                    source: Source::Inspect,
+                }));
+            }
+            shared.state = Some(fields);
+        }
+        Control::Continue
     }
 }
 
@@ -302,6 +326,8 @@ fn shared(
         event_index,
         streams,
         error: None,
+        reading: None,
+        state: None,
     })))
 }
 
@@ -316,6 +342,7 @@ impl Backend for RuntimeBackend {
             Capability::DeterministicReplay,
             Capability::Snapshot,
             Capability::Restore,
+            Capability::State,
         ]);
         let streams = (self.projection)().support().streams;
         for (name, cap) in [
@@ -438,6 +465,37 @@ impl Backend for RuntimeBackend {
                 .collect(),
             state,
         })
+    }
+
+    /// Reads every component's `inspect()` at an observe point registered at tick 0,
+    /// which is due at once, and runs no further than tick 0, where no event is left.
+    /// Observe points are driver state, so the read changes nothing (§10).
+    fn state(&mut self) -> Result<Vec<StateField>, EngineError> {
+        let Some(s) = self.session.as_mut() else {
+            return Err(EngineError::Internal("state before start".to_owned()));
+        };
+        if s.runtime.peek_key().is_some_and(|k| k.tick == Tick(0)) {
+            return Err(EngineError::Internal(
+                "state while events at tick 0 are pending".to_owned(),
+            ));
+        }
+        let paths = s.runtime.component_paths().map(str::to_owned).collect();
+        s.shared.borrow_mut().reading = Some(paths);
+        s.runtime.observe_at(Tick(0));
+        let ran = s.runtime.run(Tick(0));
+        let mut shared = s.shared.borrow_mut();
+        shared.reading = None;
+        let state = shared.state.take();
+        match ran {
+            Ok(r) if r.events == 0 => {}
+            Ok(_) => {
+                return Err(EngineError::Internal(
+                    "a state read ran an event".to_owned(),
+                ));
+            }
+            Err(e) => return Err(EngineError::BackendFailed(format!("state: {e}"))),
+        }
+        state.ok_or_else(|| EngineError::Internal("the state read did not fire".to_owned()))
     }
 
     fn restore(&mut self, c: &Checkpoint) -> Result<(), EngineError> {
