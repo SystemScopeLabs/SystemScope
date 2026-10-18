@@ -23,6 +23,7 @@ use systemscope_rv32::m3ref::{self, Config};
 use systemscope_rv32::runner::Start;
 
 pub mod checkpoint;
+pub mod expected;
 pub mod golden;
 pub mod observation;
 pub mod portable;

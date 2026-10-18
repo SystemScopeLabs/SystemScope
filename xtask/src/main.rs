@@ -50,6 +50,10 @@
 //!   prints the output and the metrics.
 //! - `m3-reference verify`: `rv32-fixtures verify` for the M3 fixtures, then `run`, then
 //!   a second run of each disk, whose digests must equal the first's.
+//! - `m4-expected bless`: records every stream of the unmodified `m3-reference` into
+//!   `tests/verification/expected/m3-reference` (`docs/m4-design.md` §25.2), the expected
+//!   side of the source-mutant cases, then verifies.
+//! - `m4-expected verify`: requires this build to reproduce those streams byte for byte.
 //! - `m4-repro emit <dir>`: writes this machine's M4 reproducer bundles of
 //!   `m3-reference` (`docs/m4-design.md` §16) into `<dir>`, one `<name>.repro` directory
 //!   each, for another machine to `check`.
@@ -102,7 +106,9 @@ use systemscope_acceptance::golden::{GOLDEN_PATH, Golden, MID_SNAPSHOT_PATH, des
 use systemscope_acceptance::m1::golden as m1;
 use systemscope_acceptance::m2::golden as m2;
 use systemscope_acceptance::m3::golden as m3g;
-use systemscope_acceptance::m3::{Fixture as M3Fixture, checkpoint as m3c, repro as m4r};
+use systemscope_acceptance::m3::{
+    Fixture as M3Fixture, checkpoint as m3c, expected as m4x, repro as m4r,
+};
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
@@ -127,6 +133,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m3-golden bless | verify | emit <dir> | check <dir> \
                      | every-event [<from> <to> | shard <i> <n>]\n       \
                      cargo xtask m3-reference manifest | run | verify\n       \
+                     cargo xtask m4-expected bless | verify\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
                      cargo xtask spike build | verify | diff | random [<dir>]\n       \
@@ -184,6 +191,8 @@ fn main() -> ExitCode {
         ["m3-reference", "manifest"] => m3_manifest(),
         ["m3-reference", "run"] => m3_run(),
         ["m3-reference", "verify"] => m3_verify(),
+        ["m4-expected", "bless"] => m4_expected_bless(),
+        ["m4-expected", "verify"] => m4_expected_verify(),
         ["m4-repro", "emit", dir] => m4_emit(Path::new(dir)),
         ["m4-repro", "check", dir] => m4_check(Path::new(dir)),
         ["m4-repro", "replay", dir] => m4_replay(Path::new(dir)),
@@ -622,6 +631,22 @@ fn m3_check(dir: &Path) -> ExitCode {
 
 fn m4_fixture() -> Result<M3Fixture, Vec<String>> {
     M3Fixture::read(&root(), Scenario::Reference).map_err(|e| vec![e])
+}
+
+fn m4_expected_bless() -> ExitCode {
+    let result = m4_fixture().and_then(|f| m4x::bless(&f, &root()).map_err(|e| vec![e]));
+    if result.is_err() {
+        return report(result, "");
+    }
+    m4_expected_verify()
+}
+
+fn m4_expected_verify() -> ExitCode {
+    let result = m4_fixture().and_then(|f| m4x::verify(&f, &root()));
+    report(
+        result,
+        &format!("this build reproduces the expected streams in {}", m4x::DIR),
+    )
 }
 
 fn m4_emit(dir: &Path) -> ExitCode {

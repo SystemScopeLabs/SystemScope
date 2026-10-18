@@ -5,3 +5,6 @@
 *.snap -text
 *.elf -text
 *.log -text
+*.obs -text
+# Reproducer bundles: exact bytes, the manifest included
+tests/verification/corpus/** -text
