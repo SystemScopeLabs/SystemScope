@@ -50,6 +50,12 @@
 //!   prints the output and the metrics.
 //! - `m3-reference verify`: `rv32-fixtures verify` for the M3 fixtures, then `run`, then
 //!   a second run of each disk, whose digests must equal the first's.
+//! - `m4-repro emit <dir>`: writes this machine's M4 reproducer bundles of
+//!   `m3-reference` (`docs/m4-design.md` §16) into `<dir>`, one `<name>.repro` directory
+//!   each, for another machine to `check`.
+//! - `m4-repro check <dir>`: requires another machine's emitted bundles to equal this
+//!   machine's byte for byte, and replays each here.
+//! - `m4-repro replay <dir>`: validates and replays every `*.repro` bundle in `<dir>`.
 //! - `spike build [<dir>]`: Linux only, with git, a C++ compiler, make, and dtc. Fetches
 //!   and builds the pinned Spike into `<dir>` (default `target/spike`) with
 //!   `tests/rv32/build-spike.sh`, then runs `verify`.
@@ -93,7 +99,7 @@ use systemscope_acceptance::golden::{GOLDEN_PATH, Golden, MID_SNAPSHOT_PATH, des
 use systemscope_acceptance::m1::golden as m1;
 use systemscope_acceptance::m2::golden as m2;
 use systemscope_acceptance::m3::golden as m3g;
-use systemscope_acceptance::m3::{Fixture as M3Fixture, checkpoint as m3c};
+use systemscope_acceptance::m3::{Fixture as M3Fixture, checkpoint as m3c, repro as m4r};
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
@@ -118,6 +124,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m3-golden bless | verify | emit <dir> | check <dir> \
                      | every-event [<from> <to> | shard <i> <n>]\n       \
                      cargo xtask m3-reference manifest | run | verify\n       \
+                     cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
                      cargo xtask spike build | verify | diff | random [<dir>]\n       \
                      cargo xtask act4 build [<cache-dir>] | install <out-dir> | check <out-dir> \
@@ -174,6 +181,9 @@ fn main() -> ExitCode {
         ["m3-reference", "manifest"] => m3_manifest(),
         ["m3-reference", "run"] => m3_run(),
         ["m3-reference", "verify"] => m3_verify(),
+        ["m4-repro", "emit", dir] => m4_emit(Path::new(dir)),
+        ["m4-repro", "check", dir] => m4_check(Path::new(dir)),
+        ["m4-repro", "replay", dir] => m4_replay(Path::new(dir)),
         ["act4", "build"] => act4_build(&root().join(ACT4_CACHE)),
         ["act4", "build", cache] => act4_build(Path::new(cache)),
         ["act4", "install", out] => act4_install(Path::new(out)),
@@ -605,6 +615,37 @@ fn m3_check(dir: &Path) -> ExitCode {
         "the foreign M3 result equals the committed golden files and this machine's run, \
          and its snapshot restores here to the golden end",
     )
+}
+
+fn m4_fixture() -> Result<M3Fixture, Vec<String>> {
+    M3Fixture::read(&root(), Scenario::Reference).map_err(|e| vec![e])
+}
+
+fn m4_emit(dir: &Path) -> ExitCode {
+    let result = m4_fixture().and_then(|f| m4r::emit(&f, dir).map_err(|e| vec![e]));
+    report(
+        result,
+        &format!(
+            "wrote this machine's M4 reproducers into {}: {}",
+            dir.display(),
+            m4r::NAMES.join(", ")
+        ),
+    )
+}
+
+fn m4_check(dir: &Path) -> ExitCode {
+    let result = m4_fixture().and_then(|f| m4r::check(&f, dir));
+    report(
+        result,
+        "the foreign M4 reproducers equal this machine's byte for byte and replay here",
+    )
+}
+
+fn m4_replay(dir: &Path) -> ExitCode {
+    match m4_fixture().and_then(|f| m4r::replay_all(&f, dir)) {
+        Ok(n) => report(Ok(()), &format!("{n} reproducers replay byte for byte")),
+        Err(errors) => report(Err(errors), ""),
+    }
 }
 
 /// The checkpoints `m3-golden every-event` resumes.

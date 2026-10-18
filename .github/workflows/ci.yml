@@ -188,6 +188,16 @@ jobs:
           name: m3-result-${{ matrix.os }}
           path: systemscope/target/m3-result
           if-no-files-found: error
+      # This machine's own M4 reproducers, for the m4-cross-os job.
+      - name: Emit this machine's M4 reproducers
+        run: cargo xtask m4-repro emit target/m4-repro
+      - name: M4 reproducers replay
+        run: cargo xtask m4-repro replay target/m4-repro
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m4-repro-${{ matrix.os }}
+          path: systemscope/target/m4-repro
+          if-no-files-found: error
 
   # docs/m1-design.md §10.1 M1-A6, M1-A8: each operating system restores the portable
   # snapshot the other one took, and checks the other one's golden result against the
@@ -302,6 +312,43 @@ jobs:
           path: systemscope/target/m3-foreign
       - name: Check the ${{ matrix.from }} result and restore its snapshot
         run: cargo xtask m3-golden check target/m3-foreign
+
+  # docs/m4-design.md §16.2: each operating system's reproducer bundles equal the other
+  # one's byte for byte and replay there.
+  m4-cross-os:
+    name: M4 cross-OS (${{ matrix.os }} checks ${{ matrix.from }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            from: ubuntu-latest
+          - os: ubuntu-latest
+            from: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
+      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+      - uses: actions/download-artifact@v8
+        with:
+          name: m4-repro-${{ matrix.from }}
+          path: systemscope/target/m4-foreign
+      - name: Check the ${{ matrix.from }} reproducers and replay them
+        run: cargo xtask m4-repro check target/m4-foreign
 
   # docs/m2-design.md §13: every checkpoint of block_irq.elf on m2-reference, no
   # sampling, restored into a fresh platform and run to the end, on both operating

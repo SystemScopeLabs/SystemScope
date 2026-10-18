@@ -26,6 +26,7 @@ pub mod checkpoint;
 pub mod golden;
 pub mod observation;
 pub mod portable;
+pub mod repro;
 pub mod verify;
 
 /// The scenario's platform, as the golden file records it.
