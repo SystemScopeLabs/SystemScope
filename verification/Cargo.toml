@@ -1,0 +1,13 @@
+[package]
+name = "systemscope-verify"
+description = "Backend-neutral differential verification for SystemScope: observations, comparison, and divergence localization"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3 = "1"
+systemscope-contracts.workspace = true
+
+[lints]
+workspace = true

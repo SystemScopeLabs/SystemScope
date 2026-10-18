@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["runtime", "components/*", "elf", "reference", "tests/acceptance", "tests/rv32", "xtask"]
+members = ["runtime", "components/*", "elf", "reference", "tests/acceptance", "tests/rv32", "verification", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
@@ -19,6 +19,7 @@ systemscope-os = { path = "components/os" }
 systemscope-reference = { path = "reference" }
 systemscope-acceptance = { path = "tests/acceptance" }
 systemscope-rv32 = { path = "tests/rv32" }
+systemscope-verify = { path = "verification" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
