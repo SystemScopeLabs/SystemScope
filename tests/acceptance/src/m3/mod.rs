@@ -24,6 +24,7 @@ use systemscope_rv32::runner::Start;
 
 pub mod checkpoint;
 pub mod expected;
+pub mod faults;
 pub mod golden;
 pub mod mutants;
 pub mod observation;
