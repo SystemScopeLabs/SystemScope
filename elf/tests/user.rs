@@ -281,10 +281,16 @@ fn more_than_max_phdrs_is_rejected() {
         parse(&elf),
         Err(UserElfError::PhdrCountExceeded(MAX_PHDRS + 1))
     );
-    // Exactly MAX_PHDRS is fine.
+    // Exactly MAX_PHDRS is fine, and a prefix that ends before their table asks for it.
     let mut elf = elf;
     elf.phdrs.pop();
     assert_eq!(parse(&elf), Ok(elf.expected()));
+    assert_eq!(
+        parse_prefix(&elf.bytes(), 52),
+        Err(UserElfError::PrefixTooShort {
+            needed: elf.prefix_len() as u32
+        })
+    );
 }
 
 #[test]
@@ -341,6 +347,12 @@ fn a_truncated_prefix_asks_for_the_bytes_it_needs() {
             "{prefix}"
         );
     }
+    // A file of exactly a header has one: a shorter prefix asks for it.
+    let header = &bytes[..52];
+    assert_eq!(
+        parse_user_elf32(&header[..51], 52, USER),
+        Err(UserElfError::PrefixTooShort { needed: 52 })
+    );
     // A longer prefix, up to the whole file, gives the same image.
     for prefix in [elf.prefix_len(), elf.prefix_len() + 1, bytes.len()] {
         assert_eq!(parse_prefix(&bytes, prefix), Ok(elf.expected()));

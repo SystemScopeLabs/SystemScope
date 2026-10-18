@@ -205,6 +205,12 @@ fn each_initiator_stays_in_its_own_region() {
     assert_eq!(seen, [OPS, OPS]);
 }
 
+#[test]
+fn the_memory_is_both_regions_and_nothing_else() {
+    let dma_end = DMA_BASE + u64::from(DMA_SLOTS) * u64::from(DMA_ACCESS);
+    assert_eq!(u64::from(MEMORY_SIZE), dma_end);
+}
+
 /// The reference topology, except that the DMA writes into the CPU's region.
 fn overlapping(seed: u64) -> Runtime {
     let mut t = TopologyBuilder::new(SimulationClock::default());
