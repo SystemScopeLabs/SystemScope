@@ -5,7 +5,7 @@ use systemscope_contracts::canonical::Encoder;
 use systemscope_contracts::trace::Value;
 use systemscope_verify::compare::{
     Comparison, Divergence, FieldDiff, Outcome, Recorded, Recording, StreamResult, Verdict,
-    compare, compare_recordings, naive_first_divergence,
+    compare, compare_cut, compare_recordings, naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::{Observation, ObservedValue, PrefixDigest};
@@ -587,21 +587,62 @@ fn a_divergence_before_a_failure_is_still_reported() {
 
 #[test]
 fn a_failure_with_no_divergence_before_it_is_the_result() {
-    // A stream cut short by a failure makes no length divergence.
-    for (e, a) in [
+    // A stream cut short by a failure makes no length divergence. With both sides failed,
+    // the side cut first is the result, the expected side at a tie.
+    let fail = |why: &str| Err(EngineError::BackendFailed(why.to_owned()));
+    for (e, a, result) in [
         (
             done(vec![arch(), effect()]),
             failed(vec![arch()[..3].to_vec()], "a"),
+            fail("a"),
         ),
-        (failed(vec![Vec::new()], "e"), done(vec![arch(), effect()])),
+        (
+            failed(vec![Vec::new()], "e"),
+            done(vec![arch(), effect()]),
+            fail("e"),
+        ),
         (
             failed(vec![arch()], "e"),
             failed(vec![arch()[..2].to_vec()], "a"),
+            fail("a"),
+        ),
+        (
+            failed(vec![arch()[..2].to_vec()], "e"),
+            failed(vec![arch()], "a"),
+            fail("e"),
+        ),
+        (
+            failed(vec![arch()[..2].to_vec()], "e"),
+            failed(vec![arch()[..2].to_vec()], "a"),
+            fail("e"),
         ),
     ] {
-        let first = e.failure.clone().or(a.failure.clone()).unwrap();
-        assert_eq!(compare_recordings(&full_plan(), &e, &a), Err(first));
+        assert_eq!(compare_recordings(&full_plan(), &e, &a), result);
     }
+    // A side that reached the stop rule is complete: its stream still ends first.
+    let short = arch()[..2].to_vec();
+    let Ok(Verdict::Compared(c)) = compare_recordings(
+        &full_plan(),
+        &done(vec![short, effect()]),
+        &failed(vec![arch()], "a"),
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        c.primary,
+        StreamResult::Diverged {
+            stream: "arch".to_owned(),
+            ordinal: 2,
+            divergence: Divergence::Ended {
+                ended: Role::Expected,
+                kind: arch()[2].kind.clone(),
+            },
+        }
+    );
+    assert_eq!(
+        c.failures,
+        [(Role::Actual, EngineError::BackendFailed("a".to_owned()))]
+    );
     // Both failed after a divergence: both failures are evidence, expected first.
     let mut actual = arch();
     actual[0].fields[0].1 = u(50);
@@ -630,5 +671,71 @@ fn an_incomparable_prefix_before_a_failure_is_incomparable() {
             ordinal: 1,
             ..
         }))
+    ));
+}
+
+#[test]
+fn a_cut_comparison_compares_auxiliary_streams_over_what_both_emitted() {
+    let mut diverged = arch();
+    diverged[3].fields[0].1 = u(99);
+    let cut = |e: Recorded, a: Recorded| match compare_cut(&full_plan(), &e, &a).unwrap() {
+        Verdict::Compared(c) => c,
+        other => panic!("{other:?}"),
+    };
+    // The actual side emitted one byte before the divergence: no length divergence.
+    let c = cut(
+        vec![arch()[..4].to_vec(), effect()],
+        vec![diverged[..4].to_vec(), effect()[..1].to_vec()],
+    );
+    assert!(matches!(
+        c.primary,
+        StreamResult::Diverged { ordinal: 3, .. }
+    ));
+    assert!(matches!(
+        c.auxiliary[0],
+        StreamResult::Agree { compared: 1, .. }
+    ));
+    assert!(c.failures.is_empty());
+    // A byte both emitted and that differs is evidence.
+    let mut bytes = effect();
+    bytes[1].fields[0].1 = u(0);
+    let c = cut(
+        vec![arch()[..4].to_vec(), effect()],
+        vec![diverged[..4].to_vec(), bytes],
+    );
+    assert!(matches!(
+        c.auxiliary[0],
+        StreamResult::Diverged { ordinal: 1, .. }
+    ));
+    assert_eq!(c.outcome(), Outcome::Diverged);
+    // The primary stream still ends where it ends.
+    let c = cut(
+        vec![arch()[..2].to_vec(), Vec::new()],
+        vec![arch()[..3].to_vec(), Vec::new()],
+    );
+    assert!(matches!(
+        c.primary,
+        StreamResult::Diverged {
+            ordinal: 2,
+            divergence: Divergence::Ended {
+                ended: Role::Expected,
+                ..
+            },
+            ..
+        }
+    ));
+    let mut absent = effect();
+    absent[0].fields[0].1 = ObservedValue::Absent;
+    assert!(matches!(
+        compare_cut(
+            &full_plan(),
+            &vec![arch(), effect()],
+            &vec![diverged.clone(), absent]
+        ),
+        Ok(Verdict::Incomparable(_))
+    ));
+    assert!(matches!(
+        compare_cut(&full_plan(), &vec![arch()], &vec![diverged, effect()]),
+        Err(EngineError::Internal(_))
     ));
 }
