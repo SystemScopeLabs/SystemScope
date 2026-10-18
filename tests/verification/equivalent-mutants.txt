@@ -1,3 +1,117 @@
 # Source mutants that m3-reference cannot observe (docs/m4-design.md §25.2): blocks of
 # comment lines giving the reason, followed by the mutants' names exactly as cargo-mutants
 # prints them. cargo xtask m4-mutants summarize requires each to be missed.
+
+# Equivalent for any input: after `v << 8` the low byte is zero, so `| b` and `^ b` with a
+# byte `b` are the same.
+components/rv32i/src/cpu.rs:1199:50: replace | with ^ in Rv32iCpu::commit_fields
+
+# m3-reference retires no LB, LH, or LHU: its loads are LW and LBU only (checked by
+# m4_mutants::m3_reference_retires_only_the_listed_instructions).
+components/rv32i/src/memory.rs:255:9: delete match arm (MemWidth::Byte, LoadExtension::Signed, &[b]) in complete_load
+components/rv32i/src/memory.rs:257:9: delete match arm (MemWidth::Half, LoadExtension::Signed, &[b0, b1]) in complete_load
+components/rv32i/src/memory.rs:260:9: delete match arm (MemWidth::Half, LoadExtension::Unsigned, &[b0, b1]) in complete_load
+
+# m3-reference retires no JALR (checked by
+# m4_mutants::m3_reference_retires_only_the_listed_instructions).
+components/rv32i/src/execute.rs:242:86: replace & with | in execute_control
+components/rv32i/src/execute.rs:242:86: replace & with ^ in execute_control
+components/rv32i/src/execute.rs:242:88: delete ! in execute_control
+
+# m3-reference's only branch is BNE: it retires no BEQ, BLT, BGE, BLTU, or BGEU (checked by
+# m4_mutants::m3_reference_retires_only_the_listed_instructions).
+components/rv32i/src/execute.rs:270:27: replace == with != in taken
+components/rv32i/src/execute.rs:272:36: replace < with == in taken
+components/rv32i/src/execute.rs:272:36: replace < with > in taken
+components/rv32i/src/execute.rs:272:36: replace < with <= in taken
+components/rv32i/src/execute.rs:273:36: replace >= with < in taken
+components/rv32i/src/execute.rs:274:28: replace < with == in taken
+components/rv32i/src/execute.rs:274:28: replace < with > in taken
+components/rv32i/src/execute.rs:274:28: replace < with <= in taken
+components/rv32i/src/execute.rs:275:28: replace >= with < in taken
+
+# m3-reference's only OP-IMM instruction is ADDI: it retires no SLTI, SLTIU, XORI, ORI,
+# ANDI, no shift, and no OP instruction (checked by
+# m4_mutants::m3_reference_retires_only_the_listed_instructions).
+components/rv32i/src/execute.rs:285:45: replace < with == in op_imm
+components/rv32i/src/execute.rs:285:45: replace < with > in op_imm
+components/rv32i/src/execute.rs:285:45: replace < with <= in op_imm
+components/rv32i/src/execute.rs:286:37: replace < with == in op_imm
+components/rv32i/src/execute.rs:286:37: replace < with > in op_imm
+components/rv32i/src/execute.rs:286:37: replace < with <= in op_imm
+components/rv32i/src/execute.rs:287:26: replace ^ with | in op_imm
+components/rv32i/src/execute.rs:287:26: replace ^ with & in op_imm
+components/rv32i/src/execute.rs:288:25: replace | with & in op_imm
+components/rv32i/src/execute.rs:288:25: replace | with ^ in op_imm
+components/rv32i/src/execute.rs:289:26: replace & with | in op_imm
+components/rv32i/src/execute.rs:289:26: replace & with ^ in op_imm
+components/rv32i/src/execute.rs:294:5: replace op_reg -> u32 with 0
+components/rv32i/src/execute.rs:294:5: replace op_reg -> u32 with 1
+components/rv32i/src/execute.rs:298:44: replace < with == in op_reg
+components/rv32i/src/execute.rs:298:44: replace < with > in op_reg
+components/rv32i/src/execute.rs:298:44: replace < with <= in op_reg
+components/rv32i/src/execute.rs:299:36: replace < with == in op_reg
+components/rv32i/src/execute.rs:299:36: replace < with > in op_reg
+components/rv32i/src/execute.rs:299:36: replace < with <= in op_reg
+components/rv32i/src/execute.rs:300:25: replace ^ with | in op_reg
+components/rv32i/src/execute.rs:300:25: replace ^ with & in op_reg
+components/rv32i/src/execute.rs:303:24: replace | with & in op_reg
+components/rv32i/src/execute.rs:303:24: replace | with ^ in op_reg
+components/rv32i/src/execute.rs:304:25: replace & with | in op_reg
+components/rv32i/src/execute.rs:304:25: replace & with ^ in op_reg
+components/rv32i/src/execute.rs:310:5: replace shift -> u32 with 0
+components/rv32i/src/execute.rs:310:5: replace shift -> u32 with 1
+components/rv32i/src/execute.rs:310:25: replace & with | in shift
+components/rv32i/src/execute.rs:310:25: replace & with ^ in shift
+components/rv32i/src/execute.rs:312:31: replace << with >> in shift
+components/rv32i/src/execute.rs:313:31: replace >> with << in shift
+components/rv32i/src/execute.rs:314:41: replace >> with << in shift
+
+# Not on m3-reference's path: the CPU walks the page table through its bus protocol and
+# sv32::step; sv32_translate, the synchronous walk, is called only by tests.
+components/rv32i/src/sv32.rs:194:5: replace sv32_translate -> Result<u64, Fault> with Ok(0)
+components/rv32i/src/sv32.rs:194:5: replace sv32_translate -> Result<u64, Fault> with Ok(1)
+components/rv32i/src/sv32.rs:194:40: replace || with && in sv32_translate
+components/rv32i/src/sv32.rs:194:18: replace == with != in sv32_translate
+components/rv32i/src/sv32.rs:194:60: replace == with != in sv32_translate
+components/rv32i/src/sv32.rs:194:48: replace & with | in sv32_translate
+components/rv32i/src/sv32.rs:194:48: replace & with ^ in sv32_translate
+components/rv32i/src/sv32.rs:203:26: replace & with | in sv32_translate
+components/rv32i/src/sv32.rs:203:26: replace & with ^ in sv32_translate
+components/rv32i/src/sv32.rs:210:23: replace -= with += in sv32_translate
+components/rv32i/src/sv32.rs:210:23: replace -= with /= in sv32_translate
+
+# Equivalent for any input: the two operands are disjoint bits (a page number shifted past
+# the offset, and the offset; or distinct single-bit PTE flags), so `|` and `^` are the same.
+components/rv32i/src/sv32.rs:152:44: replace | with ^ in step
+components/rv32i/src/sv32.rs:152:36: replace | with ^ in step
+components/rv32i/src/sv32.rs:175:36: replace | with ^ in step
+components/rv32i/src/sv32.rs:177:30: replace | with ^ in step
+
+# Every PTE m3-reference walks is valid and never W without R, so both operands are false
+# and `||` and `&&` agree (walked PTEs: level-1 pointers 0x...401/c01/001/801 with only V,
+# leaves with flags 0xef, 0xe7, 0x5b, 0x53, 0xd7).
+components/rv32i/src/sv32.rs:146:20: replace || with && in step
+
+# m3-reference walks pointer PTEs only at level 1, each with D, A, and U clear, so `level
+# == 0` and the reserved-bit test are both false whichever operator joins them or the
+# flags.
+components/rv32i/src/sv32.rs:152:23: replace || with && in step
+components/rv32i/src/sv32.rs:152:44: replace | with & in step
+components/rv32i/src/sv32.rs:152:36: replace | with & in step
+
+# Every S-mode access m3-reference translates hits a leaf with U clear, so `!U` is true and
+# the SUM term is never evaluated.
+components/rv32i/src/sv32.rs:162:58: replace && with || in step
+components/rv32i/src/sv32.rs:162:72: replace != with == in step
+
+# Every load m3-reference translates hits a leaf with R set, so the MXR term is never
+# evaluated.
+components/rv32i/src/sv32.rs:167:48: replace && with || in step
+
+# m3-reference's only page fault is a U-mode store to a leaf with neither W nor D (flags
+# 0x5b), so `!allowed` and `!dirty_ok` are both true there and every other walk has all
+# four terms false: any mix of `||` and `&&` gives the same verdict.
+components/rv32i/src/sv32.rs:171:44: replace || with && in step
+components/rv32i/src/sv32.rs:171:29: replace || with && in step
+components/rv32i/src/sv32.rs:171:17: replace || with && in step

@@ -9,7 +9,10 @@ use systemscope_acceptance::m3::mutants::{
     EQUIVALENTS, Equivalent, Fate, Mutant, TARGETS, caught, parse_equivalents, read_outcomes,
     render, target, violations,
 };
+use systemscope_contracts::trace::Value;
 use systemscope_rv32::workspace_root;
+use systemscope_verify::observation::ObservedValue;
+use systemscope_verify::recorded::stream_from_bytes;
 
 #[test]
 fn every_target_function_exists_in_its_file() {
@@ -199,4 +202,39 @@ fn outcomes_are_read_with_their_logs() {
     .unwrap();
     assert!(read_outcomes(&dir).unwrap_err().contains("Weird"));
     let _ = fs::remove_dir_all(&dir);
+}
+
+/// The instruction classes the equivalent-mutant reasons rely on (`equivalent-mutants.txt`):
+/// read from the committed `arch` stream, m3-reference's ALU instructions are LUI, AUIPC,
+/// and ADDI, its only branch is BNE, its loads are LW and LBU, and it retires no JALR.
+#[test]
+fn m3_reference_retires_only_the_listed_instructions() {
+    let path = workspace_root().join("tests/verification/expected/m3-reference/arch.obs");
+    let arch = stream_from_bytes(&fs::read(path).unwrap()).unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for o in arch.iter().filter(|o| o.kind == "retire") {
+        let Some(ObservedValue::Present(Value::U64(insn))) = o.field("insn") else {
+            panic!("arch[{}] has no insn", o.ordinal)
+        };
+        let (opcode, funct3) = (insn & 0x7f, (insn >> 12) & 7);
+        let class = match (opcode, funct3) {
+            (0x37, _) => "lui",
+            (0x17, _) => "auipc",
+            (0x13, 0) => "addi",
+            (0x13, _) => "other op-imm or shift",
+            (0x33, _) => "op",
+            (0x67, _) => "jalr",
+            (0x63, 1) => "bne",
+            (0x63, _) => "other branch",
+            (0x03, 2) => "lw",
+            (0x03, 4) => "lbu",
+            (0x03, _) => "other load",
+            _ => "unlisted",
+        };
+        seen.insert(class);
+    }
+    assert_eq!(
+        seen.into_iter().collect::<Vec<_>>(),
+        ["addi", "auipc", "bne", "lbu", "lui", "lw", "unlisted"]
+    );
 }
