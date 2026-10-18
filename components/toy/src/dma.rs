@@ -106,6 +106,11 @@ impl ToyDma {
         self.outstanding.len() >= self.config.max_outstanding as usize
     }
 
+    /// Whether another write may be issued now: some are left and the limit allows it.
+    fn can_issue(&self) -> bool {
+        self.issued < self.config.ops && !self.full()
+    }
+
     fn issue(&mut self, ctx: &mut dyn SimContext) -> Result<(), SimError> {
         let slots = NonZeroU64::new(u64::from(self.config.slots))
             .ok_or(SimError::ComponentFault("toy dma: no slots"))?;
@@ -184,10 +189,10 @@ impl Component for ToyDma {
         match ev {
             Delivered::Wake { token: ISSUE } => {
                 self.wake_scheduled = false;
-                if self.issued < self.config.ops && !self.full() {
+                if self.can_issue() {
                     self.issue(ctx)?;
                 }
-                if self.issued < self.config.ops && !self.full() {
+                if self.can_issue() {
                     if self.burst_left > 0 {
                         self.wake_in(ctx, 1)?;
                     } else {
