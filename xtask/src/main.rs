@@ -89,7 +89,7 @@
 //! - `spike random [<dir>]`: `verify`, then one generated program, for the seed in
 //!   `M1_PROGEN_SEED` (decimal or `0x` hex), against Spike. The nightly workflow runs it.
 //! - `spike campaign [<dir>]`: `verify`, then the Spike campaign (`docs/m4-design.md`
-//!   §25.3): the generated programs of seeds 64 to 127 against Spike through the M4 stream
+//!   §18): the generated programs of seeds 64 to 127 against Spike through the M4 stream
 //!   compare. A divergence is minimized to `target/spike-logs/campaign/<program>.repro`,
 //!   replayed, and fails the task.
 //!
@@ -708,6 +708,11 @@ fn m4_mutants_run(name: &str, out: &str) -> ExitCode {
     }
     let out = format!("{out}/{}", target.name);
     let _ = fs::remove_dir_all(root().join(&out));
+    // cargo-mutants creates `<out>/mutants.out`, but not `<out>`.
+    if let Err(e) = fs::create_dir_all(root().join(&out)) {
+        eprintln!("{out}: {e}");
+        return ExitCode::FAILURE;
+    }
     match Command::new("cargo")
         .args(target.args(&out))
         .current_dir(root())

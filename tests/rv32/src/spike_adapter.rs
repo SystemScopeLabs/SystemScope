@@ -853,7 +853,7 @@ pub fn run_sk1(root: &Path, spike: &Path, logs: &str) -> Result<String, String> 
     ))
 }
 
-/// The progen seeds of the Spike campaign (§25.3): the 64 after
+/// The progen seeds of the Spike campaign (§18): the 64 after
 /// [`crate::progen::FIXED_SEEDS`].
 pub const CAMPAIGN_SEEDS: std::ops::Range<u64> = 64..128;
 
@@ -912,7 +912,7 @@ pub fn campaign_case(
     ))
 }
 
-/// The Spike campaign (§25.3) against the Spike executable `spike`, run in `root` with its
+/// The Spike campaign (§18) against the Spike executable `spike`, run in `root` with its
 /// logs and reproducers under `logs/campaign`: each seed's program name and the
 /// observations compared, or every error.
 pub fn run_campaign(
