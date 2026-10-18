@@ -1,6 +1,7 @@
 //! Identities of scenarios, input variants, and backends, the execution identity, the
 //! default `record`, and engine error messages (`docs/m4-design.md` §6.6, §9.2, §20).
 
+use systemscope_contracts::canonical::DecodeError;
 use systemscope_contracts::trace::Value;
 use systemscope_verify::backend::{Backend, Capabilities, Capability};
 use systemscope_verify::case::{
@@ -120,6 +121,35 @@ fn an_input_variant_identity_covers_the_whole_patch() {
     assert_eq!(
         InputVariant::Media(media()).identity(),
         *blake3::hash(e.as_bytes()).as_bytes()
+    );
+}
+
+#[test]
+fn input_variants_round_trip_and_refuse_broken_bytes() {
+    let media = InputVariant::Media(MediaPatch {
+        offset: 8,
+        old: vec![1, 2],
+        new: vec![3, 4],
+    });
+    for input in [InputVariant::None, state(1), media.clone()] {
+        let bytes = input.to_bytes();
+        assert_eq!(*blake3::hash(&bytes).as_bytes(), input.identity());
+        assert_eq!(InputVariant::from_bytes(&bytes), Ok(input));
+    }
+    let mut long = media.to_bytes();
+    long.push(0);
+    assert_eq!(
+        InputVariant::from_bytes(&long),
+        Err(DecodeError::TrailingBytes)
+    );
+    let bytes = media.to_bytes();
+    assert!(InputVariant::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    assert_eq!(
+        InputVariant::from_bytes(&[3]),
+        Err(DecodeError::InvalidTag {
+            what: "input variant",
+            tag: 3
+        })
     );
 }
 
@@ -309,6 +339,10 @@ fn engine_errors_say_what_failed() {
         (
             EngineError::BoundaryDesync("z".to_owned()),
             "boundary desync: z",
+        ),
+        (
+            EngineError::CorruptReproducer("w".to_owned()),
+            "corrupt reproducer: w",
         ),
     ];
     for (e, text) in cases {

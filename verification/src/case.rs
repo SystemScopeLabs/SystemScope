@@ -1,8 +1,10 @@
 //! Scenarios, input variants, run configurations, and execution identities
 //! (`docs/m4-design.md` §6.6).
 
-use systemscope_contracts::canonical::Encoder;
+use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_contracts::trace::Value;
+
+use crate::observation::decode_value;
 
 /// The common semantic inputs of a comparison case.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,6 +108,11 @@ pub enum InputVariant {
 impl InputVariant {
     /// The BLAKE3 of the canonical encoding.
     pub fn identity(&self) -> [u8; 32] {
+        *blake3::hash(&self.to_bytes()).as_bytes()
+    }
+
+    /// The canonical encoding: a reproducer's `input.bin` (§16.1).
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         match self {
             InputVariant::None => e.u8(0),
@@ -123,7 +130,34 @@ impl InputVariant {
                 e.bytes(&p.new);
             }
         }
-        *blake3::hash(e.as_bytes()).as_bytes()
+        e.into_bytes()
+    }
+
+    /// Reads [`InputVariant::to_bytes`]'s output, refusing trailing bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<InputVariant, DecodeError> {
+        let mut d = Decoder::new(bytes);
+        let input = match d.u8()? {
+            0 => InputVariant::None,
+            1 => InputVariant::State(StatePatch {
+                event_index: d.u64()?,
+                field: d.str()?.to_owned(),
+                old: decode_value(&mut d)?,
+                new: decode_value(&mut d)?,
+            }),
+            2 => InputVariant::Media(MediaPatch {
+                offset: d.u64()?,
+                old: d.bytes()?.to_vec(),
+                new: d.bytes()?.to_vec(),
+            }),
+            tag => {
+                return Err(DecodeError::InvalidTag {
+                    what: "input variant",
+                    tag,
+                });
+            }
+        };
+        d.finish()?;
+        Ok(input)
     }
 }
 

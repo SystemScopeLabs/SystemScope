@@ -417,6 +417,7 @@ fn engine_error(e: &mut Encoder, err: &EngineError) {
         EngineError::Unsupported(w) => (1, w),
         EngineError::BoundaryDesync(w) => (2, w),
         EngineError::Internal(w) => (3, w),
+        EngineError::CorruptReproducer(w) => (4, w),
     };
     e.u8(tag);
     e.str(why);
@@ -430,6 +431,7 @@ fn read_engine_error(d: &mut Decoder<'_>) -> Result<EngineError, DecodeError> {
         1 => EngineError::Unsupported(why),
         2 => EngineError::BoundaryDesync(why),
         3 => EngineError::Internal(why),
+        4 => EngineError::CorruptReproducer(why),
         tag => {
             return Err(DecodeError::InvalidTag {
                 what: "engine error",

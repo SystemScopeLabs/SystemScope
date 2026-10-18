@@ -358,6 +358,7 @@ fn every_incomparable_and_engine_error_round_trips() {
         EngineError::Unsupported("b".to_owned()),
         EngineError::BoundaryDesync("c".to_owned()),
         EngineError::Internal("d".to_owned()),
+        EngineError::CorruptReproducer("e".to_owned()),
     ] {
         verdicts.push(Err(e));
     }

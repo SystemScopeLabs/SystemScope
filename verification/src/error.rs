@@ -12,6 +12,9 @@ pub enum EngineError {
     Unsupported(String),
     /// A checkpoint's recorded boundary counts or prefix digests do not match a replay.
     BoundaryDesync(String),
+    /// A reproducer's entry does not match its manifest, or its replay material fails
+    /// validation (§16.2).
+    CorruptReproducer(String),
     /// An invariant of the engine itself failed.
     Internal(String),
 }
@@ -22,6 +25,7 @@ impl fmt::Display for EngineError {
             EngineError::BackendFailed(why) => write!(f, "backend failed: {why}"),
             EngineError::Unsupported(what) => write!(f, "unsupported: {what}"),
             EngineError::BoundaryDesync(why) => write!(f, "boundary desync: {why}"),
+            EngineError::CorruptReproducer(why) => write!(f, "corrupt reproducer: {why}"),
             EngineError::Internal(why) => write!(f, "internal error: {why}"),
         }
     }
