@@ -166,12 +166,12 @@ fn a_state_patch_needs_a_patcher() {
     let plan = plan(&profile(), &b.support(), &b.support()).unwrap();
     assert_eq!(
         run(&plan, &scenario(), side(&mut b, patch_n(1, 1, 2))).complete(),
-        Err(EngineError::Unsupported("state patch"))
+        Err(EngineError::Unsupported("state patch".to_owned()))
     );
     // Refused when the side starts, before any event.
     assert_eq!(
         b.start(&scenario(), &patch_n(1, 1, 2), &config(), &profile()),
-        Err(EngineError::Unsupported("state patch"))
+        Err(EngineError::Unsupported("state patch".to_owned()))
     );
 }
 

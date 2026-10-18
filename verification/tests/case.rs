@@ -259,7 +259,10 @@ fn the_default_record_steps_to_the_stop_rule_and_needs_step_boundary() {
         step: false,
         left: 3,
     };
-    assert_eq!(b.record("arch"), Err(EngineError::Unsupported("record")));
+    assert_eq!(
+        b.record("arch"),
+        Err(EngineError::Unsupported("record".to_owned()))
+    );
     assert_eq!(b.left, 3);
 }
 
@@ -269,15 +272,24 @@ fn checkpoints_and_emitted_observations_are_unsupported_by_default() {
         step: true,
         left: 3,
     };
-    assert_eq!(b.emitted("arch"), Err(EngineError::Unsupported("emitted")));
-    assert_eq!(b.checkpoint(), Err(EngineError::Unsupported("checkpoint")));
+    assert_eq!(
+        b.emitted("arch"),
+        Err(EngineError::Unsupported("emitted".to_owned()))
+    );
+    assert_eq!(
+        b.checkpoint(),
+        Err(EngineError::Unsupported("checkpoint".to_owned()))
+    );
     let c = Checkpoint {
         execution: [0; 32],
         event_index: 0,
         streams: Vec::new(),
         state: Vec::new(),
     };
-    assert_eq!(b.restore(&c), Err(EngineError::Unsupported("restore")));
+    assert_eq!(
+        b.restore(&c),
+        Err(EngineError::Unsupported("restore".to_owned()))
+    );
     assert_eq!(b.left, 3);
 }
 
@@ -288,7 +300,10 @@ fn engine_errors_say_what_failed() {
             EngineError::BackendFailed("x".to_owned()),
             "backend failed: x",
         ),
-        (EngineError::Unsupported("record"), "unsupported: record"),
+        (
+            EngineError::Unsupported("record".to_owned()),
+            "unsupported: record",
+        ),
         (EngineError::Internal("y".to_owned()), "internal error: y"),
         (
             EngineError::BoundaryDesync("z".to_owned()),

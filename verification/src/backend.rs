@@ -57,27 +57,27 @@ pub trait Backend {
     /// The observations of `stream` already emitted and not yet taken, without advancing.
     /// Requires [`Capability::StepBoundary`].
     fn emitted(&mut self, _stream: &str) -> Result<Vec<Observation>, EngineError> {
-        Err(EngineError::Unsupported("emitted"))
+        Err(EngineError::Unsupported("emitted".to_owned()))
     }
     /// A checkpoint of the current state, covering every boundary emitted so far.
     /// Requires [`Capability::Snapshot`].
     fn checkpoint(&self) -> Result<Checkpoint, EngineError> {
-        Err(EngineError::Unsupported("checkpoint"))
+        Err(EngineError::Unsupported("checkpoint".to_owned()))
     }
     /// Resumes a started side from one of its own checkpoints: each stream continues at
     /// the checkpoint's covered count. Requires [`Capability::Restore`].
     fn restore(&mut self, _checkpoint: &Checkpoint) -> Result<(), EngineError> {
-        Err(EngineError::Unsupported("restore"))
+        Err(EngineError::Unsupported("restore".to_owned()))
     }
     /// The state after the last event dispatched, in component order, without advancing.
     /// Requires [`Capability::State`].
     fn state(&mut self) -> Result<Vec<StateField>, EngineError> {
-        Err(EngineError::Unsupported("state"))
+        Err(EngineError::Unsupported("state".to_owned()))
     }
     /// The whole stream up to the stop rule.
     fn record(&mut self, stream: &str) -> Result<Vec<Observation>, EngineError> {
         if !self.capabilities().contains(&Capability::StepBoundary) {
-            return Err(EngineError::Unsupported("record"));
+            return Err(EngineError::Unsupported("record".to_owned()));
         }
         let mut out = Vec::new();
         while let Some(o) = self.next(stream)? {

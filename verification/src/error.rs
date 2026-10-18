@@ -9,7 +9,7 @@ pub enum EngineError {
     /// A side did not reach the stop rule: a crash, a fault, or its safety budget.
     BackendFailed(String),
     /// A capability-gated call was made on a backend without the capability.
-    Unsupported(&'static str),
+    Unsupported(String),
     /// A checkpoint's recorded boundary counts or prefix digests do not match a replay.
     BoundaryDesync(String),
     /// An invariant of the engine itself failed.

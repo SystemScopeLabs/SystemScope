@@ -367,7 +367,7 @@ impl Session {
         p: &StatePatch,
     ) -> Result<(), EngineError> {
         let Some(patch) = patch else {
-            return Err(EngineError::Unsupported("state patch"));
+            return Err(EngineError::Unsupported("state patch".to_owned()));
         };
         let failed = |why: String| EngineError::BackendFailed(format!("state patch: {why}"));
         let mut bytes = self.runtime.snapshot().map_err(|e| failed(e.to_string()))?;
@@ -464,7 +464,9 @@ impl Backend for RuntimeBackend {
         let patch = match input {
             InputVariant::None | InputVariant::Media(_) => None,
             InputVariant::State(p) if self.patch.is_some() => Some(p.clone()),
-            InputVariant::State(_) => return Err(EngineError::Unsupported("state patch")),
+            InputVariant::State(_) => {
+                return Err(EngineError::Unsupported("state patch".to_owned()));
+            }
         };
         let shared = shared(&self.projection, profile, 0, |_| (0, [0; 32]))?;
         let mut runtime = (self.build)(scenario, input).map_err(EngineError::BackendFailed)?;
