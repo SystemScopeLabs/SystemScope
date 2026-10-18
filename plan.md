@@ -211,11 +211,14 @@ The two worlds **unify at the Event/Trace level only**.
       └──────────────┴──────┬───────┴──────────────┘
                ┌────────────┴────────────┐
                ▼                         ▼
-     SystemVerilog CPU (M5)     Native Guest OS (M6)
-     Rust ↔ RTL differential    modeled ↔ native differential
+     Timing Exploration (M5)    Native Guest OS (M6)
+     perturbed ↔ unperturbed    modeled ↔ native differential
                             │
                             ▼
-              Visualizer / Interactive Debugger (M7)
+     Time-travel queries · Visualizer / Interactive Debugger (M7)
+                            │
+                            ▼
+     SystemVerilog CPU (M8): Rust ↔ RTL differential
 ```
 
 - **riscv-tests** serve as processor unit tests.
@@ -223,10 +226,11 @@ The two worlds **unify at the Event/Trace level only**.
 - **The Spike differential** runs from M1. Spike runs the same committed program with `--log-commits`, and the harness compares SystemScope's canonical `rv32.commit` records with Spike's commit log after both runs. Each retirement is normalized to `pc`, the instruction word, the register write, and the memory access. M2 adds the whitelisted CSR write, and M3 adds the privilege mode and exceptions delivered to S. It is a post-run stream comparison, not a live lockstep, and it reports the first differing retirement ([docs/m1-design.md §10.3](docs/m1-design.md#103-spike-differential)).
 - **The M4 Verification & Debugging Engine** turns a detected failure into a characterized, reproducible divergence. Each comparison follows a profile, which names one primary architectural stream. The engine compares executions at stable architectural boundaries, not at raw runtime events, and locates the first difference in that primary stream. Other streams and event-level traces are auxiliary diagnostic evidence. It reports structured state and trace differences and the recorded predecessor events, and it does not claim a root cause. It then packages the failure as a portable reproducer that rebuilds each side and replays identically on Linux and Windows. The current Spike differential becomes one adapter of this engine, and it is designed to accept further comparisons:
   - Rust CPU ↔ Spike;
-  - Rust CPU ↔ SystemVerilog CPU (M5);
+  - the same system under perturbed and unperturbed timing (M5);
   - Modeled OS ↔ Native Guest OS (M6);
+  - Rust CPU ↔ SystemVerilog CPU (M8);
   - later, simulation ↔ trace-backed implementations.
-- **Rust ↔ SystemVerilog differential** runs from M5, via Verilator co-simulation, through the M4 engine. It also demonstrates concretely that backends are replaceable.
+- **Rust ↔ SystemVerilog differential** runs from M8, via Verilator co-simulation, through the M4 engine. It also demonstrates concretely that backends are replaceable.
 - **Determinism acceptance tests** enforce Principle 2 in CI from M0 onward. They are specified in [docs/m0-design.md §9](docs/m0-design.md#9-deterministic-ci-acceptance-tests).
 
 ---
@@ -242,7 +246,7 @@ Each layer uses the language that fits its nature, and **each language is introd
 | RISC-V Assembly / C | bare-metal test programs | M1 |
 | Python | analysis, verification scripts, tooling | as needed |
 | TypeScript | SystemScope Visualizer / Interactive Debugger | M7 |
-| SystemVerilog | RTL implementations (via Verilator) | M5 |
+| SystemVerilog | RTL implementations (via Verilator) | M8 |
 | C / Assembly | native guest kernel | M6 |
 | Schema / Protobuf | language-neutral contracts and trace format | once two or more languages share contracts |
 
@@ -258,7 +262,7 @@ SystemScopeLabs (GitHub org)
 └─ systemscope   this repository
    ├─ runtime/
    ├─ components/   rv32i/ · platform/ · storage/ · os/ …
-   ├─ verification/ (M4, planned; designed in docs/m4-design.md)
+   ├─ verification/ (M4; designed in docs/m4-design.md)
    ├─ visualizer/   (M7+)
    ├─ tests/        acceptance tests
    └─ docs/
@@ -282,14 +286,17 @@ The final goal is not reduced. Instead, we cut out the **first complete system s
 | **M1** | complete (`v0.2.0-m1`) | RV32I CPU + RAM, bare-metal ELF execution, UART output | All criteria in [m1-design.md §11](docs/m1-design.md#11-m1-exit-criteria): the 40 selected `riscv-tests` rv32ui tests (all but `fence_i` and `ma_data`) pass under the SystemScope test environment, Spike commit-log lockstep matches, ACT4 RV32I passes, on Linux and Windows, with the M0 golden digests unchanged |
 | **M2** | complete (`v0.3.0-m2`) | Interrupts, DMA, block storage (abstract SSD model) | A bare-metal program completes a block read via a DMA-completion interrupt, and the acceptance tests still pass. Detailed criteria: [m2-design.md §18](docs/m2-design.md#18-m2-exit-criteria) |
 | **M3** | complete (`v0.4.0-m3`) | Modeled OS Backend: process, syscalls, Sv32 virtual memory | The full path from executable to output runs through models, with page tables living in simulated RAM. Detailed criteria: [m3-design.md §18](docs/m3-design.md#18-m3-exit-criteria) |
-| **M4** | M4.0 design frozen; M4.1 implementation next | Verification & Debugging Engine: deterministically locate, characterize, minimize, and reproduce the first divergence between two executions or implementations; design in [docs/m4-design.md](docs/m4-design.md) | For controlled, deliberately injected architectural divergences in the M3 reference system, SystemScope finds the first divergent boundary of the profile's primary architectural stream, and it reports the structured state and trace differences there. It then writes a portable reproducer, which replays the same verification result byte for byte on Linux and Windows. The M0–M3 behavior and golden files stay unchanged. Detailed criteria and the acceptance workload: [m4-design.md §28](docs/m4-design.md#28-m4-exit-criteria) |
-| **M5** | planned | SystemVerilog CPU backend via Verilator | Matches the Rust CPU at every compared architectural boundary through the M4 differential engine, and passes the same suites. Any divergence is reported with the M4 locator and reproducer |
+| **M4** | complete ([exit audit](docs/releases/m4-exit-audit.md)) | Verification & Debugging Engine: deterministically locate, characterize, minimize, and reproduce the first divergence between two executions or implementations; design in [docs/m4-design.md](docs/m4-design.md) | For controlled, deliberately injected architectural divergences in the M3 reference system, SystemScope finds the first divergent boundary of the profile's primary architectural stream, and it reports the structured state and trace differences there. It then writes a portable reproducer, which replays the same verification result byte for byte on Linux and Windows. The M0–M3 behavior and golden files stay unchanged. Detailed criteria and the acceptance workload: [m4-design.md §28](docs/m4-design.md#28-m4-exit-criteria) |
+| **M5** | planned (M5.0 design not yet written) | Timing Exploration: deterministic timing-perturbation testing of the concurrent system (CPU, interrupts, DMA, storage, OS). Coverage of the `arch` stream, a wider reference workload with interrupts and DMA, and seeded campaigns that perturb device latencies and event timing, each run compared with the unperturbed one through the M4 engine | Frozen by the M5.0 design. The intent: every behavioral difference a campaign finds is located, minimized, and reproduced by M4, and timing that should not matter is shown not to |
 | **M6** | planned | Native Guest OS Backend: C/Assembly tiny kernel | Runs the M3 scenario with no changes to CPU code. Its architecturally observable behavior is compared with the Modeled OS backend through the M4 differential and reproducer infrastructure |
-| **M7** | planned | SystemScope Visualizer / Interactive Debugger: topology, timeline, state, step, step back, seek, breakpoint, filter | The M3 scenario can be explored with step and step back in the UI. The UI also shows M4 artifacts: first divergence, state and trace diffs, checkpoint positions, predecessor slices, and reproducers |
+| **M7** | planned | Time-travel queries and CLI first (last write, value history, seek across CPU, device, DMA, and OS state), then the SystemScope Visualizer / Interactive Debugger on them: topology, timeline, state, step, step back, seek, breakpoint, filter | The M3 scenario can be queried from the CLI and explored with step and step back in the UI. The UI also shows M4 artifacts: first divergence, state and trace diffs, checkpoint positions, predecessor slices, and reproducers |
+| **M8** | planned | SystemVerilog CPU backend via Verilator | Matches the Rust CPU at every compared architectural boundary through the M4 differential engine, and passes the same suites. Any divergence is reported with the M4 locator and reproducer |
 
 The M3 first-slice scenario: `Executable → Storage → RAM → Process → CPU → Memory → Syscall → Kernel → Output`.
 
 The Visualizer was first planned as M4. It moved to M7 so that the UI is built on top of the verification, reproduction, and backend-comparison data it will display. Its scope is unchanged.
+
+The SystemVerilog CPU backend was planned as M5 until the M4 exit audit. M4.7's source mutants showed the reference workload exercises a narrow part of RV32I and no interrupts, so Timing Exploration, which also widens that workload, comes first, and the RTL backend moved to M8 ([m4-design.md §30.8](docs/m4-design.md#308-m48)).
 
 After that, GPU and NIC plug into the same runtime.
 

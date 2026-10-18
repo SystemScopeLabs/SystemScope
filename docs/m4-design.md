@@ -1,6 +1,6 @@
 # M4 Design: Verification & Debugging Engine
 
-> Status: Frozen at M4.0, revised at M4.1 (§30) · Implementation status: M4.1 complete, M4.2 next · Parent: [plan.md](../plan.md) · Builds on: [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M4.0, revised at M4.1 (§30) · Implementation status: M4 complete, checked by the M4.8 exit audit ([releases/m4-exit-audit.md](releases/m4-exit-audit.md)) · Parent: [plan.md](../plan.md) · Builds on: [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the architecture contract for M4, frozen at M4.0. It fixes the decisions the M4 implementation steps (§27) depend on (§3), the controlled divergences and mutation classes (§25), the acceptance workload and exit criteria (§28), and the answers to the M4 design questions (§29). M4.1 implements the observation and comparison core (§27), and M4.2 is next. Changing a frozen decision needs an explicit, reviewed revision of this document. M0–M3 are frozen, and nothing here changes their semantics, schemas, contracts, fixtures, or golden files.
 
@@ -968,6 +968,8 @@ tests/verification/      corpus/ (canonical directory bundles, §18), expected/ 
 
 ## 24. Future Integration
 
+> Since M4.8, the roadmap numbers the SystemVerilog CPU backend M8, after M5 Timing Exploration ([plan.md §11](../plan.md#11-roadmap), §30.8). This section and the rest of this design keep their frozen numbering.
+
 ### 24.1 M5: SystemVerilog CPU Backend
 
 **M4 provides:**
@@ -1132,7 +1134,7 @@ Why the targets are safe:
 
 ## 27. Roadmap
 
-**Status:** M4.0 to M4.7 are complete. M4.8 is next. M4 as a whole is in progress.
+**Status:** M4.0 to M4.8 are complete. M4 is complete.
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
@@ -1144,7 +1146,7 @@ Why the targets are safe:
 | **M4.5** | complete | Minimization: prefix and replay window only; scenario reduction is deferred beyond M4 (§17.3) | code, tests |
 | **M4.6** | complete | Differential adapter generalization: the existing Spike suites run through the M4 surface with unchanged counts (rv32ui 40, generated 64, misaligned 9, M2 CSR 20, M3 privilege 13, M3 Sv32 11); a Spike-side controlled divergence is located | code, CI |
 | **M4.7** | complete | Verification campaign and regression corpus: corpus runner, promotion workflow, seeded generator campaigns, source-mutant and fault-injection validation; record the generated source-mutant list and count for every frozen §25.2 target, and document each equivalent mutant with its rationale | code, CI |
-| **M4.8** | next | Exit audit | docs |
+| **M4.8** | complete | Exit audit | docs |
 
 No step implements an RTL backend, a native kernel, or any UI.
 
@@ -1181,19 +1183,21 @@ M4.1's projection must reproduce exactly these per-kind counts. A mismatch is a 
 
 ### 28.2 Criteria
 
-- [ ] **Detection.** Each of the six controlled divergences of §25.1 is detected automatically, with `Diverged`, never `Agree` or an engine failure.
-- [ ] **First divergence.** For every case, the reported first divergence (primary stream, ordinal, kind) and its differing field equal the naive oracle's and the selector-derived expectation of §25.1.
-- [ ] **Agreement.** The unmodified `reference` scenario compared with itself gives `Agree`, with 2,200 compared primary observations.
-- [ ] **Structured diff.** The state and trace diff at the divergence is deterministic: two runs produce byte-identical canonical reports.
-- [ ] **Reproducer.** Every case yields a canonical directory bundle that rebuilds each side independently and whose replay, under its canonical replay configuration, produces a byte-identical `result.bin`. Every corrupted variant of it is refused (§25.3).
-- [ ] **Minimization.** For SP-1 to CB-2, the minimized bundle's origin on each side is that side's latest checkpoint covering at most the divergence's primary ordinal minus the report window, and it replays the same result.
-- [ ] **Cross-OS.** For SP-1 to CB-2 and the agreement case, verification results and bundles are byte-identical on Linux and Windows in CI (§28.1).
-- [ ] **Corpus.** `tests/verification/corpus/` holds at least one `Diverged` entry (SP-2) and one `Agree` entry (the agreement case), promoted by review, and CI replays every entry.
-- [ ] **Capabilities.** The locator is exercised on a snapshot-capable pair (SystemScope ↔ SystemScope) and a snapshot-incapable pair (SystemScope ↔ Spike). Both return the oracle's answer.
-- [ ] **Spike through M4.** The existing Spike differential suites run through the M4 comparison surface: 157 comparisons, each `Agree`, with the counts of §28.1.
-- [ ] **No regression.** The M0–M3 golden files, schemas, fixtures, and contracts pin are byte-identical, and every M0–M3 CI job still passes.
-- [ ] **Observation invariance.** M4 observation does not change any SystemScope execution: the digests are identical with and without the M4 adapters.
-- [ ] **Mutation.** Every engine mutation class of §25.2 has at least one mutant (observer perturbation where testable), and every mutant is killed. For every source mutation class and target of §25.2, every generated mutant is detected, or listed as equivalent with its reason, as §25.2 defines.
+Checked by the M4.8 exit audit, [releases/m4-exit-audit.md](releases/m4-exit-audit.md) §14.
+
+- [x] **Detection.** Each of the six controlled divergences of §25.1 is detected automatically, with `Diverged`, never `Agree` or an engine failure.
+- [x] **First divergence.** For every case, the reported first divergence (primary stream, ordinal, kind) and its differing field equal the naive oracle's and the selector-derived expectation of §25.1.
+- [x] **Agreement.** The unmodified `reference` scenario compared with itself gives `Agree`, with 2,200 compared primary observations.
+- [x] **Structured diff.** The state and trace diff at the divergence is deterministic: two runs produce byte-identical canonical reports.
+- [x] **Reproducer.** Every case yields a canonical directory bundle that rebuilds each side independently and whose replay, under its canonical replay configuration, produces a byte-identical `result.bin`. Every corrupted variant of it is refused (§25.3).
+- [x] **Minimization.** For SP-1 to CB-2, the minimized bundle's origin on each side is that side's latest checkpoint covering at most the divergence's primary ordinal minus the report window, and it replays the same result.
+- [x] **Cross-OS.** For SP-1 to CB-2 and the agreement case, verification results and bundles are byte-identical on Linux and Windows in CI (§28.1).
+- [x] **Corpus.** `tests/verification/corpus/` holds at least one `Diverged` entry (SP-2) and one `Agree` entry (the agreement case), promoted by review, and CI replays every entry.
+- [x] **Capabilities.** The locator is exercised on a snapshot-capable pair (SystemScope ↔ SystemScope) and a snapshot-incapable pair (SystemScope ↔ Spike). Both return the oracle's answer.
+- [x] **Spike through M4.** The existing Spike differential suites run through the M4 comparison surface: 157 comparisons, each `Agree`, with the counts of §28.1.
+- [x] **No regression.** The M0–M3 golden files, schemas, fixtures, and contracts pin are byte-identical, and every M0–M3 CI job still passes.
+- [x] **Observation invariance.** M4 observation does not change any SystemScope execution: the digests are identical with and without the M4 adapters.
+- [x] **Mutation.** Every engine mutation class of §25.2 has at least one mutant (observer perturbation where testable), and every mutant is killed. For every source mutation class and target of §25.2, every generated mutant is detected, or listed as equivalent with its reason, as §25.2 defines.
 
 ---
 
@@ -1411,3 +1415,12 @@ The equivalents, by reason:
 **Fault injection.** The 32 fixed seeds, run in every CI test run, each located by checkpoint search, a checkpoint every 133 boundaries, and by the naive oracle, with equal primary results: 13 diverge, each at or after its fault's boundary, and 19 agree, the fault masked. None stops a side. The pinned findings are a test; the nightly workflow injects its seed as `M4_FAULT_SEED`.
 
 **Spike campaign.** `cargo xtask spike campaign`, run by the Linux `spike` CI job: on the pinned Spike `19609434`, the 64 programs of seeds 64 to 127 agree through the M4 stream compare, 22,429 observations compared. A divergence is minimized, SystemScope with a checkpoint after every boundary, written to `target/spike-logs/campaign/<program>.repro`, replayed, and fails the job; a test checks that path on a doctored Spike stream. The nightly `spike random` seed stays as before.
+
+### 30.8 M4.8
+
+M4.8 audited M4 against §28.2: [releases/m4-exit-audit.md](releases/m4-exit-audit.md), 13 of 13 criteria pass. It changed one source line and the roadmap.
+
+| Section | Revision | Why |
+|---|---|---|
+| §30.3 | `scan` trims the trace ring with one `drain` instead of a loop; same records kept | The loop guard (`>` to `==`) was M4.3's one surviving mutant that is not equivalent. A rerun of `scan`'s mutants: 35 generated, 30 caught, 2 unviable, 3 missed, exactly the equivalents §30.3 lists |
+| §2, §6–§9, §24, §26, §29 | The SystemVerilog CPU backend these sections call M5 is now M8. M5 is Timing Exploration: coverage of the `arch` stream, a wider reference workload with interrupts and DMA, and seeded timing-perturbation campaigns through this engine. M6 stays the native kernel; M7 starts with time-travel queries and a CLI before the UI | M4.7's source mutants showed `m3-reference` exercises a narrow part of RV32I and no interrupts, so an RTL comparison on it would say little. The text stays frozen; the note at §24 points here |
