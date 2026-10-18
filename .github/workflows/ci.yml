@@ -128,11 +128,11 @@ jobs:
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m1_a8
       - name: M1 golden verify
         run: cargo xtask m1-golden verify
-      # docs/m2-design.md §13: block_irq.elf on m2-reference. Every checkpoint, no
-      # sampling, is restored into a fresh platform and run to the end; both operating
-      # systems check the same committed golden file and portable snapshot.
-      - name: M2.9 snapshot/restore (every event, stress points, watchdog, portable snapshot, rejections)
-        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m2_snapshot
+      # docs/m2-design.md §13: block_irq.elf on m2-reference; both operating systems
+      # check the same committed golden file and portable snapshot. The every-event
+      # resume is the m2-every-event job, which runs beside this one.
+      - name: M2.9 snapshot/restore (stress points, watchdog, portable snapshot, rejections)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m2_snapshot -E 'not test(=every_event_resumes_to_the_same_end)'
       - name: M2.9 observation invariance (O0-O5)
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m2_observation
       - name: M2.9 golden reproduction (in process, separate processes, drift)
@@ -302,6 +302,39 @@ jobs:
           path: systemscope/target/m3-foreign
       - name: Check the ${{ matrix.from }} result and restore its snapshot
         run: cargo xtask m3-golden check target/m3-foreign
+
+  # docs/m2-design.md §13: every checkpoint of block_irq.elf on m2-reference, no
+  # sampling, restored into a fresh platform and run to the end, on both operating
+  # systems. Split from the test job, where it was a fifth of the run, so the two run
+  # side by side.
+  m2-every-event:
+    name: M2 every-event resume (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
+      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: M2.9 every-event resume
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m2_snapshot -E 'test(=every_event_resumes_to_the_same_end)'
 
   # docs/m3-design.md §9.2, §17.4: every checkpoint of the M3 reference scenario, no
   # sampling, restored into a freshly built platform and run to the end, split into
