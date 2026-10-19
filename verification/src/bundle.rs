@@ -539,6 +539,16 @@ fn obs_path(r: Role) -> String {
     format!("{}.obs", role(r))
 }
 
+fn perturbation_path(r: Role) -> String {
+    format!("{}/perturbation.bin", role(r))
+}
+
+/// The perturbation a reproducer's `role` side was built with (`docs/m5-design.md` §18),
+/// or `None` for an unperturbed side. A replay builds that side with it.
+pub fn perturbation(bundle: &Bundle, r: Role) -> Option<&[u8]> {
+    bundle.entries.get(&perturbation_path(r)).map(Vec::as_slice)
+}
+
 /// Verifies `inputs[1]` against `inputs[0]` from `origins` as [`from_origins`] does, and
 /// bundles the material and the result (§16). Only an `Agree`, `Diverged`, or
 /// `AuxiliaryDivergence` result is a reproducer; an engine failure is returned, and an
@@ -579,6 +589,9 @@ pub(crate) fn bundled(
         }
         if inputs[i] != InputVariant::None {
             entries.insert(input_path(ROLES[i]), inputs[i].to_bytes());
+        }
+        if let Some(p) = sides[i].perturbation {
+            entries.insert(perturbation_path(ROLES[i]), p.to_vec());
         }
         entries_of.push(SideEntry {
             role: ROLES[i],
@@ -717,7 +730,10 @@ fn material(bundle: &Bundle, case: Case<'_>) -> Result<(Manifest, Material), Eng
     }
     let primary = &plan.profile.primary.stream;
     let mut wanted = vec![RESULT.to_owned()];
-    for s in &m.sides {
+    for (s, side) in m.sides.iter().zip(&sides) {
+        if side.perturbation.is_some() {
+            wanted.push(perturbation_path(s.role));
+        }
         if s.origin.is_some() {
             wanted.push(checkpoint_path(s.role));
         }
@@ -758,6 +774,9 @@ fn material(bundle: &Bundle, case: Case<'_>) -> Result<(Manifest, Material), Eng
             return Err(corrupt(format!(
                 "the {r} replay configuration is not the case's"
             )));
+        }
+        if perturbation(bundle, s.role) != sides[i].perturbation {
+            return Err(corrupt(format!("the {r} perturbation is not the case's")));
         }
         if let Some(bytes) = bundle.entries.get(&input_path(s.role)) {
             inputs[i] = InputVariant::from_bytes(bytes)

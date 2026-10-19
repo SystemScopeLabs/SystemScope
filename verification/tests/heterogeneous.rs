@@ -38,10 +38,12 @@ fn sides() -> [Builder<'static>; 2] {
         Builder {
             make: Make::Other(&post_run),
             config: config(),
+            perturbation: None,
         },
         Builder {
             make: Make::Runtime(&backend),
             config: config(),
+            perturbation: None,
         },
     ]
 }
@@ -135,6 +137,7 @@ fn a_recorded_side_must_reach_the_origin_with_its_prefix() {
         Builder {
             make: Make::Other(&|| Box::new(PostRun(backend_with(true, Some(3))))),
             config: config(),
+            perturbation: None,
         },
         sides()[1],
     ];
@@ -205,6 +208,7 @@ fn only_a_runtime_restores_a_bundled_checkpoint() {
         Builder {
             make: Make::Other(&|| Box::new(backend())),
             config: config(),
+            perturbation: None,
         },
     ];
     assert!(matches!(

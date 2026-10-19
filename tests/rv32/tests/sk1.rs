@@ -122,10 +122,12 @@ fn the_minimized_sk1_reproducer_starts_systemscope_at_its_window() {
             systemscope_verify::report::Builder {
                 make: systemscope_verify::report::Make::Other(&spike),
                 config: Suite::Rv32ui.spike_config(),
+                perturbation: None,
             },
             systemscope_verify::report::Builder {
                 make: systemscope_verify::report::Make::Runtime(&ours),
                 config: config(),
+                perturbation: None,
             },
         ];
         let case = Case {

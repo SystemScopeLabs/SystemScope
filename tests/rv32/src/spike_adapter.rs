@@ -699,10 +699,12 @@ impl SpikeCase {
             Builder {
                 make: Make::Other(&spike),
                 config: Suite::Rv32ui.spike_config(),
+                perturbation: None,
             },
             Builder {
                 make: Make::Runtime(&ours),
                 config: config(),
+                perturbation: None,
             },
         ])
     }

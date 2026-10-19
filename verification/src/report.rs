@@ -42,6 +42,10 @@ pub struct Builder<'a> {
     pub make: Make<'a>,
     /// The canonical replay configuration.
     pub config: BackendRunConfig,
+    /// The canonical encoding of the perturbation the backend is built with
+    /// (`docs/m5-design.md` §18), or `None` for an unperturbed side. A reproducer holds it
+    /// as the side's `perturbation.bin`.
+    pub perturbation: Option<&'a [u8]>,
 }
 
 impl<'a> Builder<'a> {
@@ -51,6 +55,7 @@ impl<'a> Builder<'a> {
         [Builder {
             make: Make::Runtime(make),
             config,
+            perturbation: None,
         }; 2]
     }
 

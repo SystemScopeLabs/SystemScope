@@ -351,10 +351,12 @@ pub fn shifted_sides() -> [Builder<'static>; 2] {
         Builder {
             make: Make::Runtime(&backend),
             config: config(),
+            perturbation: None,
         },
         Builder {
             make: Make::Runtime(&shifted_backend),
             config: config(),
+            perturbation: None,
         },
     ]
 }

@@ -7,8 +7,8 @@ use common::*;
 use systemscope_verify::backend::Backend;
 
 use systemscope_verify::bundle::{
-    Bundle, Case, MANIFEST, Manifest, RESULT, ReplayError, read_dir, replay, validate, write,
-    write_dir,
+    Bundle, Case, MANIFEST, Manifest, RESULT, ReplayError, perturbation, read_dir, replay,
+    validate, write, write_dir,
 };
 use systemscope_verify::case::{BackendRunConfig, InputVariant, Scenario};
 use systemscope_verify::checkpoint::Checkpoint;
@@ -465,4 +465,54 @@ fn a_larger_local_budget_changes_nothing() {
         result(1_000_000).to_bytes(),
         result(config().budget).to_bytes()
     );
+}
+
+#[test]
+fn a_side_perturbation_is_held_and_checked() {
+    let inputs = diverging();
+    let perturbed = |p: Option<&'static [u8]>| {
+        let mut sides = Builder::same(&backend, config());
+        sides[1].perturbation = p;
+        sides
+    };
+    let write_with = |p| {
+        write(
+            &the_plan(),
+            &scenario(),
+            perturbed(p),
+            inputs.clone(),
+            [None, None],
+        )
+    };
+    let replay_with = |b: &Bundle, p| {
+        let plan = the_plan();
+        let scenario = scenario();
+        replay(
+            b,
+            Case {
+                plan: &plan,
+                scenario: &scenario,
+                sides: perturbed(p),
+            },
+        )
+    };
+    let b = write_with(Some(b"\x01\x02")).unwrap();
+    assert_eq!(b.entries["actual/perturbation.bin"], b"\x01\x02");
+    assert!(!b.entries.contains_key("expected/perturbation.bin"));
+    assert_eq!(perturbation(&b, Role::Actual), Some(&b"\x01\x02"[..]));
+    assert_eq!(perturbation(&b, Role::Expected), None);
+    let r = replay_with(&b, Some(b"\x01\x02")).unwrap();
+    assert_eq!(r.to_bytes(), b.entries[RESULT]);
+    // A replay with another perturbation, or none, is refused.
+    for other in [Some(&b"\x01\x03"[..]), None] {
+        assert!(matches!(
+            replay_with(&b, other),
+            Err(ReplayError::Corrupt(EngineError::CorruptReproducer(_)))
+        ));
+    }
+    // A bundle without the entry is the unperturbed side, as every M4 bundle is.
+    let plain = write_with(None).unwrap();
+    assert_eq!(perturbation(&plain, Role::Actual), None);
+    assert!(replayed(&plain).is_ok());
+    assert!(replay_with(&plain, Some(b"\x01")).is_err());
 }
