@@ -25,22 +25,32 @@
 //!   is restored into a freshly built platform and run to the end, and must replay the
 //!   uninterrupted run's events without reissuing anything and end in its state. Uses
 //!   every available core; a release build is much faster.
+//! - `m5-golden bless | verify | emit <dir> | check <dir>`: the same for the M5 disk on
+//!   `m5-reference`, with `tests/golden/m5-reference.json` and
+//!   `tests/golden/m5-reference.mid.snap`, the runtime snapshot with both readers
+//!   blocked, which `verify` and `check` resume to the golden end.
+//! - `m5-golden every-event [<from> <to> | shard <i> <n>]`: `docs/m5-design.md` §19's
+//!   resume from every event of `m5-reference`, linear instead of M3's quadratic sweep:
+//!   each checkpoint is restored into a freshly built platform, must snapshot back to
+//!   itself, then dispatch the uninterrupted run's next event and reach its next
+//!   checkpoint byte for byte. Uses every available core; a release build is much faster.
 //! - `rv32-fixtures build`: Linux only, with the pinned toolchain on `PATH`. Rebuilds the
 //!   40 `rv32ui` fixtures from the pinned `riscv-tests` with `tests/rv32/build-fixtures.sh`
 //!   (the only step that uses the network), `hello.elf` with
 //!   `tests/rv32/hello/build-hello.sh`, and `block_irq.elf` with
-//!   `tests/rv32/block_irq/build-block-irq.sh`, and the M3 firmware and user programs
-//!   with `tests/rv32/m3/build-m3.sh`, then runs the `manifest` step. Tests never
+//!   `tests/rv32/block_irq/build-block-irq.sh`, the M3 firmware and user programs
+//!   with `tests/rv32/m3/build-m3.sh`, and the M5 ones with `tests/rv32/m5/build-m5.sh`,
+//!   then runs the `manifest` step. Tests never
 //!   rebuild fixtures; the commit that changes them must say why in its body.
 //! - `rv32-fixtures manifest [<cache-dir>]`: the second half of `build`, for a build run
 //!   by hand. Checks the upstream checkout in the cache (default `target/rv32-fixtures`),
 //!   rewrites `tests/rv32/fixtures/manifest.json` and `tests/rv32/hello/manifest.json`,
 //!   writes the `block_irq.elf` disk fixture `tests/rv32/block_irq/disk.img` and rewrites
-//!   `tests/rv32/block_irq/manifest.json`, runs the `m3-reference manifest` step, and
-//!   verifies.
+//!   `tests/rv32/block_irq/manifest.json`, runs the `m3-reference manifest` and
+//!   `m5-reference manifest` steps, and verifies.
 //! - `rv32-fixtures verify`: checks the committed fixtures, `hello.elf`, `block_irq.elf`,
-//!   and its disk fixture, and the M3 fixtures against their manifests, with no network
-//!   and no compiler.
+//!   and its disk fixture, and the M3 and M5 fixtures against their manifests, with no
+//!   network and no compiler.
 //! - `m3-reference manifest`: the M3 half of `rv32-fixtures manifest`, which needs no
 //!   compiler and no upstream checkout: writes the M3 disks `tests/rv32/m3/disk.img` and
 //!   `disk-nofault.img` from the committed user ELFs, runs each on `m3-reference` and,
@@ -50,6 +60,9 @@
 //!   prints the output and the metrics.
 //! - `m3-reference verify`: `rv32-fixtures verify` for the M3 fixtures, then `run`, then
 //!   a second run of each disk, whose digests must equal the first's.
+//! - `m5-reference manifest | run | verify`: the same for the M5 disk
+//!   `tests/rv32/m5/disk.img` on `m5-reference` (`docs/m5-design.md` §12), judged by
+//!   `systemscope_rv32::m5::judge`.
 //! - `corpus replay`: replays every entry of the regression corpus
 //!   `tests/verification/corpus` (`docs/m4-design.md` §18) byte for byte.
 //! - `corpus check <dir>`: whether the bundle in `<dir>` can be a corpus entry. It never
@@ -124,12 +137,14 @@ use systemscope_acceptance::m3::golden as m3g;
 use systemscope_acceptance::m3::{
     Fixture as M3Fixture, checkpoint as m3c, expected as m4x, mutants as m4m, repro as m4r,
 };
+use systemscope_acceptance::m5 as m5g;
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
 };
 use systemscope_rv32::hello::{self, HELLO_DIR, HELLO_MANIFEST, HELLO_SCRIPT, HelloManifest};
 use systemscope_rv32::m3::{self, M3_DIR, M3_MANIFEST, M3_SCRIPT, M3Manifest, Metrics, Scenario};
+use systemscope_rv32::m5::{self, M5_DIR, M5_MANIFEST, M5_SCRIPT, M5Manifest};
 use systemscope_rv32::manifest::{Manifest, verify};
 use systemscope_rv32::progen::{self, FIXED_SEEDS, MISALIGNED};
 use systemscope_rv32::runner::Start;
@@ -148,6 +163,9 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m3-golden bless | verify | emit <dir> | check <dir> \
                      | every-event [<from> <to> | shard <i> <n>]\n       \
                      cargo xtask m3-reference manifest | run | verify\n       \
+                     cargo xtask m5-golden bless | verify | emit <dir> | check <dir> \
+                     | every-event [<from> <to> | shard <i> <n>]\n       \
+                     cargo xtask m5-reference manifest | run | verify\n       \
                      cargo xtask corpus replay | check <dir>\n       \
                      cargo xtask m4-mutants run <target> <out> | summarize <out>\n       \
                      cargo xtask m4-expected bless | verify\n       \
@@ -162,6 +180,8 @@ const M1_RESULT: &str = "m1-reference.json";
 const M2_RESULT: &str = "m2-reference.json";
 /// The golden file's name in an `m3-golden emit` directory.
 const M3_RESULT: &str = "m3-reference.json";
+/// The golden file's name in an `m5-golden emit` directory.
+const M5_RESULT: &str = "m5-reference.json";
 /// Where `rv32-fixtures build` fetches and builds, relative to the workspace root.
 const RV32_CACHE: &str = "target/rv32-fixtures";
 /// Where `act4 build` keeps the pinned stack, relative to the workspace root.
@@ -208,6 +228,28 @@ fn main() -> ExitCode {
         ["m3-reference", "manifest"] => m3_manifest(),
         ["m3-reference", "run"] => m3_run(),
         ["m3-reference", "verify"] => m3_verify(),
+        ["m5-reference", "manifest"] => m5_manifest(),
+        ["m5-reference", "run"] => m5_run(),
+        ["m5-reference", "verify"] => m5_verify(),
+        ["m5-golden", "bless"] => m5_bless(),
+        ["m5-golden", "verify"] => m5_golden_verify(),
+        ["m5-golden", "emit", dir] => m5_emit(Path::new(dir)),
+        ["m5-golden", "check", dir] => m5_check(Path::new(dir)),
+        ["m5-golden", "every-event"] => m5_every_event(Checkpoints::All),
+        ["m5-golden", "every-event", "shard", i, n] => match (i.parse(), n.parse()) {
+            (Ok(i), Ok(n)) if i < n => m5_every_event(Checkpoints::Shard(i, n)),
+            _ => {
+                eprintln!("{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
+        ["m5-golden", "every-event", from, to] => match (from.parse(), to.parse()) {
+            (Ok(from), Ok(to)) => m5_every_event(Checkpoints::Range(from..to)),
+            _ => {
+                eprintln!("{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
         ["corpus", "replay"] => corpus_replay(),
         ["corpus", "check", dir] => corpus_check(Path::new(dir)),
         ["m4-mutants", "run", target, out] => m4_mutants_run(target, out),
@@ -650,6 +692,123 @@ fn m3_check(dir: &Path) -> ExitCode {
     )
 }
 
+fn m5_bless() -> ExitCode {
+    let root = root();
+    let json_path = root.join(m5g::GOLDEN_PATH);
+    let snap_path = root.join(m5g::MID_SNAPSHOT_PATH);
+    let old_json = fs::read_to_string(&json_path).ok();
+    let old_snap = fs::read(&snap_path).ok();
+
+    eprintln!("running the M5 disk on m5-reference...");
+    let (new, snapshot) = match m5g::Golden::generate(&root) {
+        Ok(generated) => generated,
+        Err(e) => {
+            eprintln!("not blessed: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let json = new.render();
+    let mut changes = m5g::describe_changes(old_json.as_deref(), &new);
+    if old_json.is_some() && changes.is_empty() && old_json.as_deref() != Some(json.as_str()) {
+        changes.push(format!("~ {}: formatting only", m5g::GOLDEN_PATH));
+    }
+    if old_snap.as_deref() != Some(snapshot.as_slice()) && changes.is_empty() {
+        changes.push(format!(
+            "~ {}: bytes differ from the recorded hash",
+            m5g::MID_SNAPSHOT_PATH
+        ));
+    }
+    if changes.is_empty() {
+        println!("M5 golden files are up to date");
+        return ExitCode::SUCCESS;
+    }
+    if let Err(e) = fs::create_dir_all(json_path.parent().expect("has a parent"))
+        .and_then(|()| fs::write(&json_path, json))
+        .and_then(|()| fs::write(&snap_path, &snapshot))
+    {
+        eprintln!("cannot write the M5 golden files: {e}");
+        return ExitCode::FAILURE;
+    }
+    println!("M5 golden files changed:");
+    for change in &changes {
+        println!("  {change}");
+    }
+    println!("wrote {} and {}", m5g::GOLDEN_PATH, m5g::MID_SNAPSHOT_PATH);
+    println!(
+        "Commit them on their own and explain in the commit body why the digests changed \
+         (see CONTRIBUTING.md)."
+    );
+    ExitCode::SUCCESS
+}
+
+/// The committed M5 golden file and mid snapshot.
+fn m5_committed(root: &Path) -> Result<(String, Vec<u8>), String> {
+    let json = fs::read_to_string(root.join(m5g::GOLDEN_PATH))
+        .map_err(|e| format!("{}: {e}", m5g::GOLDEN_PATH))?;
+    let snap = fs::read(root.join(m5g::MID_SNAPSHOT_PATH))
+        .map_err(|e| format!("{}: {e}", m5g::MID_SNAPSHOT_PATH))?;
+    Ok((json, snap))
+}
+
+fn m5_golden_verify() -> ExitCode {
+    let root = root();
+    if !m5_verify_fixtures(&root) {
+        return ExitCode::FAILURE;
+    }
+    let result = m5_committed(&root)
+        .map_err(|e| vec![e])
+        .and_then(|(json, snap)| m5g::Golden::verify(&root, &json, &snap));
+    report(
+        result,
+        &format!(
+            "the M5 disk matches {}, and {} resumes to its end",
+            m5g::GOLDEN_PATH,
+            m5g::MID_SNAPSHOT_PATH
+        ),
+    )
+}
+
+fn m5_emit(dir: &Path) -> ExitCode {
+    let (golden, snapshot) = match m5g::Golden::generate(&root()) {
+        Ok(generated) => generated,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = fs::create_dir_all(dir)
+        .and_then(|()| fs::write(dir.join(M5_RESULT), golden.render()))
+        .and_then(|()| fs::write(dir.join(m5g::MID_FILE), &snapshot))
+    {
+        eprintln!("cannot write into {}: {e}", dir.display());
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "wrote this machine's M5 result: {M5_RESULT} and {} ({} bytes, BLAKE3 {})",
+        m5g::MID_FILE,
+        snapshot.len(),
+        golden.get("mid_blake3").unwrap_or_default()
+    );
+    ExitCode::SUCCESS
+}
+
+fn m5_check(dir: &Path) -> ExitCode {
+    let root = root();
+    let result = m5_committed(&root)
+        .map_err(|e| vec![e])
+        .and_then(|(json, snap)| {
+            let read_error = |e: std::io::Error| vec![format!("{}: {e}", dir.display())];
+            let foreign_json = fs::read_to_string(dir.join(M5_RESULT)).map_err(read_error)?;
+            let foreign_snap = fs::read(dir.join(m5g::MID_FILE)).map_err(read_error)?;
+            m5g::Golden::check_foreign(&root, (&json, &snap), (&foreign_json, &foreign_snap))
+        });
+    report(
+        result,
+        "the foreign M5 result equals the committed golden files and this machine's run, \
+         and its snapshot resumes here to the golden end",
+    )
+}
+
 fn m4_fixture() -> Result<M3Fixture, Vec<String>> {
     M3Fixture::read(&root(), Scenario::Reference).map_err(|e| vec![e])
 }
@@ -867,6 +1026,40 @@ fn m3_every_event(checkpoints: Checkpoints) -> ExitCode {
     )
 }
 
+fn m5_every_event(checkpoints: Checkpoints) -> ExitCode {
+    let result = m5g::Fixture::read(&root()).and_then(|fixture| {
+        let events = m5g::reference_events(&fixture)?;
+        let all = 0..events + 1;
+        let range = match checkpoints {
+            Checkpoints::All => all,
+            Checkpoints::Range(range) => range.start..range.end.min(events + 1),
+            Checkpoints::Shard(i, n) => m5g::split(all, n).get(i).cloned().unwrap_or(0..0),
+        };
+        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        eprintln!(
+            "resuming checkpoints {}..{} of {events} events on {threads} threads...",
+            range.start, range.end
+        );
+        let sweep = m5g::every_event(&fixture, range, threads);
+        println!(
+            "{} checkpoints resumed, {} failed",
+            sweep.checked,
+            sweep.failures.len()
+        );
+        if sweep.checked == 0 {
+            return Err("no checkpoint in range".to_owned());
+        }
+        match sweep.failures.first() {
+            None => Ok(()),
+            Some((k, e)) => Err(format!("first failure at checkpoint {k}: {e}")),
+        }
+    });
+    report(
+        result.map_err(|e| vec![e]),
+        "every checkpoint restores, snapshots back to itself, and reaches the next one",
+    )
+}
+
 fn rv32_build() -> ExitCode {
     if !cfg!(target_os = "linux") {
         eprintln!("rv32-fixtures build runs on Linux only (docs/m1-design.md §10.6)");
@@ -880,6 +1073,7 @@ fn rv32_build() -> ExitCode {
         (HELLO_SCRIPT, vec![RV32_CACHE, HELLO_DIR]),
         (BLOCK_IRQ_SCRIPT, vec![RV32_CACHE, BLOCK_IRQ_DIR]),
         (M3_SCRIPT, vec![RV32_CACHE, M3_DIR]),
+        (M5_SCRIPT, vec![RV32_CACHE, M5_DIR]),
     ] {
         match Command::new("bash")
             .arg(script)
@@ -960,7 +1154,7 @@ fn rv32_manifest(cache: &Path) -> ExitCode {
     } else {
         println!("wrote {BLOCK_IRQ_MANIFEST}");
     }
-    if let Err(e) = m3_write(&root) {
+    if let Err(e) = m3_write(&root).and_then(|()| m5_write(&root)) {
         eprintln!("{e}");
         return ExitCode::FAILURE;
     }
@@ -1030,6 +1224,7 @@ fn rv32_verify() -> ExitCode {
         }
     }
     ok &= m3_verify_fixtures(&root);
+    ok &= m5_verify_fixtures(&root);
     if ok {
         ExitCode::SUCCESS
     } else {
@@ -1147,6 +1342,112 @@ fn m3_verify() -> ExitCode {
         return ExitCode::FAILURE;
     }
     println!("two runs of each M3 disk are identical");
+    ExitCode::SUCCESS
+}
+
+/// Writes the M5 disk, its expected trace, and the M5 manifest under `root`.
+fn m5_write(root: &Path) -> Result<(), String> {
+    m5::write_disk(root).map_err(|e| format!("cannot write the M5 disk: {e}"))?;
+    eprintln!("running the M5 disk on m5-reference...");
+    m5::write_trace(root).map_err(|e| format!("cannot write the M5 trace: {e}"))?;
+    let old = M5Manifest::read(root).ok();
+    let new =
+        M5Manifest::generate(root).map_err(|e| format!("cannot generate the M5 manifest: {e}"))?;
+    fs::write(root.join(M5_MANIFEST), new.render())
+        .map_err(|e| format!("cannot write {M5_MANIFEST}: {e}"))?;
+    if old.as_ref() == Some(&new) {
+        println!("{M5_MANIFEST} is up to date");
+    } else {
+        println!("wrote {M5_MANIFEST}");
+    }
+    Ok(())
+}
+
+fn m5_verify_fixtures(root: &Path) -> bool {
+    match m5::verify(root) {
+        Ok(manifest) => {
+            println!(
+                "{}, {} user programs, {}, and {} match {M5_MANIFEST}",
+                manifest.firmware.file,
+                manifest.programs.len(),
+                manifest.disk.file,
+                manifest.trace.file
+            );
+            true
+        }
+        Err(errors) => {
+            eprintln!("the M5 fixtures do not match {M5_MANIFEST}:");
+            for e in errors {
+                eprintln!("  {e}");
+            }
+            false
+        }
+    }
+}
+
+fn m5_manifest() -> ExitCode {
+    let root = root();
+    if let Err(e) = m5_write(&root) {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
+    if m5_verify_fixtures(&root) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Runs and judges the M5 disk; returns its metrics, or `None` if it failed.
+fn m5_runs(root: &Path) -> Option<m5::Metrics> {
+    let (firmware, disk, expected) = match m5::read_fixture(root) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("m5-reference: {e}");
+            return None;
+        }
+    };
+    let run = m5::run(&firmware, &disk, Start::Init { traced: true }, Vec::new());
+    let metrics = m5::Metrics::of(&run);
+    match m5::judge(&run, &expected) {
+        Ok(()) => {
+            println!(
+                "m5-reference: PASS, output {:?}\n  {}",
+                run.output
+                    .as_ref()
+                    .map(|o| String::from_utf8_lossy(o).into_owned())
+                    .unwrap_or_default(),
+                metrics.line()
+            );
+            Some(metrics)
+        }
+        Err(e) => {
+            eprintln!("m5-reference: FAIL: {e}\n  {}", metrics.line());
+            None
+        }
+    }
+}
+
+fn m5_run() -> ExitCode {
+    match m5_runs(&root()) {
+        Some(_) => ExitCode::SUCCESS,
+        None => ExitCode::FAILURE,
+    }
+}
+
+fn m5_verify() -> ExitCode {
+    let root = root();
+    if !m5_verify_fixtures(&root) {
+        return ExitCode::FAILURE;
+    }
+    let (Some(first), Some(second)) = (m5_runs(&root), m5_runs(&root)) else {
+        return ExitCode::FAILURE;
+    };
+    if first != second {
+        eprintln!("two runs of the M5 disk differ:\n  {first:?}\n  {second:?}");
+        return ExitCode::FAILURE;
+    }
+    println!("two runs of the M5 disk are identical");
     ExitCode::SUCCESS
 }
 

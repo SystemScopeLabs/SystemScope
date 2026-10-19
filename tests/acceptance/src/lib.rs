@@ -11,6 +11,8 @@
 //!   platform validation, checkpoint and resume from every event of the M3 scenario on
 //!   `m3-reference`, observation invariance, and the golden files that
 //!   `cargo xtask m3-golden bless` writes.
+//! - [`m5`] (`docs/m5-design.md` §12): the golden files that `cargo xtask m5-golden
+//!   bless` writes and the linear every-event resume of `m5-reference`.
 //!
 //! Every check returns a `Result` instead of asserting, so the tests can also feed it
 //! doctored inputs and prove that it notices them.
@@ -23,6 +25,7 @@ pub mod layout;
 pub mod m1;
 pub mod m2;
 pub mod m3;
+pub mod m5;
 pub mod observation;
 pub mod process;
 
