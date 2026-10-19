@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.4b complete, M5.5 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.5 complete, M5.6 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -117,6 +117,8 @@ A perturbation `P` has three independent parts. A run's perturbation is fixed at
 - Every override must keep the component's own invariants (§20). For example, a target's response latency must stay a whole number of cycles of its domain.
 - It is the coarsest mechanism and the cheapest to explain. A campaign samples overrides from declared ranges per path.
 
+M5.5 gave A a second part (§27.7): on an M5 kernel, `Perturbation::slice` replaces the platform's `SLICE`. The kernel's Arm stage writes the timer's `COMPARE` from its slice, so an override of the timer's reset value never reaches a run. A changed slice moves every later preemption, where a link latency moves only the messages on that link.
+
 ### 7.2 B: Per-Message Jitter
 
 `P.jitter = { seed, max, scope }` adds `j` extra cycles to a message's delivery, with `0 ≤ j ≤ max`. Here `j` is drawn from a stream derived from `seed`, the link, and the message's per-link ordinal. So it does not depend on the order in which links are used.
@@ -148,6 +150,8 @@ A perturbation `P` has three independent parts. A run's perturbation is fixed at
 - The empty perturbation is the identity. A run built with it is the same run, byte for byte, as one built without M5 (§19).
 - `P` has a canonical encoding (`perturbation.bin`) and a BLAKE3 identity. A nonempty `P` is part of the session identity, so a snapshot from a perturbed run never restores into an unperturbed session.
 - A perturbed run's trace records the perturbation once, in its header. A message's jitter is recorded with its delivery, so evidence can show where timing changed.
+
+`perturbation.bin` holds, in order, the latency overrides, the slice (tag 0, or tag 1 and a `u32`), and the jitter. The empty perturbation encodes as 10 bytes.
 
 M5.4b decided O6 and O7 (§27.6): the trace records neither. The perturbation is `perturbation.bin`, kept by the evidence and the reproducer, and its identity names the run's build. A message's jitter is recomputed from the trace instead. `Jitter::draw` is a pure function of the seed, the directed link, and the message's ordinal on it, and a link delivers in the order it sent. So the `n`-th dispatch record that delivers on a directed link is its message `n`, and its jitter is the draw for `n`.
 
@@ -194,7 +198,7 @@ The `M5` profile is `M3` plus delegated S-level external interrupts. Every other
 | `0x8` | `STATUS`: bit 0 `EXPIRED`; writing 1 clears it and drops the line | RW1C |
 
 - It expires by scheduling one wake for `COMPARE` cycles ahead. It does not tick every cycle, so an idle timer costs nothing.
-- Its expiry is a self-wake, which is never jittered. Its line to the interrupt controller is an `irq.v0` link, so jitter (B) on that link and tie order (C) move it. So does A on its `COMPARE` default. Perturbing those is how a campaign moves preemption points.
+- Its expiry is a self-wake, which is never jittered. Its line to the interrupt controller is an `irq.v0` link, so jitter (B) on that link and tie order (C) move it. So does A, through the kernel's slice (§7.1): Arm overwrites the `COMPARE` default. Perturbing those is how a campaign moves preemption points.
 - **Why not CLINT (D4).** `mtime`/`mtimecmp` interrupt in M, and only M-mode software or Sstc can rearm them. The modeled kernel works only through memory (m3-design §6.1), so it would need firmware help on every tick, and that firmware path brings back the forwarding window of §9. A memory-mapped timer on the interrupt controller needs no CPU change beyond §9, and the M6 native kernel can use the same device.
 
 ## 11. Kernel Additions
@@ -285,13 +289,23 @@ Each planted race is an input variant (m4-design §6) that patches one program o
 
 | Variant | Bug | Expected under perturbation |
 |---|---|---|
-| R1 `counter-unlocked` | the increment is outside the critical section | final counter < 2N for some perturbation |
-| R2 `peterson-order` | `flag` and `turn` written in the wrong order | mutual exclusion lost for some perturbation |
-| R3 `handoff-flag-first` | the flag is set before the data | a stale value is received for some perturbation |
-| R4 `reader-early` | the buffer is read before `blk_read` returns, through a second mapping | a stale block for some perturbation |
-| R5 `kernel-wake-lost` | a kernel variant that checks `Blocked` before acknowledging the interrupt | a reader never wakes; the run halts at `max_instructions` |
+| R1 `counter-unlocked` | `counter` releases the lock before its increment instead of after it | final counter < 2N for some perturbation |
+| R2 `peterson-turn` | `counter`'s wait loop tests `turn` inverted (`beq` for `bne`) | mutual exclusion lost for some perturbation |
+| R3 `mailbox-data-first` | `spinner` loads the mailbox data before it tests the flag | a stale value is received for some perturbation |
+| R5 `kernel-wake-lost` | a kernel variant whose idle trap goes back to idle when the timer expired, even if the same trap completed a block request | a reader never wakes; the run stops at the instruction limit |
 
-R5 is a kernel input variant, which is a configuration flag of the modeled kernel used only by tests. It shows that M5 finds OS-level races, not only user-level ones.
+R1–R3 each patch one contiguous range of whole instructions, of the same length, inside one program's extent on the disk. The patch is found by instruction pattern, so a rebuilt program that no longer holds the pattern fails the variant instead of patching the wrong bytes. R5 is a kernel input variant, `M5Config::defect`, a configuration flag of the modeled kernel used only by tests. It shows that M5 finds OS-level races, not only user-level ones. Its encoding is appended to `M5Config`'s only when it is set, so every golden is unchanged.
+
+M5.5 measured each race over the first seeds of each mechanism (§14):
+
+| Variant | A | B |
+|---|---|---|
+| R1 | 24/24 | 15/24 |
+| R2 | 14/24 | 12/24 |
+| R3 | 21/24 | 15/24 |
+| R5 | 11/12 | 7/8 |
+
+M5.5 dropped R4 and redefined R2, R3, and R5 (§27.7).
 
 ## 13. Timing-Invariant Profiles (D7)
 
@@ -333,6 +347,11 @@ Both profiles use M4's stop rules and report window.
   - On the unpatched scenario, every seed must `Agree`. A divergence is a bug in the model or the workload, and it fails CI with a reproducer.
   - On each planted race, the campaign must find at least one diverging seed. The first such seed, with its reproducer and minimal perturbation, is pinned in a test.
 - **Budget.** The CI campaign is sized to finish within the existing test budget. Larger campaigns run nightly. Seed counts are frozen in M5.6.
+
+M5.5 implemented the campaigns (`tests/acceptance/src/m5/campaign.rs`, `races.rs`):
+- A seed's perturbation is drawn from a BLAKE3 stream of the mechanism and the seed. A sets every link in the default jitter scope (§7.2) to `1..=16` cycles and the slice to `SLICE/2..=SLICE·5/4` (4000–10000). B is jitter on that scope with its maximum drawn from 2, 4, 8, or 16.
+- A shorter slice, or A on every link, spends the 3 million event budget on preemptions and bus traffic before the stop rule.
+- The CI list is seeds 0–7 for the unpatched scenario under each mechanism. For each race and mechanism, a test pins the first diverging seed and checks that every earlier seed agrees: R1 0 and 0, R2 1 and 0, R3 0 and 1, R5 1 and 0 (A and B).
 
 ## 15. Schedule Evidence
 
@@ -378,7 +397,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 
 - An invalid perturbation fails construction: an unknown path, an override that breaks a component invariant, or a jitter scope naming a non-link. It never fails mid-run.
 - A perturbed run that faults the session (a component fault, a protocol violation) is a finding, reported as M4's `BackendFailed` with the perturbation. A model must tolerate every delivery time its protocol allows. A failure there is a model bug that M5 has found. No M0–M4 test has ever delivered a response later than its configured latency. M5.1 therefore runs every existing reference scenario under B before any new workload exists.
-- Planted race R5 halts at `max_instructions`. M4 reports that as the stop rule's outcome, a divergence in `end`.
+- Planted race R5 never shuts down. Its runs set the CPU's instruction limit to `DEFECT_MAX_INSTRUCTIONS` (60,000; the workload retires about 45,000), which stops them within the event budget. The `outcome` projection treats the limit as a stop rule: it releases every held process and ends with `limit { instret }`, so the divergence is in a process's observations or in the missing `final` words.
 
 ## 21. Validation
 
@@ -424,8 +443,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.3b** | complete | `m5-reference` platform, firmware and trampoline, the six correct workload programs (§12.2), golden; `SLICE` frozen | code, fixtures |
 | **M5.4a** | complete | `outcome` and `schedule` streams, the `m5.*` profiles, projection state in M4 checkpoints, a perturbed `m5-reference` backend | code, tests |
 | **M5.4b** | complete | Schedule evidence: the first differing decision, the per-process trace, the perturbation records (O6, O7) | code, tests |
-| **M5.5** | next | Planted races R1–R5; campaigns over A and B | code, CI |
-| **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
+| **M5.5** | complete | Planted races R1–R3 and R5; campaigns over A and B | code, CI |
+| **M5.6** | next | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
 | **M5.8** | planned | Exit audit | docs |
 
@@ -433,7 +452,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 
 - [ ] **Identity.** With the empty perturbation, every M0–M4 golden, expected stream, corpus entry, and reproducer is byte-identical, and every M0–M4 CI job passes.
 - [ ] **Determinism.** Every perturbed run, campaign result, minimized perturbation, and reproducer is byte-identical on Linux and Windows, and restores at every event.
-- [ ] **Detection.** Each planted race R1–R5 is found by the CI campaign, by at least one mechanism, and located by M4 at a divergence in `outcome`.
+- [ ] **Detection.** Each planted race R1–R3 and R5 is found by the CI campaign, by at least one mechanism, and located by M4 at a divergence in `outcome`.
 - [ ] **No false positives.** The unpatched `m5-reference` agrees on `m5.outcome` for every CI seed of every mechanism.
 - [ ] **Evidence.** Each finding reports the first differing schedule decision and the perturbation elements before it.
 - [ ] **Minimization.** Each finding's perturbation is minimized to a 1-minimal set that reproduces the same failure signature, and its reproducer replays byte for byte.
@@ -529,3 +548,18 @@ M5.4b implemented the schedule evidence and a state decoder for `m5-reference` (
 | §7.4 | A perturbed trace does not record the perturbation or a message's jitter. The perturbation is `perturbation.bin`; the jitter is recomputed from the dispatch records | a header field would move the contracts pin. A runtime record would be a second record origin that every M4 trace check treats as a dispatch. The draw is pure and links are FIFO, so the trace already determines it |
 | §15 | The shared-page reads come from the trace's `rv32.commit` loads by `paddr`, not from slice links | the loads carry the physical address; a slice link would add nothing for one page |
 | §15 | The evidence lives in the M5 acceptance module, outside M4's `VerificationResult` and bundle format | the bundle's schema stays as M4 froze it (O4) until M5.6 decides what the reproducer carries |
+
+### 27.7 M5.5
+
+M5.5 planted R1–R3 and R5 in `m5-reference` and ran campaigns over A and B (`tests/acceptance/src/m5/races.rs`, `campaign.rs`, `tests/acceptance/tests/m5_campaign.rs`). The unpatched scenario agrees under both mechanisms for every CI seed, and each race diverges for a pinned seed of each. Every M0–M4 and M5 golden passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| §7.1 | A also replaces the kernel's slice, and its link overrides cover the default jitter scope only | Arm overwrites the timer's `COMPARE` reset value (§27.3), so the slice is the timer-phase knob that reaches a run. Link latencies alone move few preemptions, and overrides on the CPU's and RAM's links spend the event budget |
+| §7.4 | `perturbation.bin` carries the slice | the slice is part of the perturbation's identity |
+| §12.3 | R4 `reader-early` is dropped | the kernel blocks the reader before it sends the block command, and the buffer has no second user mapping, so the bug has no natural form. A planted check loop takes about 6000 instructions against the 3000-cycle disk gap, so it failed identically under every perturbation |
+| §12.3 | R2 is `peterson-turn`, the wait loop's inverted `turn` test, not a wrong `flag`/`turn` write order | swapping the two stores leaves a window of one instruction, which no seed hit |
+| §12.3 | R3 is `mailbox-data-first`, a consumer-side bug, not `handoff-flag-first` | the producer's flag-first window is one instruction too. A consumer that clears the flag first races only while the mailbox is full, eight times a run, and no seed hit it. Loading the data before the flag opens a window on every poll |
+| §12.3 | R5 drops a wake in an idle trap where the timer expired, instead of checking `Blocked` before the acknowledgement | the kernel runs atomically and blocks a reader before its command, so the original check cannot race |
+| §13.1, §20 | The instruction limit is a stop rule of the `outcome` projection, with a fifth observation kind `limit { instret }`, and R5 runs at `DEFECT_MAX_INSTRUCTIONS` | the CPU's default limit (10 million) is far past the event budget, and an `rv32.halt` was a projection error |
+| §14 | Seeds 0–7 per mechanism for the unpatched scenario; one pinned first divergence per race and mechanism | about 2–4 seconds per run keeps the CI step within the test budget |
