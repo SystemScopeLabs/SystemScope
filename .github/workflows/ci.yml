@@ -117,6 +117,16 @@ jobs:
         run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --test m5_reference
       - name: M5.3b m5-reference verify (fixtures, the judge, two identical runs)
         run: cargo xtask m5-reference verify
+      # docs/m4-design.md §8.2, §9.2, §25.1: the arch projection, the Spike adapter, and
+      # SK-1, from the committed Spike logs; and docs/m5-design.md §7, §21: perturbations
+      # A and B on m2- and m3-reference, and M5.2's Spike logs. None of them runs Spike,
+      # which only the spike job builds.
+      - name: M4 arch projection, Spike adapter, and SK-1 (committed Spike logs)
+        run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --test projection --test spike_adapter --test sk1
+      - name: M5.1 perturbations A and B on m2- and m3-reference
+        run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --test perturbation
+      - name: M5.2 SEI differential from the committed Spike logs
+        run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --test spike_m5
       # docs/m1-design.md §10.4: the committed ACT4 corpus, generated with Sail on Linux by
       # the act4 job, run from the same bytes on both operating systems.
       - name: ACT4 corpus matches its manifest (pins, config, audit)
@@ -159,6 +169,21 @@ jobs:
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m3_golden
       - name: M3 golden verify
         run: cargo xtask m3-golden verify
+      # docs/m4-design.md §25: the verification engine on m3-reference. The agreement
+      # case, SP-1 to SP-3, CB-1 and CB-2, every locator strategy, the reports, and the
+      # reproducer bundles; the committed expected streams; the fixed-seed fault campaign
+      # (its nightly seed is in nightly.yml); the source-mutant listings and summary
+      # (cargo-mutants itself is source-mutants.yml); and the regression corpus (§18).
+      - name: M4.1-M4.5 verification on m3-reference (cases, locators, reports, bundles)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m4_verify
+      - name: M4 expected streams reproduce
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m4_expected
+      - name: M4 fault campaign (fixed seeds)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m4_faults
+      - name: M4 source-mutant validation (targets, equivalents, summary)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m4_mutants
+      - name: M4 regression corpus replays byte for byte
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m4_corpus
       # docs/m5-design.md §12: the M5 golden files; the mid snapshot resumes to the end,
       # and the checkpoints around it and the end resume exactly. The resume of every
       # checkpoint is the m5-every-event job.
