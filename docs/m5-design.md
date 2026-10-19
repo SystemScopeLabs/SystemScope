@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.4a complete, M5.4b next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.4b complete, M5.5 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -148,6 +148,8 @@ A perturbation `P` has three independent parts. A run's perturbation is fixed at
 - The empty perturbation is the identity. A run built with it is the same run, byte for byte, as one built without M5 (§19).
 - `P` has a canonical encoding (`perturbation.bin`) and a BLAKE3 identity. A nonempty `P` is part of the session identity, so a snapshot from a perturbed run never restores into an unperturbed session.
 - A perturbed run's trace records the perturbation once, in its header. A message's jitter is recorded with its delivery, so evidence can show where timing changed.
+
+M5.4b decided O6 and O7 (§27.6): the trace records neither. The perturbation is `perturbation.bin`, kept by the evidence and the reproducer, and its identity names the run's build. A message's jitter is recomputed from the trace instead. `Jitter::draw` is a pure function of the seed, the directed link, and the message's ordinal on it, and a link delivers in the order it sent. So the `n`-th dispatch record that delivers on a directed link is its message `n`, and its jitter is the draw for `n`.
 
 ## 8. What Can Change, and What Must Not
 
@@ -340,6 +342,11 @@ A divergence in `outcome` is a symptom. The cause is an interleaving. M5 adds ev
 - **First differing decision.** The engine compares the two sides' schedule streams and reports the first decision that differs. It reports both sides' records around it and the perturbation elements that applied up to that event (§7.4).
 - **Per-process trace.** For the diverging process, M4's state diff at the outcome divergence is shown, together with the shared-page words it read since its last dispatch. Those words come from the trace's memory records, through M4's slice links.
 
+M5.4b implemented the evidence (`tests/acceptance/src/m5/evidence.rs`):
+- The first differing decision is the first `schedule` boundary whose kind or fields differ, or the first one a side lacks. Its ordinal is the engine's `schedule` divergence. Each side gives the decisions around it, the event that made it, its perturbation's identity and overrides, and every jittered delivery up to that event.
+- The shared-page reads are the `rv32.commit` loads whose `paddr` is in the shared page, from the last `os.process.switch` to the process until it is switched away or the event is reached.
+- A state decoder reads RAM's snapshot state without restoring the platform. It gives the shared page's `FINAL_WORDS` words, labeled decoder, and the BLAKE3 of every RAM page, labeled derived. So M4's state diff shows which words and pages differ.
+
 ## 16. Perturbation Minimization (D9)
 
 M4 minimizes the prefix and the replay window (m4-design §17). M5 also minimizes the perturbation:
@@ -403,8 +410,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | O3 | Idle when every process is blocked | **Decided (D10):** a spin loop in the trampoline. `WFI` would need a new CPU wait state and snapshot field, and Spike can be compared on it only with an interrupt already pending |
 | O4 | Reproducer bundle version bump | only if the manifest schema changes |
 | O5 | Seed counts and ranges per mechanism | frozen in M5.6 from measured cost |
-| O6 | How a trace records the perturbation (§7.4). `TraceHeader` is a contracts type, so a header field would move the contracts pin, which M5 keeps | at M5.4, with the evidence that reads it. Candidates: a runtime-origin record at the start of a perturbed trace, or the bundle's `perturbation.bin` alone (§27.1) |
-| O7 | How a message's jitter is recorded with its delivery (§7.4) | at M5.4, with O6 |
+| O6 | How a trace records the perturbation (§7.4). `TraceHeader` is a contracts type, so a header field would move the contracts pin, which M5 keeps | **Decided (M5.4b):** `perturbation.bin` alone, with the evidence and the reproducer. The trace is unchanged (§27.6) |
+| O7 | How a message's jitter is recorded with its delivery (§7.4) | **Decided (M5.4b):** not recorded. It is recomputed from the dispatch records by ordinal per directed link (§7.4) |
 
 ## 25. Roadmap
 
@@ -416,8 +423,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.3a** | complete | Kernel: interrupt traps, preemption, `blk_read`, idle, shared page, the shutdown's dump | code, tests |
 | **M5.3b** | complete | `m5-reference` platform, firmware and trampoline, the six correct workload programs (§12.2), golden; `SLICE` frozen | code, fixtures |
 | **M5.4a** | complete | `outcome` and `schedule` streams, the `m5.*` profiles, projection state in M4 checkpoints, a perturbed `m5-reference` backend | code, tests |
-| **M5.4b** | next | Schedule evidence: the first differing decision, the per-process trace, the perturbation records (O6, O7) | code, tests |
-| **M5.5** | planned | Planted races R1–R5; campaigns over A and B | code, CI |
+| **M5.4b** | complete | Schedule evidence: the first differing decision, the per-process trace, the perturbation records (O6, O7) | code, tests |
+| **M5.5** | next | Planted races R1–R5; campaigns over A and B | code, CI |
 | **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
 | **M5.8** | planned | Exit audit | docs |
@@ -512,3 +519,13 @@ M5.4a implemented the `outcome` and `schedule` streams, the `os` stream with the
 | §15 | The schedule stream carries no event-index field | the engine's event map already records it |
 | §7.2 | The default jitter scope on `m5-reference` is the device, DMA, and interrupt links (`JITTER_LINKS`) | jitter on every link, RAM and the kernel's included, stretches the run past the event budget |
 | §7.1 | The media's latency on `m5-reference`, 3000 cycles, is above the override limit `MAX_CYCLES` (64), so A cannot override it yet | M5.5 sets the ranges its campaigns sample |
+
+### 27.6 M5.4b
+
+M5.4b implemented the schedule evidence and a state decoder for `m5-reference` (`tests/acceptance/src/m5/evidence.rs`), and gave `Perturbation` its canonical encoding and identity (`tests/rv32/src/perturb.rs`). The jitter recomputed from the dispatch records counts as many messages per directed link as the runtime's own lanes. The evidence's first differing decision is the engine's `schedule` divergence. The decoder reads the shutdown's words from RAM. Every M0–M4 golden, bundle, and corpus entry passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| §7.4 | A perturbed trace does not record the perturbation or a message's jitter. The perturbation is `perturbation.bin`; the jitter is recomputed from the dispatch records | a header field would move the contracts pin. A runtime record would be a second record origin that every M4 trace check treats as a dispatch. The draw is pure and links are FIFO, so the trace already determines it |
+| §15 | The shared-page reads come from the trace's `rv32.commit` loads by `paddr`, not from slice links | the loads carry the physical address; a slice link would add nothing for one page |
+| §15 | The evidence lives in the M5 acceptance module, outside M4's `VerificationResult` and bundle format | the bundle's schema stays as M4 froze it (O4) until M5.6 decides what the reproducer carries |
