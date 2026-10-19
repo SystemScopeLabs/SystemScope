@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.2 complete, M5.3 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.3b complete, M5.4 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -245,7 +245,16 @@ It is `m3-reference` with:
 - a firmware stub that also sets `mideleg.SEI` and `sie.SEIE`;
 - its own disk image.
 
-The physical layout and seed are otherwise those of m3-design §11. The exact layout is frozen at M5.3.
+The physical layout and seed are otherwise those of m3-design §11. M5.3b froze the rest (`tests/rv32/src/m5ref.rs`):
+
+| Item | Value |
+|---|---|
+| `soc.timer` | `0x1000_4000`, size `0xC`, `COMPARE` at reset = `SLICE` |
+| `SLICE` | 8000 CPU cycles |
+| Shared page | physical `0x8030_0000`, mapped at `SHARED_VA = 0xF000`; 3 final words: the counter, the mailbox's data, its flag |
+| `soc.disk` | 256 blocks, latency `Cycles { cpu, 3000 }` (`m3-reference`: 16) |
+| Data blocks | LBA 200 and 201, byte `i` of block `lba` = `(7i + lba) mod 256` |
+| The M-level `irq` | tied low (`soc.irq_low`); the controller drives `sirq` |
 
 ### 12.2 Workload
 
@@ -259,6 +268,14 @@ The physical layout and seed are otherwise those of m3-design §11. The exact la
 | 5 | `handoff` | A one-slot mailbox with a flag, sent to `spinner` through the shared page | the sequence it receives |
 
 Each program prints only its own result. Its output is compared per process (§13).
+
+M5.3b froze the workload (`tests/rv32/m5`):
+- `counter`: `N = 150`, with 8 loop iterations of private work after each increment. A waiting instance withdraws (`flag[me] = 0`), calls `sched_yield`, and enters again. It prints nothing.
+- `reader`: entry 2 reads block 200 once, entry 3 reads block 201 twice. Each checks every byte, clears its buffer between reads, and prints `reader` and a digest of every byte read.
+- `spinner`: 500 xorshift32 steps with no syscall, polling the mailbox after each step; then it yields between polls until all 8 values have arrived, and prints `spinner`, a digest of the values, and the final xorshift state.
+- `handoff`: sends 1 to 8, yielding while the mailbox is full. It prints nothing.
+
+The UART output is 58 bytes, under the UART view's 64. The unperturbed run takes 1,332,749 events and 45,346 instructions. Its judge (`systemscope_rv32::m5::judge`) also requires the coverage the workload is for: at least 5 preemptions of each `counter`, two readers blocked at once, an interrupt taken from the idle spin, and an interrupt trap with both sources pending.
 
 ### 12.3 Planted Races (D8)
 
@@ -390,8 +407,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.1** | complete | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
 | **M5.2** | complete | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
 | **M5.3a** | complete | Kernel: interrupt traps, preemption, `blk_read`, idle, shared page, the shutdown's dump | code, tests |
-| **M5.3b** | next | `m5-reference` platform, firmware and trampoline, the six correct workload programs (§12.2), golden; `SLICE` frozen | code, fixtures |
-| **M5.4** | planned | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
+| **M5.3b** | complete | `m5-reference` platform, firmware and trampoline, the six correct workload programs (§12.2), golden; `SLICE` frozen | code, fixtures |
+| **M5.4** | next | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
 | **M5.5** | planned | Planted races R1–R5; campaigns over A and B | code, CI |
 | **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
@@ -459,3 +476,18 @@ M5.3a implemented the kernel additions (`components/os/src/interrupts.rs`) and d
 | §11.4 | The shared page is a fixed physical page of the configuration, outside the frame pool, the trap frame, and staging, mapped `U R W` at `SHARED_VA` (a nonzero page below `USER_BASE`, outside the megapage slots). It is zeroed by Arm and never freed | a fixed page needs no allocation order and keeps the dump's address in the configuration |
 | §11.4 | Every M5 shutdown runs **Disarm** (timer `CONTROL = 0`), then **Final** (each declared shared word traced as `os.final { word, value }`, at most 1024, none when 0), then M3's Shutdown | disarming first lets a finished run's event queue drain |
 | §11.5 | An M5 kernel writes snapshot schema 2: the M5 configuration after the process source, `Blocked` as process state tag 4, and after the frame bitmap the idle flag and the request FIFO. Restore rejects an M5 snapshot into an M3 kernel and the reverse, a different `M5Config`, requests that are not exactly the `Blocked` processes, and an idle flag without requests or with a running process | schema 1 stays M3's, so M3 snapshots are unchanged |
+
+### 27.4 M5.3b
+
+M5.3b implemented `m5-reference` (`tests/rv32/src/m5ref.rs`), its firmware and workload (`tests/rv32/m5`), the judge (`tests/rv32/src/m5.rs`), the golden files `tests/golden/m5-reference.json` and `m5-reference.mid.snap` (`tests/acceptance/src/m5.rs`), and `cargo xtask m5-reference` and `m5-golden`. Every M0–M4 golden, expected stream, and reproducer passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| §12.1 | `SLICE` is 8000 cycles. A preemption costs about 1200 cycles of trap, kernel, and trampoline, and a U-mode instruction about 18 under Sv32, so a shorter slice is mostly overhead | 8000 is the value that gives each `counter` at least 5 preemptions inside the run's length budget |
+| §12.1 | The media's latency is 3000 cycles, not `m3-reference`'s 16 | at 16 a read finishes before another process can run, so two reads never queue and the kernel never idles. Boot polls the controller, so a longer latency multiplies boot's events |
+| §12.1 | The CPU's M-level `irq` is linked to a tied-low source | every declared port must be linked, and only `sirq` is driven |
+| §12.2 | A waiting `counter` withdraws its flag and yields instead of spinning | the other instance holds the lock only when preempted inside it, so spinning burns the rest of the slice, and yielding with the flag set hands the lock back one increment per yield |
+| §12.2 | `spinner` polls the mailbox and, once its computation ends, yields until all values arrive | it is `handoff`'s receiver; its computation has no syscall, as frozen |
+| §12.2 | The second reader reads twice | its last read comes when every other process is done or blocked, so the kernel idles, and a timer expiry lands while a read is in flight, so a trap finds both sources pending |
+| §19 | `m5-reference`'s every-event check is linear: each checkpoint is restored into a freshly built platform, must snapshot back to itself, then dispatch the uninterrupted run's next event and reach its next checkpoint byte for byte (`cargo xtask m5-golden every-event`, 8 CI shards). The mid snapshot, with both readers blocked, is resumed to the end | M2's and M3's resume to the end is quadratic in the run's length, which is 1.3 million events. By induction the linear check implies it |
+| §19 | The M5 golden snapshot is a runtime snapshot, checked by its BLAKE3 and by resuming it to the golden end on each operating system. It has no independent portable decoder | M3's decoder covers `m3-reference`'s components; the M5 snapshot's portability is shown by cross-OS resume |
