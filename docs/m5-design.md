@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.6a complete, M5.6b next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.6b complete, M5.6c next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -385,6 +385,12 @@ M4 minimizes the prefix and the replay window (m4-design §17). M5 also minimize
 
 Every candidate is a full deterministic run. It is accepted only if its `outcome` divergence keeps M4's failure signature (m4-design §17.2). The result is a perturbation from which no single element can be removed. It is usually a handful of delayed messages, which explains the race on its own. The minimized perturbation is written into the reproducer.
 
+M5.6b implemented A and B (`tests/acceptance/src/m5/minimize.rs`); C has no finding to minimize (§7.3):
+- A removes link overrides and the slice while the failure stays, then bisects each remaining value between its frozen one (1 cycle for a link, `SLICE` for the slice) and its value, and repeats both until neither changes anything.
+- B's list is a *listed jitter*: `Jitter::only`, an ascending list of `(link, dir, ordinal)` messages. A listed message is delayed by its usual draw, and any other by 0. The candidates are the messages the whole jitter delays, recomputed from a traced run as §7.4 does. The shortest prefix of them in delivery order that keeps the failure is found by bisection, and delta debugging reduces it to a 1-minimal list.
+- The cost grows with the number of delays a failure needs: one delay took under a minute, five took three minutes, R2's 42 took 30 minutes, and R3 under B had not finished after eight hours, so it is not minimized. Each race keeps at least one minimized finding.
+- The search costs tens to thousands of full runs per finding, so it runs offline (`m5_minimize`, an ignored test). Its results are pinned, and CI checks for each that it fails as the campaign's whole perturbation does, that removing any one part (an override, the slice, or a listed message) loses the failure, and that its reproducer replays byte for byte (`m5_reproducer`).
+
 ## 17. Coverage
 
 Coverage measures what a workload and a campaign exercised. It is a report, never a gate.
@@ -396,13 +402,15 @@ C is ineffective on `m5-reference` (§7.3): a test checks that every stream of e
 
 ## 18. Reproducer
 
-M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It is not a new `InputVariant`: a planted race's side carries a media patch and a perturbation at once, and `InputVariant` holds one input. The manifest lists it with its identity, and replay builds each side with it. An M4 bundle without it means the empty perturbation, so every M4 bundle and corpus entry stays valid unchanged. The bundle format version is bumped only if the manifest schema needs it. **(open)**
+M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It is not a new `InputVariant`: a planted race's side carries a media patch and a perturbation at once, and `InputVariant` holds one input. The manifest lists it with its identity, and replay builds each side with it. An M4 bundle without it means the empty perturbation, so every M4 bundle and corpus entry stays valid unchanged. The bundle format version is bumped only if the manifest schema needs it.
+
+**Decided (M5.6b, O4): no bump.** The manifest's `entries` is a generic list of paths and hashes, so `{role}/perturbation.bin` needs no schema change. `Builder::perturbation` carries a side's canonical encoding: writing holds it, and replay refuses a case whose side perturbation differs from the bundle's, or a bundle that holds one the case does not. A listed jitter encodes as jitter tag 2: the setting, then the list.
 
 ## 19. Determinism and Compatibility
 
 - **Identity.** With the empty perturbation, every runtime path is the M0–M4 path. Every M0–M4 golden, expected stream, corpus entry, and reproducer is byte-identical, and CI keeps all their jobs.
 - **Cross-OS.** Perturbed runs, campaign results, minimized perturbations, and reproducers are byte-identical on Linux and Windows, as in M4.
-- **Snapshots.** A perturbed run restores at every event, with its jitter ordinals and tie state, like any other run. `m5-reference` gets the every-event resume check of M2 and M3.
+- **Snapshots.** A perturbed run restores at every event, with its jitter ordinals and tie state, like any other run. `m5-reference` gets the every-event resume check of M2 and M3. A session with a listed jitter writes snapshot format version 4: version 3's layout with the jitter's list after its setting (§27.9).
 - **Observation.** Observing a perturbed run does not change it (m4-design §28.2 **Observation invariance**).
 
 ## 20. Failure Model
@@ -439,7 +447,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | O1 | Tie-order mechanism | **Decided (D10):** a rank-major `sequence` (§7.3) |
 | O2 | `blk_read` syscall number | from the Linux-numbered range, chosen at M5.3 |
 | O3 | Idle when every process is blocked | **Decided (D10):** a spin loop in the trampoline. `WFI` would need a new CPU wait state and snapshot field, and Spike can be compared on it only with an interrupt already pending |
-| O4 | Reproducer bundle version bump | only if the manifest schema changes |
+| O4 | Reproducer bundle version bump | **Decided (M5.6b):** none. `perturbation.bin` is one more manifest entry (§18) |
 | O5 | Seed counts and ranges per mechanism | frozen in M5.6 from measured cost |
 | O6 | How a trace records the perturbation (§7.4). `TraceHeader` is a contracts type, so a header field would move the contracts pin, which M5 keeps | **Decided (M5.4b):** `perturbation.bin` alone, with the evidence and the reproducer. The trace is unchanged (§27.6) |
 | O7 | How a message's jitter is recorded with its delivery (§7.4) | **Decided (M5.4b):** not recorded. It is recomputed from the dispatch records by ordinal per directed link (§7.4) |
@@ -457,8 +465,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.4b** | complete | Schedule evidence: the first differing decision, the per-process trace, the perturbation records (O6, O7) | code, tests |
 | **M5.5** | complete | Planted races R1–R3 and R5; campaigns over A and B | code, CI |
 | **M5.6a** | complete | Tie order (C): rank-major sequences, snapshot version 3, the property tests, C on every reference platform and in the campaigns | code, tests |
-| **M5.6b** | next | Perturbation minimization (A and B) and `perturbation.bin` in reproducers | code, CI |
-| **M5.6c** | planned | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
+| **M5.6b** | complete | Perturbation minimization (A and B), the listed jitter, and `perturbation.bin` in reproducers | code, CI |
+| **M5.6c** | next | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
 | **M5.8** | planned | Exit audit | docs |
 
@@ -588,3 +596,25 @@ M5.6a implemented tie order, perturbation C (`runtime/src/ties.rs`, `runtime/src
 | §7.3, §19 | A tied session's snapshot is format version 3, carrying the jitter as an option and the tie seed | the tie seed is part of the session, like the jitter of version 2, and an untied session's layout stays as it was |
 | §16 | C's minimization is not built | C diverges for no subject (§7.3), so it has no finding to minimize |
 | §25 | M5.6 is split into M5.6a (C), M5.6b (minimization and reproducers), and M5.6c (coverage and the seed freeze) | each touches a different layer: the runtime's scheduler, M4's engine and bundle, and reports |
+
+### 27.9 M5.6b
+
+M5.6b implemented perturbation minimization for A and B (`tests/acceptance/src/m5/minimize.rs`), the listed jitter (`runtime/src/jitter.rs`), and `perturbation.bin` in reproducers (`verification/src/bundle.rs`). Every M0–M4 and M5 golden passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| §7.2, §16 | `Jitter::only` lists the messages a jitter delays; any other draws 0. Elaboration refuses a list that is not ascending or names a link outside the scope | B's minimization needs a jitter that delays a chosen set of messages by their usual draws |
+| §7.4, §19 | A listed jitter encodes as jitter tag 2 in `perturbation.bin`, and its session writes snapshot format version 4; unlisted sessions keep tag 1 and versions 1–3 | the list is part of the session; every earlier encoding stays byte-identical |
+| §16 | B bisects the delivery-order prefix of delayed messages before delta debugging | delays after the divergence cannot cause it, and plain delta debugging over every delayed message had not finished R2 or R3 after 45 minutes. The R1 and R5 results came from that plain search; they are checked like the others |
+| §16 | R3 under B is not minimized | its search had not finished after eight hours. Its race needs many delays at once, and a list of hundreds would not explain it better than R3's minimized A, one link override |
+| §16 | The search runs offline and its results are pinned; CI checks the failure, 1-minimality, and replay | each search costs tens to thousands of full runs |
+| §18, §24 | O4 decided: no bundle format bump | the manifest's entry list already holds any path |
+
+The minimized perturbations (`m5_reproducer`):
+
+| Race | A | B |
+|---|---|---|
+| R1 `counter-unlocked` | link 12 at 2 cycles, slice 8002 (seed 0) | 5 messages on link 3 (seed 0) |
+| R2 `peterson-turn` | link 4 at 4 and link 11 at 10 cycles, slice 5250 (seed 1) | 42 messages on links 3, 8, 11, and 12 (seed 0) |
+| R3 `mailbox-data-first` | link 11 at 15 cycles (seed 0) | not minimized |
+| R5 `kernel-wake-lost` | slice 7995 (seed 1) | 1 message, link 3 from its `b` end, ordinal 21 (seed 0) |
