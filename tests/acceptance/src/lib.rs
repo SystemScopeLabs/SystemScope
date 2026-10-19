@@ -11,8 +11,9 @@
 //!   platform validation, checkpoint and resume from every event of the M3 scenario on
 //!   `m3-reference`, observation invariance, and the golden files that
 //!   `cargo xtask m3-golden bless` writes.
-//! - [`m5`] (`docs/m5-design.md` §12): the golden files that `cargo xtask m5-golden
-//!   bless` writes and the linear every-event resume of `m5-reference`.
+//! - [`m5`] (`docs/m5-design.md` §12, §13, §15): the golden files that `cargo xtask
+//!   m5-golden bless` writes, the linear every-event resume of `m5-reference`, and its
+//!   `outcome` and `schedule` streams under the M4 engine.
 //!
 //! Every check returns a `Result` instead of asserting, so the tests can also feed it
 //! doctored inputs and prove that it notices them.

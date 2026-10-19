@@ -166,6 +166,11 @@ jobs:
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_golden
       - name: M5 golden verify
         run: cargo xtask m5-golden verify
+      # docs/m5-design.md §13, §15: the outcome and schedule streams under the M4 engine;
+      # self-agreement under m5.outcome and m5.lockstep, outcome agreement under jitter and
+      # a latency override, and resume from a checkpoint's projection state.
+      - name: M5.4a outcome and schedule streams (profiles, perturbations, projection state)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_verify
       - name: rv32ui fixtures, hello.elf, block_irq.elf, the M3 and M5 fixtures, and the ACT4 corpus unchanged
         shell: bash
         run: git diff --exit-code -- tests/rv32/fixtures tests/rv32/hello tests/rv32/block_irq tests/rv32/m3 tests/rv32/m5 tests/act4

@@ -1,5 +1,5 @@
 //! `m5-reference`'s golden files and its every-event resume (`docs/m5-design.md` §12,
-//! §19).
+//! §19), and in [`verify`] its streams under the M4 engine (§13, §15).
 //!
 //! - `tests/golden/m5-reference.json`: the firmware's and the disk's BLAKE3, the exact
 //!   UART output, the run's metrics and coverage, `StateDigest`, `ExecutionDigest`,
@@ -33,6 +33,8 @@ use systemscope_rv32::m5ref::{self, Config};
 use systemscope_rv32::runner::Start;
 
 use crate::hex;
+
+pub mod verify;
 
 /// The scenario's name in the golden file.
 pub const SCENARIO: &str = "m5-reference";
