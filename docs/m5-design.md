@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.1 complete, M5.2 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.2 complete, M5.3 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -388,8 +388,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 |---|---|---|---|
 | **M5.0** | complete | Design freeze (this document) | docs |
 | **M5.1** | complete | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
-| **M5.2** | next | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
-| **M5.3** | planned | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
+| **M5.2** | complete | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
+| **M5.3** | next | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
 | **M5.4** | planned | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
 | **M5.5** | planned | Workload programs and planted races R1–R5; campaigns over A and B | code, CI |
 | **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
@@ -422,3 +422,21 @@ M5.1 implemented A and B and their snapshot state. Every M0–M4 golden, expecte
 | §7.4 | The trace does not record the perturbation yet (O6, O7) | `TraceHeader` is a contracts type. M5.4 decides the record with the evidence that reads it |
 
 `m2ref::components`, the M2 tests' snapshot reader, reads version 2. The other hand-written snapshot readers (`tests/acceptance` layout and portable decoder, the OS test helpers) read only unperturbed snapshots and are unchanged. AT2's malformed-snapshot test now uses version 3 as the unknown version, and checks that a version 1 body labeled version 2 does not decode.
+
+### 27.2 M5.2
+
+M5.2 implemented the `M5` profile (`components/rv32i/src/sei.rs`) and `SimpleTimer` (`components/platform/src/timer.rs`), and the directed SEI programs (`tests/rv32/src/seigen.rs`). They agree with the pinned Spike, and every M3.2 privilege program agrees again under `M5`. Every M0–M4 golden, expected stream, and reproducer passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| §9 | `sie` and `sip` read and write only what `mideleg` delegates: `SEIE` and `SEIP` read 0 while SEI is not delegated, and a write of `sie` changes `mie.SEIE` only while it is | the privileged spec's masking rule. Without it, S could enable or see an interrupt that M keeps for itself |
+| §9 | `mip.SEIP` reads the OR of the M-writable bit and the `sirq` line. A CSR read-modify-write of `mip` (`csrrs`, `csrrc`) modifies the writable bit only, never the line | as in Spike and the privileged spec: otherwise a `csrrc` of another bit would latch the line's level into the writable bit |
+| §9 | An interrupt is sampled at every retirement boundary, so a CSR write or `MRET`/`SRET` that makes one eligible is followed by its entry, before the next instruction | as in M2 and Spike, which takes it at the same boundary |
+| §9 | The `M5` `rv32.interrupt` record is `epc, cause, handler, from, to`; the M2 record is unchanged. The M4 projection reads it as `pc = epc`, `cause`, `to` | `to` is what delegation decides, and Spike's log gives `epc` and `cause` |
+| §9 | The `sirq` port is `PortId(2)`. A platform without an S-level source links it to a test-only tied-low `irq.v0` source (`soc.sirq_low` in the rv32 runner) | every declared port must be linked |
+| §9 | CPU snapshot schema 4 is schema 3 followed by four bools: `mideleg.SEI`, `mie.SEIE`, the writable `mip.SEIP`, and the `sirq` level | the line's level is state the CPU sees between deliveries |
+| §10 | `COMPARE` is at least 1: a write of 0 gets an access fault and changes nothing, and `TimerConfig::compare_reset` is a `NonZeroU32`. A `COMPARE` write takes effect at the next arm; a `CONTROL` write that keeps `ENABLE` set does not re-arm | a zero-cycle expiry would wake in the same tick as the arming write. Not re-arming keeps the expiry tick a function of the arming write alone |
+| §10 | The self-wake's token is a generation counter that every arm and disarm advances; a stale wake is ignored | the runtime has no cancel. The generation is snapshot state (schema 1) |
+| §10 | The line is `EXPIRED`. A one-shot expiry clears `ENABLE`; a periodic one re-arms `COMPARE` cycles from the expiry. The timer emits `platform.timer.arm` {`cycles`, `generation`} and `platform.timer.expire` {`generation`, `periodic`} | the trace shows every preemption point a campaign moves |
+| §21 | The Spike profile is `spike-m5-sei` (`cargo xtask spike`, part M5 SEI). Spike logs `interrupt #9` with no `tval`. It logs a write of `mip` with `mvip` and with `MTIP` always set, and a write of `sie` with the `mie` it changes. The parser drops `mvip` and that `mie`, and masks `MTIP` | Spike's CLINT timer is always pending under `--priv`; SystemScope has no `MTIP` |
+| §21 | The directed programs write `mip` only with a `csrrs`/`csrrc` of `SEIP`, `mideleg` only with `SEIP` or 0, and never `sip` | Spike also delegates `SSIP` and `STIP`, which `M5` does not have |
