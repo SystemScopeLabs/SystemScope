@@ -82,43 +82,43 @@ struct Labels {
 /// Code from [`CODE_BASE`]. Every `li` is two words, so a layout never depends on the
 /// values loaded.
 #[derive(Default)]
-struct Asm(Vec<u32>);
+pub(crate) struct Asm(pub(crate) Vec<u32>);
 
 impl Asm {
-    fn pc(&self) -> u32 {
+    pub(crate) fn pc(&self) -> u32 {
         CODE_BASE + 4 * self.0.len() as u32
     }
 
-    fn push(&mut self, word: u32) -> &mut Asm {
+    pub(crate) fn push(&mut self, word: u32) -> &mut Asm {
         self.0.push(word);
         self
     }
 
-    fn li(&mut self, rd: u8, value: u32) -> &mut Asm {
+    pub(crate) fn li(&mut self, rd: u8, value: u32) -> &mut Asm {
         self.0.extend(li(rd, value));
         self
     }
 
-    fn csr(&mut self, funct3: u32, rd: u8, rs1: u8, csr: u16) -> &mut Asm {
+    pub(crate) fn csr(&mut self, funct3: u32, rd: u8, rs1: u8, csr: u16) -> &mut Asm {
         self.push(csr_word(funct3, rd, rs1, csr))
     }
 
     /// `csrr rd, csr`.
-    fn read(&mut self, rd: u8, csr: u16) -> &mut Asm {
+    pub(crate) fn read(&mut self, rd: u8, csr: u16) -> &mut Asm {
         self.csr(CSRRS, rd, 0, csr)
     }
 
     /// `csrw csr, rs1`.
-    fn write(&mut self, csr: u16, rs1: u8) -> &mut Asm {
+    pub(crate) fn write(&mut self, csr: u16, rs1: u8) -> &mut Asm {
         self.csr(CSRRW, 0, rs1, csr)
     }
 
     /// `li t0, value`, `csrrw a0, csr, t0`, `csrr a0, csr`: the old and the stored value.
-    fn store(&mut self, csr: u16, value: u32) -> &mut Asm {
+    pub(crate) fn store(&mut self, csr: u16, value: u32) -> &mut Asm {
         self.li(T0, value).csr(CSRRW, A0, T0, csr).read(A0, csr)
     }
 
-    fn addi(&mut self, rd: u8, rs1: u8, imm: i32) -> &mut Asm {
+    pub(crate) fn addi(&mut self, rd: u8, rs1: u8, imm: i32) -> &mut Asm {
         self.push(i(OP_IMM, 0, rd, rs1, imm))
     }
 
@@ -131,20 +131,20 @@ impl Asm {
     }
 
     /// `mstatus` = `mstatus`, `mepc` = the word after the `MRET`, then `MRET`.
-    fn mret_with(&mut self, mstatus: u32) -> &mut Asm {
+    pub(crate) fn mret_with(&mut self, mstatus: u32) -> &mut Asm {
         self.li(T0, mstatus).write(MSTATUS, T0);
         let target = self.pc() + 4 * (2 + 1 + 1);
         self.li(T1, target).write(MEPC, T1).push(MRET)
     }
 
     /// `sepc` = the word after the `SRET`, then `SRET`.
-    fn sret_to_next(&mut self) -> &mut Asm {
+    pub(crate) fn sret_to_next(&mut self) -> &mut Asm {
         let target = self.pc() + 4 * (2 + 1 + 1);
         self.li(T1, target).write(SEPC, T1).push(SRET)
     }
 
     /// The exception taken in M that ends the program: `word` at the current `pc`.
-    fn ending(&mut self, word: u32, cause: &'static str) -> ExpectedTrap {
+    pub(crate) fn ending(&mut self, word: u32, cause: &'static str) -> ExpectedTrap {
         let pc = self.pc();
         self.push(word);
         let tval = match word {

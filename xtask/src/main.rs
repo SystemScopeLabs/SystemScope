@@ -1278,6 +1278,16 @@ fn spike_diff(dir: &Path) -> ExitCode {
     println!(
         "M3 Sv32: every directed Sv32 program (4 KiB pages, megapages, invalid PTEs,          permissions with SUM and MXR, Svade, page and access faults, SFENCE.VMA) retires          exactly as on Spike {SPIKE_COMMIT} with --priv={SPIKE_PRIV_M3}, delegated page          faults included, up to the same exception taken in M"
     );
+    let m5 = spike::run_m5(&root(), &spike, SPIKE_LOGS);
+    if !print_diff_report("M5 SEI", "m5-sei", &m5, spike::m5_programs().len()) {
+        return ExitCode::FAILURE;
+    }
+    println!(
+        "M5 SEI: every directed supervisor external interrupt program, and every M3.2 \
+         program again, retires exactly as on Spike {SPIKE_COMMIT} with \
+         --priv={SPIKE_PRIV_M3}, interrupts taken in S and in M included, up to the same \
+         exception taken in M"
+    );
     println!(
         "M4: each of the comparisons above agrees through the M4 stream compare, with \
          Spike's commit log as a post-run backend"

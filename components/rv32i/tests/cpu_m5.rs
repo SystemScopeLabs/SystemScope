@@ -308,6 +308,25 @@ fn a_read_modify_write_of_mip_never_latches_the_line() {
 }
 
 #[test]
+fn a_read_modify_write_keeps_every_other_bit() {
+    let (mut cpu, mut ctx) = start();
+    // The soft bit survives a csrrs of an unrelated bit, line low.
+    li(&mut cpu, &mut ctx, 2, SEI);
+    retire(&mut cpu, &mut ctx, csrrs(0, MIP, 2));
+    li(&mut cpu, &mut ctx, 2, 1);
+    retire(&mut cpu, &mut ctx, csrrs(0, MIP, 2));
+    assert!(cpu.sei().soft);
+    // csrrs of mie.SEIE keeps MEIE, and the reverse.
+    csrw(&mut cpu, &mut ctx, MIE, MEI);
+    li(&mut cpu, &mut ctx, 2, SEI);
+    retire(&mut cpu, &mut ctx, csrrs(0, MIE, 2));
+    assert_eq!(csrr(&mut cpu, &mut ctx, MIE), MEI | SEI);
+    li(&mut cpu, &mut ctx, 2, MEI);
+    retire(&mut cpu, &mut ctx, csrrc(0, MIE, 2));
+    assert_eq!(csrr(&mut cpu, &mut ctx, MIE), SEI);
+}
+
+#[test]
 fn a_sirq_level_outside_complete_faults_and_changes_nothing() {
     let (mut cpu, mut ctx) = start();
     for phase in [Phase::Request, Phase::Commit] {

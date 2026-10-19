@@ -61,6 +61,7 @@ pub mod privgen;
 pub mod progen;
 pub mod projection;
 pub mod runner;
+pub mod seigen;
 pub mod spike;
 pub mod spike_adapter;
 pub mod upstream;

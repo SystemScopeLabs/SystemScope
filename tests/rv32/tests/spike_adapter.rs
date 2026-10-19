@@ -153,7 +153,7 @@ fn a_different_spike_stream_diverges_where_it_starts() {
     use systemscope_rv32::spike::{Event, Mem};
     let retire = |e: &mut Event| match e {
         Event::Retire { retire, .. } => *retire,
-        Event::Exception { .. } => panic!(),
+        Event::Exception { .. } | Event::Interrupt { .. } => panic!(),
     };
     let set =
         |events: &mut Vec<Event>, i: usize, f: &dyn Fn(&mut systemscope_rv32::spike::Retire)| {
@@ -207,7 +207,7 @@ fn a_stream_without_its_end_fails_on_the_spike_side() {
 }
 
 #[test]
-fn the_four_profiles_keep_the_existing_rules() {
+fn the_five_profiles_keep_the_existing_rules() {
     let names: Vec<_> = Suite::ALL.iter().map(|s| s.profile().name).collect();
     assert_eq!(
         names,
@@ -215,11 +215,15 @@ fn the_four_profiles_keep_the_existing_rules() {
             "spike-rv32ui",
             "spike-misaligned",
             "spike-m2-csr",
-            "spike-m3-privilege"
+            "spike-m3-privilege",
+            "spike-m5-sei"
         ]
     );
     let stops: Vec<_> = Suite::ALL.iter().map(|s| s.profile().stop_rule).collect();
-    assert_eq!(stops, [WRITE_TOHOST, HALT_TRAP, WRITE_TOHOST, HALT_TRAP]);
+    assert_eq!(
+        stops,
+        [WRITE_TOHOST, HALT_TRAP, WRITE_TOHOST, HALT_TRAP, HALT_TRAP]
+    );
     let (image, tohost) = simple();
     for suite in Suite::ALL {
         let p = suite.profile();
@@ -227,15 +231,19 @@ fn the_four_profiles_keep_the_existing_rules() {
         assert!(p.auxiliary.is_empty());
         let retire = p.primary.kind("retire").unwrap();
         let fields: Vec<_> = retire.fields.iter().map(|f| f.name.as_str()).collect();
-        // `paddr` is never compared against Spike; `priv` only in M3, CSRs from M2.
+        // `paddr` is never compared against Spike; `priv` from M3, CSRs from M2.
         assert!(!fields.contains(&"paddr"));
         assert!(retire.excluded.iter().any(|f| f == "paddr"));
-        assert_eq!(fields.contains(&"priv"), suite == Suite::M3);
+        assert_eq!(
+            fields.contains(&"priv"),
+            matches!(suite, Suite::M3 | Suite::M5)
+        );
         assert_eq!(
             fields.contains(&"csr_value"),
-            matches!(suite, Suite::M2 | Suite::M3)
+            matches!(suite, Suite::M2 | Suite::M3 | Suite::M5)
         );
-        // Only rv32ui compares no exception.
+        // Only M5 compares interrupts; only rv32ui compares no exception.
+        assert_eq!(p.primary.kind("interrupt").is_some(), suite == Suite::M5);
         assert_eq!(
             p.primary.kind("exception").is_some(),
             suite != Suite::Rv32ui

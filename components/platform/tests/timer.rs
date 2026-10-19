@@ -199,7 +199,7 @@ fn compare_keeps_any_nonzero_value_and_faults_on_zero() {
 #[test]
 fn control_keeps_enable_and_periodic_only() {
     let mut t = timer();
-    write_reg(&mut t, CONTROL, u32::MAX & !ENABLE);
+    write_reg(&mut t, CONTROL, !ENABLE);
     assert_eq!(read_reg(&mut t, CONTROL), PERIODIC);
     write_reg(&mut t, CONTROL, u32::MAX);
     assert_eq!(read_reg(&mut t, CONTROL), PERIODIC | ENABLE);
@@ -308,6 +308,7 @@ fn a_periodic_expiry_rearms_from_the_expiry_with_the_current_compare() {
     let mut t = timer();
     write_reg(&mut t, COMPARE, 10);
     write_reg(&mut t, CONTROL, ENABLE | PERIODIC);
+    assert_eq!(t.control(), ENABLE | PERIODIC);
     write_reg(&mut t, COMPARE, 25);
     let ctx = wake(&mut t, 1);
     assert_eq!(ctx.irqs, [line(true)]);
@@ -326,7 +327,7 @@ fn writing_one_to_status_drops_the_line_and_zero_does_nothing() {
     let mut t = timer();
     write_reg(&mut t, CONTROL, ENABLE);
     wake(&mut t, 1);
-    let ctx = write_reg(&mut t, STATUS, u32::MAX & !EXPIRED);
+    let ctx = write_reg(&mut t, STATUS, !EXPIRED);
     assert!(ctx.irqs.is_empty());
     assert!(t.expired());
     let ctx = write_reg(&mut t, STATUS, EXPIRED);

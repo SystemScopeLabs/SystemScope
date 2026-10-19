@@ -1,6 +1,7 @@
 //! Spike under the M4 verification engine (`docs/m4-design.md` §8.2, §9.2, §28.1): the
 //! Spike adapter, a post-run backend over the existing strict commit-log parsers; the
-//! four Spike profile versions, whose rules are the existing differentials'; the
+//! four Spike profile versions, whose rules are the existing differentials', and M5's
+//! `spike-m5-sei`, which adds interrupts (`docs/m5-design.md` §21); the
 //! SystemScope side, a runtime backend on the runner's platform; and SK-1, the Spike-side
 //! controlled divergence (§25.1).
 //!
@@ -30,7 +31,9 @@ use systemscope_verify::result::VerificationResult;
 use systemscope_verify::runtime::RuntimeBackend;
 
 use crate::manifest::load;
-use crate::projection::{EXCEPTION_FIELDS, HALT_TRAP, RETIRE_FIELDS, Rv32Projection, WRITE_TOHOST};
+use crate::projection::{
+    EXCEPTION_FIELDS, HALT_TRAP, INTERRUPT_FIELDS, RETIRE_FIELDS, Rv32Projection, WRITE_TOHOST,
+};
 use crate::runner::{self, CPU, SEED};
 use crate::spike::{
     Event, Mem, Retire, SPIKE_CAUSES, SPIKE_CAUSES_M3, SPIKE_COMMIT, SPIKE_INSTRUCTIONS_M3,
@@ -43,9 +46,9 @@ use crate::{FIXTURE_DIR, MAX_INSTRUCTIONS, hex};
 /// instruction limit.
 pub const EVENT_BUDGET: u64 = 64 * MAX_INSTRUCTIONS;
 
-/// The four Spike profile versions: the existing differentials' rules, unchanged
-/// (§6.5, §8.2). The first comparison is at the entry, `x0` writes do not count, and
-/// `interrupt` boundaries are not compared.
+/// The Spike profile versions: the four M4 ones, the existing differentials' rules,
+/// unchanged (§6.5, §8.2), and M5's. The first comparison is at the entry, `x0` writes do
+/// not count, and `interrupt` boundaries are compared only under M5.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Suite {
     /// rv32ui and the generated programs: M1 retirements to `write_tohost`, from a log
@@ -62,11 +65,20 @@ pub enum Suite {
     /// exceptions, to the exception taken in M. `paddr` is not compared: Spike's log names
     /// the virtual address.
     M3,
+    /// The M5 SEI programs and the M3.2 programs with the `M5` CPU: M3's rules, and every
+    /// interrupt, compared (`docs/m5-design.md` §21).
+    M5,
 }
 
 impl Suite {
     /// Every suite.
-    pub const ALL: [Suite; 4] = [Suite::Rv32ui, Suite::Misaligned, Suite::M2, Suite::M3];
+    pub const ALL: [Suite; 5] = [
+        Suite::Rv32ui,
+        Suite::Misaligned,
+        Suite::M2,
+        Suite::M3,
+        Suite::M5,
+    ];
 
     /// The CPU profile its programs run with.
     pub fn cpu(self) -> Rv32iProfile {
@@ -74,6 +86,7 @@ impl Suite {
             Suite::Rv32ui | Suite::Misaligned => Rv32iProfile::M1,
             Suite::M2 => Rv32iProfile::M2,
             Suite::M3 => Rv32iProfile::M3,
+            Suite::M5 => Rv32iProfile::M5,
         }
     }
 
@@ -110,7 +123,7 @@ impl Suite {
         match self {
             Suite::Rv32ui | Suite::Misaligned => &M1,
             Suite::M2 => &M2,
-            Suite::M3 => &M3,
+            Suite::M3 | Suite::M5 => &M3,
         }
     }
 
@@ -143,6 +156,16 @@ impl Suite {
             fields: retire.iter().map(spec).collect(),
             excluded,
         }];
+        if self == Suite::M5 {
+            kinds.insert(
+                0,
+                KindSpec {
+                    kind: "interrupt".to_owned(),
+                    fields: INTERRUPT_FIELDS.iter().map(spec).collect(),
+                    excluded: Vec::new(),
+                },
+            );
+        }
         if self != Suite::Rv32ui {
             kinds.insert(
                 0,
@@ -158,6 +181,7 @@ impl Suite {
             Suite::Misaligned => ("spike-misaligned", HALT_TRAP),
             Suite::M2 => ("spike-m2-csr", WRITE_TOHOST),
             Suite::M3 => ("spike-m3-privilege", HALT_TRAP),
+            Suite::M5 => ("spike-m5-sei", HALT_TRAP),
         };
         ComparisonProfile {
             name: name.to_owned(),
@@ -178,7 +202,7 @@ impl Suite {
         let (isa, privilege) = match self {
             Suite::Rv32ui | Suite::Misaligned => (SPIKE_ISA, SPIKE_PRIV),
             Suite::M2 => (SPIKE_ISA_M2, SPIKE_PRIV),
-            Suite::M3 => (SPIKE_ISA_M2, SPIKE_PRIV_M3),
+            Suite::M3 | Suite::M5 => (SPIKE_ISA_M2, SPIKE_PRIV_M3),
         };
         format!("--isa={isa} --priv={privilege}")
     }
@@ -187,7 +211,7 @@ impl Suite {
     pub fn spike_config(self) -> BackendRunConfig {
         BackendRunConfig {
             budget: match self {
-                Suite::M3 => SPIKE_INSTRUCTIONS_M3,
+                Suite::M3 | Suite::M5 => SPIKE_INSTRUCTIONS_M3,
                 _ => MAX_INSTRUCTIONS,
             },
         }
@@ -259,7 +283,7 @@ impl SpikeBackend {
         match self.suite {
             Suite::Rv32ui => parse_spike_log(&text).map(|r| (m(r), None)),
             Suite::Misaligned | Suite::M2 => parse_spike_l_log(&text).map(|(r, t)| (m(r), t)),
-            Suite::M3 => parse_spike_m3_log(&text).map(|(e, t)| (e, Some(t))),
+            Suite::M3 | Suite::M5 => parse_spike_m3_log(&text).map(|(e, t)| (e, Some(t))),
         }
     }
 }
@@ -294,6 +318,11 @@ impl Backend for SpikeBackend {
             EXCEPTION_FIELDS
                 .iter()
                 .map(|f| format!("arch/exception/{f}")),
+        );
+        s.fields.extend(
+            INTERRUPT_FIELDS
+                .iter()
+                .map(|f| format!("arch/interrupt/{f}")),
         );
         s
     }
@@ -414,6 +443,18 @@ fn observations(
                     ("to", s("S")),
                 ],
             )?,
+            Event::Interrupt { epc, cause, to } => {
+                if suite != Suite::M5 {
+                    return Err(EngineError::BackendFailed(format!(
+                        "Spike takes an interrupt under {suite:?}"
+                    )));
+                }
+                let to = if to == 1 { "S" } else { "M" };
+                place(
+                    "interrupt",
+                    vec![("pc", u(epc)), ("cause", u(cause)), ("to", s(to))],
+                )?;
+            }
         }
     }
     let Some(trap) = trap else {
@@ -423,7 +464,7 @@ fn observations(
         }));
     };
     let causes = match suite {
-        Suite::M3 => &SPIKE_CAUSES_M3[..],
+        Suite::M3 | Suite::M5 => &SPIKE_CAUSES_M3[..],
         _ => &SPIKE_CAUSES[..],
     };
     let cause = causes
