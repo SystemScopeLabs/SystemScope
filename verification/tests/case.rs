@@ -316,6 +316,7 @@ fn checkpoints_and_emitted_observations_are_unsupported_by_default() {
         event_index: 0,
         streams: Vec::new(),
         state: Vec::new(),
+        projection: Vec::new(),
     };
     assert_eq!(
         b.restore(&c),

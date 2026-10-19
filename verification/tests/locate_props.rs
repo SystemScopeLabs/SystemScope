@@ -163,6 +163,7 @@ impl Backend for Scripted {
                 })
                 .collect(),
             state: (self.at as u64).to_le_bytes().to_vec(),
+            projection: Vec::new(),
         })
     }
     fn restore(&mut self, c: &Checkpoint) -> Result<(), EngineError> {

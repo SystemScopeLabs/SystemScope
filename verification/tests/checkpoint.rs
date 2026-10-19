@@ -17,6 +17,7 @@ fn checkpoint() -> Checkpoint {
         event_index: 0x0102_0304_0506_0708,
         streams: vec![mark("arch", 3, 1), mark("effect", 0, 0), mark("os", 9, 2)],
         state: b"SSSNAP".to_vec(),
+        projection: Vec::new(),
     }
 }
 
@@ -51,10 +52,26 @@ fn broken_checkpoint_bytes_are_refused() {
             "{n}"
         );
     }
+    // Bytes after the snapshot are the projection state: a stray byte is a truncated
+    // length, and an encoded empty state is not canonical.
     let mut padded = bytes.clone();
     padded.push(0);
     assert_eq!(
         Checkpoint::from_bytes(&padded),
+        Err(CheckpointError::Decode(DecodeError::Truncated))
+    );
+    let mut empty = bytes.clone();
+    empty.extend(0u32.to_le_bytes());
+    assert_eq!(
+        Checkpoint::from_bytes(&empty),
+        Err(CheckpointError::EmptyProjection)
+    );
+    let mut trailing = checkpoint();
+    trailing.projection = b"P".to_vec();
+    let mut bytes = trailing.to_bytes();
+    bytes.push(0);
+    assert_eq!(
+        Checkpoint::from_bytes(&bytes),
         Err(CheckpointError::Decode(DecodeError::TrailingBytes))
     );
     // A checkpoint carries its whole snapshot, however large.
@@ -86,6 +103,25 @@ fn broken_checkpoint_bytes_are_refused() {
     assert_eq!(
         Checkpoint::from_bytes(&bytes),
         Err(CheckpointError::Decode(DecodeError::Truncated))
+    );
+}
+
+#[test]
+fn a_projection_state_follows_the_snapshot_only_when_there_is_one() {
+    let stateless = checkpoint().to_bytes();
+    let c = Checkpoint {
+        projection: b"PROJ".to_vec(),
+        ..checkpoint()
+    };
+    let bytes = c.to_bytes();
+    let mut want = stateless.clone();
+    want.extend(4u32.to_le_bytes());
+    want.extend(b"PROJ");
+    assert_eq!(bytes, want);
+    assert_eq!(Checkpoint::from_bytes(&bytes), Ok(c));
+    assert_eq!(
+        CheckpointError::EmptyProjection.to_string(),
+        "checkpoint: an empty projection state is encoded"
     );
 }
 

@@ -5,16 +5,19 @@
 mod common;
 
 use common::*;
+use systemscope_contracts::trace::TraceRecord;
 use systemscope_contracts::trace::Value;
 use systemscope_verify::backend::{Backend, Capability, Side, run, verify};
 use systemscope_verify::case::{BackendRunConfig, InputVariant, execution_id};
+use systemscope_verify::checkpoint::Checkpoint;
 use systemscope_verify::compare::{
     Divergence, Outcome, StreamResult, Verdict, compare, naive_first_divergence,
 };
 use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::{Observation, ObservedValue, PrefixDigest};
+use systemscope_verify::profile::{ComparisonProfile, Support};
 use systemscope_verify::profile::{Role, plan};
-use systemscope_verify::runtime::RuntimeBackend;
+use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
 use systemscope_verify::state::{Source, StateField};
 
 fn failure(b: &mut RuntimeBackend, input: InputVariant, budget: u64) -> EngineError {
@@ -382,6 +385,111 @@ fn emitting_event(o: &Observation, input: &InputVariant) -> u64 {
         Some(ObservedValue::Present(Value::U64(n))) => *n - u64::from(skipped && *n > 4),
         _ => o.ordinal + 1,
     }
+}
+
+/// [`CounterProjection`] whose `uart_tx` byte is the count of bytes before it: state
+/// across event boundaries, which it saves into each checkpoint.
+#[derive(Default)]
+struct Tally {
+    inner: CounterProjection,
+    outs: u64,
+}
+
+impl Projection for Tally {
+    fn support(&self) -> Support {
+        self.inner.support()
+    }
+    fn begin(&mut self, profile: &ComparisonProfile) -> Result<(), String> {
+        self.inner.begin(profile)
+    }
+    fn project(&mut self, record: &TraceRecord, out: &mut Vec<Projected>) -> Result<(), String> {
+        let from = out.len();
+        self.inner.project(record, out)?;
+        for p in &mut out[from..] {
+            if p.stream == "effect" {
+                p.fields = vec![(
+                    "byte".to_owned(),
+                    ObservedValue::Present(Value::U64(self.outs)),
+                )];
+                self.outs += 1;
+            }
+        }
+        Ok(())
+    }
+    fn finished(&self) -> bool {
+        self.inner.finished()
+    }
+    fn save(&self) -> Vec<u8> {
+        self.outs.to_le_bytes().to_vec()
+    }
+    fn load(&mut self, state: &[u8]) -> Result<(), String> {
+        let bytes = state.try_into().map_err(|_| format!("{state:?}"))?;
+        self.outs = u64::from_le_bytes(bytes);
+        Ok(())
+    }
+}
+
+fn tally_backend() -> RuntimeBackend {
+    RuntimeBackend::new(
+        id(),
+        Box::new(|_, _| Ok(runtime(true, None))),
+        Box::new(|| Box::new(Tally::default())),
+    )
+}
+
+#[test]
+fn a_projection_with_state_resumes_from_the_state_it_saved() {
+    let start = |mut b: RuntimeBackend| {
+        b.start(&scenario(), &InputVariant::None, &config(), &profile())
+            .unwrap();
+        b
+    };
+    let whole = rest(&mut start(tally_backend()));
+    let bytes: Vec<u64> = (0..whole[1].len() as u64).collect();
+    let seen: Vec<u64> = whole[1]
+        .iter()
+        .map(|o| match o.field("byte") {
+            Some(ObservedValue::Present(Value::U64(n))) => *n,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(seen, bytes);
+    let mut b = start(tally_backend());
+    let mut checkpoints = vec![b.checkpoint().unwrap()];
+    for _ in 1..LIMIT {
+        b.next("arch").unwrap().unwrap();
+        checkpoints.push(b.checkpoint().unwrap());
+    }
+    for (j, c) in checkpoints.iter().enumerate() {
+        assert_eq!(c.projection, c.streams[1].covered.to_le_bytes(), "{j}");
+        let mut r = start(tally_backend());
+        r.restore(c).unwrap();
+        let resumed = rest(&mut r);
+        for s in 0..2 {
+            let from = c.streams[s].covered as usize;
+            assert_eq!(resumed[s], whole[s][from..], "{j} stream {s}");
+        }
+    }
+    // A stateless projection's checkpoint carries none, and refuses one; the stateful one
+    // refuses a state it did not save.
+    let stateless = started(&InputVariant::None).checkpoint().unwrap();
+    assert!(stateless.projection.is_empty());
+    let mut r = started(&InputVariant::None);
+    let with = Checkpoint {
+        projection: vec![1],
+        ..stateless.clone()
+    };
+    assert_eq!(
+        r.restore(&with),
+        Err(EngineError::Internal(
+            "projection state: the projection keeps no state".to_owned()
+        ))
+    );
+    let mut r = start(tally_backend());
+    assert_eq!(
+        r.restore(&stateless),
+        Err(EngineError::Internal("projection state: []".to_owned()))
+    );
 }
 
 #[test]

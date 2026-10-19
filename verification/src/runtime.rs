@@ -32,8 +32,9 @@ pub struct Projected {
 }
 
 /// Maps trace records to boundaries: a pure function of the records, which never
-/// re-executes (§8.4). A projection holds no state across event boundaries except whether
-/// the stop rule has been reached, so a fresh one resumes a restored checkpoint.
+/// re-executes (§8.4). A projection that holds state across event boundaries, other than
+/// whether the stop rule has been reached, saves it into each checkpoint and loads it on
+/// restore; one that holds none keeps the defaults, and a fresh one resumes a checkpoint.
 pub trait Projection {
     /// The streams and fields it reports.
     fn support(&self) -> Support;
@@ -44,6 +45,18 @@ pub trait Projection {
     fn project(&mut self, record: &TraceRecord, out: &mut Vec<Projected>) -> Result<(), String>;
     /// Whether the stop rule has been reached.
     fn finished(&self) -> bool;
+    /// The state it holds across the current event boundary, as bytes; empty when none.
+    fn save(&self) -> Vec<u8> {
+        Vec::new()
+    }
+    /// Takes up the state [`Projection::save`] gave, after [`Projection::begin`].
+    fn load(&mut self, state: &[u8]) -> Result<(), String> {
+        if state.is_empty() {
+            Ok(())
+        } else {
+            Err("the projection keeps no state".to_owned())
+        }
+    }
 }
 
 /// Builds the runtime of a scenario under a side's input variant, elaborated and not yet
@@ -559,6 +572,7 @@ impl Backend for RuntimeBackend {
                 })
                 .collect(),
             state,
+            projection: shared.projection.save(),
         })
     }
 
@@ -623,6 +637,11 @@ impl Backend for RuntimeBackend {
             let m = c.mark(name).expect("checked above");
             (m.covered, m.prefix)
         })?;
+        shared
+            .borrow_mut()
+            .projection
+            .load(&c.projection)
+            .map_err(|why| EngineError::Internal(format!("projection state: {why}")))?;
         let mut runtime =
             (self.build)(&s.scenario, &s.input).map_err(EngineError::BackendFailed)?;
         runtime

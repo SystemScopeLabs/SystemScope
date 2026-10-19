@@ -27,6 +27,9 @@ pub struct Checkpoint {
     pub streams: Vec<StreamMark>,
     /// The unchanged runtime snapshot.
     pub state: Vec<u8>,
+    /// The projection's state across the boundary ([`crate::runtime::Projection::save`]);
+    /// empty for a projection that keeps none.
+    pub projection: Vec<u8>,
 }
 
 /// Why checkpoint bytes were refused.
@@ -36,6 +39,8 @@ pub enum CheckpointError {
     Decode(DecodeError),
     /// The stream marks are not in strictly increasing name order.
     StreamOrder,
+    /// An empty projection state is encoded; it must be left out.
+    EmptyProjection,
 }
 
 impl fmt::Display for CheckpointError {
@@ -43,6 +48,9 @@ impl fmt::Display for CheckpointError {
         match self {
             CheckpointError::Decode(e) => write!(f, "checkpoint: {e}"),
             CheckpointError::StreamOrder => f.write_str("checkpoint: streams out of order"),
+            CheckpointError::EmptyProjection => {
+                f.write_str("checkpoint: an empty projection state is encoded")
+            }
         }
     }
 }
@@ -61,7 +69,9 @@ impl Checkpoint {
         self.streams.iter().find(|m| m.stream == stream)
     }
 
-    /// The canonical encoding: the M0 primitives, the streams in name order.
+    /// The canonical encoding: the M0 primitives, the streams in name order, then the
+    /// projection state only when it is not empty, so a checkpoint of a projection that
+    /// keeps none encodes as in M4.
     pub fn encode(&self, e: &mut Encoder) {
         e.raw(&self.execution);
         e.u64(self.event_index);
@@ -72,6 +82,9 @@ impl Checkpoint {
             e.raw(&m.prefix);
         }
         e.bytes(&self.state);
+        if !self.projection.is_empty() {
+            e.bytes(&self.projection);
+        }
     }
 
     /// The canonical bytes.
@@ -81,7 +94,8 @@ impl Checkpoint {
         e.into_bytes()
     }
 
-    /// Reads a checkpoint, refusing marks out of name order.
+    /// Reads a checkpoint, refusing marks out of name order. The projection state is
+    /// read when bytes remain, so a checkpoint is the last item of its decoder.
     pub fn decode(d: &mut Decoder<'_>) -> Result<Checkpoint, CheckpointError> {
         let execution = d.array()?;
         let event_index = d.u64()?;
@@ -103,11 +117,21 @@ impl Checkpoint {
             });
         }
         let state = d.bytes()?.to_vec();
+        let projection = if d.remaining() == 0 {
+            Vec::new()
+        } else {
+            let p = d.bytes()?.to_vec();
+            if p.is_empty() {
+                return Err(CheckpointError::EmptyProjection);
+            }
+            p
+        };
         Ok(Checkpoint {
             execution,
             event_index,
             streams,
             state,
+            projection,
         })
     }
 
