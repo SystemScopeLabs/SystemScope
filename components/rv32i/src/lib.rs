@@ -29,6 +29,7 @@ pub mod instr;
 pub mod memory;
 pub mod privilege;
 pub mod regfile;
+pub mod sei;
 pub mod sv32;
 
 pub use cpu::{CpuConfigError, Halt, Rv32iConfig, Rv32iCpu, Rv32iProfile, RvTrap};
@@ -45,3 +46,4 @@ pub use memory::{
 };
 pub use privilege::{M3State, Privilege, Spp};
 pub use regfile::RegisterFile;
+pub use sei::Sei;

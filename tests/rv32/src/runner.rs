@@ -23,6 +23,8 @@
 //! The `M3` profile runs them too, linked the same way. It starts in M-mode, where an
 //! RV32I program runs as with `M2`; only its name for the `ECALL` cause differs
 //! (`EnvironmentCallFromM`, `docs/m3-design.md` §5.3), so the pass rule takes the profile.
+//! The `M5` profile runs them as `M3` does, its `sirq` port linked to a second
+//! [`TiedLowIrq`], `soc.sirq_low` (`docs/m5-design.md` §9).
 //!
 //! **Pass rule:** the CPU halts with `Trap(EnvironmentCall)` (`EnvironmentCallFromM` with
 //! the `M3` profile), `gp == 1`, and `a0 == 0`.
@@ -72,7 +74,7 @@ pub const PASS_CAUSE_M3: &str = "EnvironmentCallFromM";
 pub fn pass_cause(profile: Rv32iProfile) -> &'static str {
     match profile {
         Rv32iProfile::M1 | Rv32iProfile::M2 => PASS_CAUSE,
-        Rv32iProfile::M3 => PASS_CAUSE_M3,
+        Rv32iProfile::M3 | Rv32iProfile::M5 => PASS_CAUSE_M3,
     }
 }
 
@@ -311,6 +313,10 @@ pub fn platform_with_profile(
     if profile != Rv32iProfile::M1 {
         let irq = t.add_component("soc.irq_low", Box::new(TiedLowIrq));
         t.connect((irq, "irq"), (cpu, "irq"), Some(link));
+    }
+    if profile == Rv32iProfile::M5 {
+        let sirq = t.add_component("soc.sirq_low", Box::new(TiedLowIrq));
+        t.connect((sirq, "irq"), (cpu, "sirq"), Some(link));
     }
     t.elaborate(SessionConfig {
         seed,

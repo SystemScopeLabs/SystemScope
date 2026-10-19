@@ -256,6 +256,19 @@ impl Rv32Projection {
                 ];
                 ("exception", fields)
             }
+            // The M5 record names its target (`docs/m5-design.md` §9); earlier profiles
+            // take every interrupt in M.
+            k if k == INTERRUPT_KIND && get("epc").is_some() => {
+                if names != ["epc", "cause", "handler", "from", "to"] {
+                    return Err(at(&format!("unexpected fields {names:?}")));
+                }
+                let fields = vec![
+                    ("pc", present(need("epc")?)),
+                    ("cause", present(need("cause")?)),
+                    ("to", present(need("to")?)),
+                ];
+                ("interrupt", fields)
+            }
             k if k == INTERRUPT_KIND => {
                 let fields = vec![
                     ("pc", present(need("mepc")?)),

@@ -739,7 +739,7 @@ fn run_sides(
 
     // Spike.
     let args = match (profile, trap) {
-        (Rv32iProfile::M3, _) => spike_m3_args(image.entry, elf, log),
+        (Rv32iProfile::M3 | Rv32iProfile::M5, _) => spike_m3_args(image.entry, elf, log),
         (Rv32iProfile::M2, _) => spike_m2_args(image.entry, elf, log),
         (Rv32iProfile::M1, true) => spike_trap_args(image.entry, elf, log),
         (Rv32iProfile::M1, false) => spike_args(image.entry, elf, log),
@@ -1179,7 +1179,9 @@ fn run_program(
         (Rv32iProfile::M1, Some(_)) => parse_spike_trap_log(&text).map(|(r, t)| (r, Some(t)))?,
         (Rv32iProfile::M2, Some(_)) => parse_spike_l_log(&text)?,
         (Rv32iProfile::M2, None) => (pass_end(&text)?, None),
-        (Rv32iProfile::M3, _) => return Err("M3 programs run through run_m3_program".to_owned()),
+        (Rv32iProfile::M3 | Rv32iProfile::M5, _) => {
+            return Err("M3 and M5 programs run through run_m3_program".to_owned());
+        }
     };
     match (expected, trap) {
         (None, _) => {

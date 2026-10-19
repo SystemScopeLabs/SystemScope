@@ -66,6 +66,13 @@
 //! `MIE` says, and its entry saves the mode in `MPP`. Snapshot schema 3 is schema 2 plus
 //! the mode and the new CSRs (§5.5).
 //!
+//! [`Rv32iProfile::M5`] is `M3` plus the delegable supervisor external interrupt of
+//! `docs/m5-design.md` §9 ([`crate::sei`]): `mideleg.SEI`, `mie.SEIE`, the M-writable
+//! `mip.SEIP`, the `sie` and `sip` views, and a third port, `sirq`, whose level drives the
+//! external part of `SEIP`. SEI is sampled with MEI after a retirement, after it in
+//! priority, and is taken in S when delegated. Snapshot schema 4 is schema 3 plus those
+//! four bits. Every `M3` rule holds in `M5` unless §9 changes it.
+//!
 //! # Sv32 (`M3`)
 //!
 //! In S and U with `satp.MODE` = Sv32, every fetch, load, and store is translated
@@ -133,6 +140,7 @@ use crate::memory::{
 };
 use crate::privilege::{self, M3State, Privilege, Spp, SupervisorInstr, decode_supervisor};
 use crate::regfile::RegisterFile;
+use crate::sei::Sei;
 use crate::sv32::{self, Access};
 
 /// The `mem` port: a `mem.v1` initiator, for fetches and data alike. It is the CPU's only
@@ -141,6 +149,10 @@ pub const PORT: PortId = PortId(0);
 
 /// The `irq` port of the `M2` profile: an `irq.v0` target (`docs/m2-design.md` §6.1).
 pub const IRQ_PORT: PortId = PortId(1);
+
+/// The `sirq` port of the `M5` profile: an `irq.v0` target whose level is the external
+/// part of `mip.SEIP` (`docs/m5-design.md` §9).
+pub const SIRQ_PORT: PortId = PortId(2);
 
 /// Wake token that sends the next fetch.
 pub const FETCH: u64 = 0;
@@ -164,6 +176,10 @@ pub const SNAPSHOT_SCHEMA_M2: u32 = 2;
 /// CSRs the `M3` profile adds (`docs/m3-design.md` §5.5).
 pub const SNAPSHOT_SCHEMA_M3: u32 = 3;
 
+/// Layout of [`Rv32iCpu`]'s snapshot in the `M5` profile: schema 3, then the supervisor
+/// external interrupt's state (`docs/m5-design.md` §9).
+pub const SNAPSHOT_SCHEMA_M5: u32 = 4;
+
 /// Trace kind of a retired instruction.
 pub const COMMIT_KIND: &str = "rv32.commit";
 
@@ -173,7 +189,8 @@ pub const TRAP_KIND: &str = "rv32.trap";
 /// Trace kind of an instruction-limit halt.
 pub const HALT_KIND: &str = "rv32.halt";
 
-/// Trace kind of a machine external interrupt entry (`M2`, `M3`).
+/// Trace kind of an interrupt entry: the machine external interrupt (`M2`, `M3`, `M5`) or
+/// the supervisor external interrupt (`M5`).
 pub const INTERRUPT_KIND: &str = "rv32.interrupt";
 
 /// Trace kind of a delegated exception's delivery to S (`M3`).
@@ -191,6 +208,16 @@ pub enum Rv32iProfile {
     /// delegated exceptions, the interrupt with modes, and Sv32 translation
     /// (`docs/m3-design.md` §5), snapshot schema 3.
     M3,
+    /// The `M3` CPU plus the delegable supervisor external interrupt and the `sirq` port
+    /// (`docs/m5-design.md` §9), snapshot schema 4.
+    M5,
+}
+
+impl Rv32iProfile {
+    /// Whether the profile has the `M3` privilege model: `M3` and `M5`.
+    pub const fn has_modes(self) -> bool {
+        matches!(self, Rv32iProfile::M3 | Rv32iProfile::M5)
+    }
 }
 
 /// Construction parameters of an [`Rv32iCpu`].
@@ -590,6 +617,8 @@ pub struct Rv32iCpu {
     /// The mode and the CSRs the `M3` profile adds. Always at reset in `M1` and `M2`,
     /// which cannot reach them.
     m3: M3State,
+    /// What the `M5` profile adds. Always at reset in the other profiles.
+    sei: Sei,
 }
 
 impl Rv32iCpu {
@@ -608,6 +637,7 @@ impl Rv32iCpu {
             state: State::FetchIssue { pa: None },
             csrs: CsrFile::new(),
             m3: M3State::new(),
+            sei: Sei::new(),
         })
     }
 
@@ -623,18 +653,23 @@ impl Rv32iCpu {
         &self.m3
     }
 
+    /// The supervisor external interrupt's state (at reset and unused outside `M5`).
+    pub fn sei(&self) -> &Sei {
+        &self.sei
+    }
+
     /// How the next word executes.
     fn isa(&self) -> Isa {
         match self.config.profile {
             Rv32iProfile::M1 => Isa::M1,
             Rv32iProfile::M2 => Isa::M2,
-            Rv32iProfile::M3 => Isa::M3(self.m3.privilege),
+            Rv32iProfile::M3 | Rv32iProfile::M5 => Isa::M3(self.m3.privilege),
         }
     }
 
     /// Whether fetches, loads, and stores are translated now (`M3` only, §5.2).
     fn translating(&self) -> bool {
-        self.config.profile == Rv32iProfile::M3 && self.m3.translates()
+        self.config.profile.has_modes() && self.m3.translates()
     }
 
     /// The virtual address `walk` translates.
@@ -667,7 +702,7 @@ impl Rv32iCpu {
     fn cause_name(&self, cause: TrapCause) -> &'static str {
         match self.config.profile {
             Rv32iProfile::M1 | Rv32iProfile::M2 => cause.name(),
-            Rv32iProfile::M3 => cause.m3_name(),
+            Rv32iProfile::M3 | Rv32iProfile::M5 => cause.m3_name(),
         }
     }
 
@@ -676,6 +711,17 @@ impl Rv32iCpu {
         match self.config.profile {
             Rv32iProfile::M1 | Rv32iProfile::M2 => self.csrs.read(csr),
             Rv32iProfile::M3 => self.m3.read(&self.csrs, csr),
+            Rv32iProfile::M5 => self.sei.read(&self.m3, &self.csrs, csr),
+        }
+    }
+
+    /// The old value a CSR instruction's write computes from: [`Rv32iCpu::read_csr`],
+    /// except in `M5`, where `mip.SEIP` is the M-writable bit alone (`docs/m5-design.md`
+    /// §9).
+    fn read_csr_for_write(&self, csr: u16) -> Option<u32> {
+        match self.config.profile {
+            Rv32iProfile::M5 => self.sei.read_for_write(&self.m3, &self.csrs, csr),
+            _ => self.read_csr(csr),
         }
     }
 
@@ -684,6 +730,7 @@ impl Rv32iCpu {
         match self.config.profile {
             Rv32iProfile::M1 | Rv32iProfile::M2 => self.csrs.write(csr, value),
             Rv32iProfile::M3 => self.m3.write(&mut self.csrs, csr, value),
+            Rv32iProfile::M5 => self.sei.write(&mut self.m3, &mut self.csrs, csr, value),
         }
     }
 
@@ -734,7 +781,7 @@ impl Rv32iCpu {
                 ctx.send(PORT, msg(txn).into(), ScheduleWhen::Now, Phase::Request)?;
                 self.next_txn += 1;
             }
-            Rv32iProfile::M2 | Rv32iProfile::M3 => {
+            Rv32iProfile::M2 | Rv32iProfile::M3 | Rv32iProfile::M5 => {
                 let next = self
                     .next_txn
                     .checked_add(1)
@@ -1002,7 +1049,7 @@ impl Rv32iCpu {
         if let Outcome::Exec(ExecOutcome::Trap(PendingTrap { cause, tval })) = outcome {
             // A delegated exception (`M3`, docs/m3-design.md §5.3) is delivered to S: not a
             // retirement, so no instret, no instruction limit, and no interrupt sampling.
-            if self.config.profile == Rv32iProfile::M3 {
+            if self.config.profile.has_modes() {
                 let (pc, from) = (self.pc, self.m3.privilege);
                 if let Some(handler) = self.m3.take_exception(cause, pc, tval) {
                     ctx.trace(
@@ -1059,7 +1106,7 @@ impl Rv32iCpu {
                 let fields = self.commit_fields(insn, effect, None);
                 self.pc = match self.config.profile {
                     Rv32iProfile::M1 | Rv32iProfile::M2 => self.csrs.mret(),
-                    Rv32iProfile::M3 => self.m3.mret(&mut self.csrs),
+                    Rv32iProfile::M3 | Rv32iProfile::M5 => self.m3.mret(&mut self.csrs),
                 };
                 fields
             }
@@ -1105,6 +1152,31 @@ impl Rv32iCpu {
                     ("from", Value::Str(from.name().to_owned())),
                 ],
             );
+        } else if self.config.profile == Rv32iProfile::M5 {
+            // docs/m5-design.md §9: MEI first, then SEI, in S if delegated.
+            let mei = self.m3.mei_eligible(&self.csrs);
+            if mei || self.sei.eligible(&self.m3, &self.csrs) {
+                let from = self.m3.privilege;
+                self.pc = if mei {
+                    self.m3.take_mei(&mut self.csrs, self.pc)
+                } else {
+                    self.sei.take(&mut self.m3, &mut self.csrs, self.pc)
+                };
+                let (epc, cause) = match self.m3.privilege {
+                    Privilege::Supervisor => (self.m3.sepc, self.m3.scause),
+                    _ => (self.csrs.mepc, self.csrs.mcause),
+                };
+                ctx.trace(
+                    INTERRUPT_KIND,
+                    vec![
+                        ("epc", Value::U64(u64::from(epc))),
+                        ("cause", Value::U64(u64::from(cause))),
+                        ("handler", Value::U64(u64::from(self.pc))),
+                        ("from", Value::Str(from.name().to_owned())),
+                        ("to", Value::Str(self.m3.privilege.name().to_owned())),
+                    ],
+                );
+            }
         }
         self.fetch_next(ctx)
     }
@@ -1120,6 +1192,19 @@ impl Rv32iCpu {
         }
         let IrqMsg::Level { asserted } = *msg;
         self.csrs.irq_level = asserted;
+        Ok(())
+    }
+
+    /// Takes an `irq.v0` level on the `sirq` port (`M5`), under the same rules as `irq`:
+    /// it changes the external part of `mip.SEIP` and nothing else.
+    fn sirq(&mut self, msg: &IrqMsg, ctx: &mut dyn SimContext) -> Result<(), SimError> {
+        if ctx.phase() != Phase::Complete {
+            return Err(SimError::ComponentFault(
+                "rv32 cpu: irq.v0 level arrived outside COMPLETE",
+            ));
+        }
+        let IrqMsg::Level { asserted } = *msg;
+        self.sei.line = asserted;
         Ok(())
     }
 
@@ -1145,7 +1230,8 @@ impl Rv32iCpu {
         let mut fields = self.commit_fields(insn, effect, None);
         fields.push(("csr", Value::U64(u64::from(op.csr))));
         if op.write {
-            self.write_csr(op.csr, op.op.apply(old, op.operand))
+            let base = self.read_csr_for_write(op.csr).ok_or_else(unsupported)?;
+            self.write_csr(op.csr, op.op.apply(base, op.operand))
                 .ok_or_else(unsupported)?;
             let stored = self.read_csr(op.csr).ok_or_else(unsupported)?;
             fields.push(("csr_value", Value::U64(u64::from(stored))));
@@ -1240,7 +1326,9 @@ impl Rv32iCpu {
         let isa = match profile {
             Rv32iProfile::M1 => Isa::M1,
             Rv32iProfile::M2 => Isa::M2,
-            Rv32iProfile::M3 => unreachable!("schema 3 restores through restore_m3"),
+            Rv32iProfile::M3 | Rv32iProfile::M5 => {
+                unreachable!("schemas 3 and 4 restore through restore_m3")
+            }
         };
         let memory = |insn: u32| match step(isa, insn, pc, regs) {
             Step::Memory(plan) => Ok(plan),
@@ -1310,7 +1398,7 @@ impl Rv32iCpu {
         })
     }
 
-    /// Restores a schema 3 snapshot (`docs/m3-design.md` §5.5) in three steps: decode every
+    /// Restores a schema 3 or 4 snapshot (`docs/m3-design.md` §5.5) in three steps: decode every
     /// field to the end, checking only encodings; validate every invariant on the decoded
     /// values together; then replace the state at once. The state record comes before the
     /// mode and the CSRs it depends on, so nothing about it is checked until all are read.
@@ -1360,6 +1448,16 @@ impl Rv32iCpu {
             r.u32()?,
             r.u32()?,
         );
+        let sei = if self.config.profile == Rv32iProfile::M5 {
+            Sei {
+                delegated: flag(r)?,
+                enabled: flag(r)?,
+                soft: flag(r)?,
+                line: flag(r)?,
+            }
+        } else {
+            Sei::new()
+        };
 
         // 2. Validate.
         if !config_matches {
@@ -1425,6 +1523,7 @@ impl Rv32iCpu {
         self.state = state;
         self.csrs = csrs;
         self.m3 = m3;
+        self.sei = sei;
         Ok(())
     }
 }
@@ -1830,7 +1929,7 @@ const CAUSES_M3: [TrapCause; 14] = [
 fn causes(profile: Rv32iProfile) -> &'static [TrapCause] {
     match profile {
         Rv32iProfile::M1 | Rv32iProfile::M2 => &CAUSES,
-        Rv32iProfile::M3 => &CAUSES_M3,
+        Rv32iProfile::M3 | Rv32iProfile::M5 => &CAUSES_M3,
     }
 }
 
@@ -1926,7 +2025,7 @@ fn read_outcome(
             cause: read_cause(r, profile)?,
             tval: r.u32()?,
         })),
-        (2, Rv32iProfile::M2 | Rv32iProfile::M3) => {
+        (2, Rv32iProfile::M2 | Rv32iProfile::M3 | Rv32iProfile::M5) => {
             let csr = r.u16()?;
             let code = r.u8()?;
             let op = *CSR_OPS
@@ -1945,8 +2044,8 @@ fn read_outcome(
                 next_pc: r.u32()?,
             })
         }
-        (3, Rv32iProfile::M2 | Rv32iProfile::M3) => Outcome::Mret,
-        (4, Rv32iProfile::M3) => Outcome::Sret,
+        (3, Rv32iProfile::M2 | Rv32iProfile::M3 | Rv32iProfile::M5) => Outcome::Mret,
+        (4, Rv32iProfile::M3 | Rv32iProfile::M5) => Outcome::Sret,
         (t, _) => return Err(tag("rv32 outcome", t)),
     })
 }
@@ -1982,7 +2081,8 @@ impl Component for Rv32iCpu {
         "rv32i.cpu"
     }
 
-    /// `mem` in every profile; `irq` too in the `M2` and `M3` profiles.
+    /// `mem` in every profile; `irq` too in the `M2`, `M3`, and `M5` profiles; and `sirq`
+    /// in `M5`.
     fn ports(&self) -> Vec<PortSpec> {
         let mut ports = vec![PortSpec {
             name: "mem",
@@ -1992,6 +2092,13 @@ impl Component for Rv32iCpu {
         if self.config.profile != Rv32iProfile::M1 {
             ports.push(PortSpec {
                 name: "irq",
+                protocol: irq_v0::PROTOCOL,
+                role: Role::Target,
+            });
+        }
+        if self.config.profile == Rv32iProfile::M5 {
+            ports.push(PortSpec {
+                name: "sirq",
                 protocol: irq_v0::PROTOCOL,
                 role: Role::Target,
             });
@@ -2021,21 +2128,28 @@ impl Component for Rv32iCpu {
             (Rv32iProfile::M1, Delivered::Message { .. }) => {
                 Err(SimError::ComponentFault("rv32 cpu: message is not mem.v1"))
             }
-            (Rv32iProfile::M2 | Rv32iProfile::M3, Delivered::Message { port, msg }) => {
-                match (*port, msg) {
-                    (PORT, Message::MemV1(msg)) => self.response(msg, ctx),
-                    (PORT, _) => Err(SimError::ComponentFault(
-                        "rv32 cpu: message on mem is not mem.v1",
-                    )),
-                    (IRQ_PORT, Message::Irq(msg)) => self.irq(msg, ctx),
-                    (IRQ_PORT, _) => Err(SimError::ComponentFault(
-                        "rv32 cpu: message on irq is not irq.v0",
-                    )),
-                    _ => Err(SimError::ComponentFault(
-                        "rv32 cpu: message on an unknown port",
-                    )),
+            (
+                Rv32iProfile::M2 | Rv32iProfile::M3 | Rv32iProfile::M5,
+                Delivered::Message { port, msg },
+            ) => match (*port, msg) {
+                (PORT, Message::MemV1(msg)) => self.response(msg, ctx),
+                (PORT, _) => Err(SimError::ComponentFault(
+                    "rv32 cpu: message on mem is not mem.v1",
+                )),
+                (IRQ_PORT, Message::Irq(msg)) => self.irq(msg, ctx),
+                (IRQ_PORT, _) => Err(SimError::ComponentFault(
+                    "rv32 cpu: message on irq is not irq.v0",
+                )),
+                (SIRQ_PORT, Message::Irq(msg)) if self.config.profile == Rv32iProfile::M5 => {
+                    self.sirq(msg, ctx)
                 }
-            }
+                (SIRQ_PORT, _) if self.config.profile == Rv32iProfile::M5 => Err(
+                    SimError::ComponentFault("rv32 cpu: message on sirq is not irq.v0"),
+                ),
+                _ => Err(SimError::ComponentFault(
+                    "rv32 cpu: message on an unknown port",
+                )),
+            },
         }
     }
 
@@ -2081,14 +2195,11 @@ impl Component for Rv32iCpu {
                     fields.push((name, Value::U64(u64::from(value))));
                 }
             }
-            Rv32iProfile::M3 => {
+            Rv32iProfile::M3 | Rv32iProfile::M5 => {
                 let mode = self.m3.privilege.bits();
                 fields.push(("priv", Value::U64(u64::from(mode))));
                 for (name, csr) in CSR_NAMES_M3.iter().zip(privilege::SUPPORTED) {
-                    let value = self
-                        .m3
-                        .read(&self.csrs, csr)
-                        .expect("every listed CSR is supported");
+                    let value = self.read_csr(csr).expect("every listed CSR is supported");
                     fields.push((name, Value::U64(u64::from(value))));
                 }
             }
@@ -2101,6 +2212,7 @@ impl Component for Rv32iCpu {
             Rv32iProfile::M1 => SNAPSHOT_SCHEMA,
             Rv32iProfile::M2 => SNAPSHOT_SCHEMA_M2,
             Rv32iProfile::M3 => SNAPSHOT_SCHEMA_M3,
+            Rv32iProfile::M5 => SNAPSHOT_SCHEMA_M5,
         }
     }
 
@@ -2121,6 +2233,9 @@ impl Component for Rv32iCpu {
     /// physical address (`u8` 0, or `u8` 1 and a `u64`), and tags 6 (`WalkIssue`) and 7
     /// (`WalkWait`, with its `TxnId` first) hold the walk: purpose (`u8` 0 fetch, or 1
     /// data and the `u32` instruction), `level` (`u8`), and `table` (`u32`).
+    ///
+    /// Schema 4 (`M5`, `docs/m5-design.md` §9): schema 3, then `mideleg.SEI`, `mie.SEIE`,
+    /// the M-writable `mip.SEIP`, and the `sirq` input level (`u8` 0/1).
     fn snapshot(&self, w: &mut SnapshotWriter) {
         self.write_config(w);
         w.u32(self.pc);
@@ -2130,7 +2245,7 @@ impl Component for Rv32iCpu {
         w.u64(self.instret);
         w.u64(self.next_txn);
         // Schemas 1 and 2 never hold a physical address or a walk.
-        let m3 = self.config.profile == Rv32iProfile::M3;
+        let m3 = self.config.profile.has_modes();
         let pa = |w: &mut SnapshotWriter, pa: Option<u64>| {
             if m3 {
                 write_pa(w, pa);
@@ -2209,7 +2324,7 @@ impl Component for Rv32iCpu {
             w.u32(c.mtval);
             w.bool(c.irq_level);
         }
-        if self.config.profile == Rv32iProfile::M3 {
+        if self.config.profile.has_modes() {
             let m = &self.m3;
             w.u8(m.privilege.bits());
             w.bool(m.sie);
@@ -2226,6 +2341,13 @@ impl Component for Rv32iCpu {
             w.u32(m.stval);
             w.u32(m.satp);
         }
+        if self.config.profile == Rv32iProfile::M5 {
+            let s = &self.sei;
+            w.bool(s.delegated);
+            w.bool(s.enabled);
+            w.bool(s.soft);
+            w.bool(s.line);
+        }
     }
 
     /// Restores every field at once, after checking the snapshot against the configuration
@@ -2239,7 +2361,7 @@ impl Component for Rv32iCpu {
                 "rv32 cpu: snapshot schema does not match the CPU profile",
             ));
         }
-        if self.config.profile == Rv32iProfile::M3 {
+        if self.config.profile.has_modes() {
             return self.restore_m3(r);
         }
         let mut config = SnapshotWriter::new();
@@ -2273,7 +2395,9 @@ impl Component for Rv32iCpu {
         let csrs = match self.config.profile {
             Rv32iProfile::M1 => CsrFile::new(),
             Rv32iProfile::M2 => read_csrs(r)?,
-            Rv32iProfile::M3 => unreachable!("schema 3 restores through restore_m3"),
+            Rv32iProfile::M3 | Rv32iProfile::M5 => {
+                unreachable!("schemas 3 and 4 restore through restore_m3")
+            }
         };
         self.pc = pc;
         self.regs = regs;
