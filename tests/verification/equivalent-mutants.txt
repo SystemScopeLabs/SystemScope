@@ -115,3 +115,9 @@ components/rv32i/src/sv32.rs:167:48: replace && with || in step
 components/rv32i/src/sv32.rs:171:44: replace || with && in step
 components/rv32i/src/sv32.rs:171:29: replace || with && in step
 components/rv32i/src/sv32.rs:171:17: replace || with && in step
+
+# m3-reference has no M5 configuration and never calls blk_read (syscall 244), so the
+# guard choosing M5's blk_read over -ENOSYS is never evaluated there. The M5 kernel tests
+# (components/os/tests/m5_kernel.rs) cover both arms.
+components/os/src/procop.rs:861:33: replace match guard self.m5.is_some() with true in Model::syscall
+components/os/src/procop.rs:861:33: replace match guard self.m5.is_some() with false in Model::syscall
