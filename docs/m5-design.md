@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.5 complete, M5.6 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.6a complete, M5.6b next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -145,13 +145,22 @@ M5.5 gave A a second part (§27.7): on an M5 kernel, `Perturbation::slice` repla
   - Popping ties out of key order would break S4's dispatch rule and restore's `EventBeforeCursor` check.
   - A rank field in `EventKey` would change its canonical encoding, and with it every M0–M4 trace and golden digest.
 
+M5.6a implemented it (`runtime/src/ties.rs`, `runtime/src/scheduler.rs`):
+- The setting is `SchedulerConfig::ties`, `Ties { seed }`, part of the session configuration. A rank is the BLAKE3 `derive_key` of the seed and the counter (`"SystemScope 2026-10 ties v1"`), reduced into `[floor, 2^24)`. `floor` is the current rank for an event scheduled into the `(tick, phase)` being dispatched, and 0 otherwise.
+- `next_sequence` is the counter. A tied session refuses to schedule once the counter would reach `2^40`.
+- Restore compares each queued event's counter, not its whole sequence, with `next_sequence`, and refuses two queued events with one counter. An untied session's event with a rank fails the same check, since its sequence is at least `2^40`.
+- A tied session's snapshot is format version 3: version 1 with, after the topology hash, the jitter as an option (setting and lanes) and the tie seed. A session without ties writes version 1 or 2 as before, so every M0–M4 snapshot and golden is unchanged. Restore refuses a snapshot whose tie setting differs from the session's.
+- Every scheduler property (`runtime/tests/scheduler_props.rs`) also runs under random tie seeds, against a model that assigns the rank-major sequence itself.
+
+**Finding.** C reorders simultaneous events but changes no result. `m3-reference` has 7,790 `(tick, phase)` groups of two or more events, and a tied run dispatches them in another order from about its 1,240th event. Yet `m2-` and `m3-reference` pass under every tie seed tested, and on `m5-reference` the `outcome`, `os`, `arch`, and `schedule` streams of the unpatched scenario and of every planted race are identical under C. So on these workloads no component's result depends on the order of events with equal `(tick, phase)`, and C finds no race. It checks that no model relies on tie order, which §7.3 set out to expose.
+
 ### 7.4 Identity and Recording
 
 - The empty perturbation is the identity. A run built with it is the same run, byte for byte, as one built without M5 (§19).
 - `P` has a canonical encoding (`perturbation.bin`) and a BLAKE3 identity. A nonempty `P` is part of the session identity, so a snapshot from a perturbed run never restores into an unperturbed session.
 - A perturbed run's trace records the perturbation once, in its header. A message's jitter is recorded with its delivery, so evidence can show where timing changed.
 
-`perturbation.bin` holds, in order, the latency overrides, the slice (tag 0, or tag 1 and a `u32`), and the jitter. The empty perturbation encodes as 10 bytes.
+`perturbation.bin` holds, in order, the latency overrides, the slice (tag 0, or tag 1 and a `u32`), the jitter, and the tie seed (tag 0, or tag 1 and a `u64`). The empty perturbation encodes as 11 bytes.
 
 M5.4b decided O6 and O7 (§27.6): the trace records neither. The perturbation is `perturbation.bin`, kept by the evidence and the reproducer, and its identity names the run's build. A message's jitter is recomputed from the trace instead. `Jitter::draw` is a pure function of the seed, the directed link, and the message's ordinal on it, and a link delivers in the order it sent. So the `n`-th dispatch record that delivers on a directed link is its message `n`, and its jitter is the draw for `n`.
 
@@ -351,6 +360,7 @@ Both profiles use M4's stop rules and report window.
 M5.5 implemented the campaigns (`tests/acceptance/src/m5/campaign.rs`, `races.rs`):
 - A seed's perturbation is drawn from a BLAKE3 stream of the mechanism and the seed. A sets every link in the default jitter scope (§7.2) to `1..=16` cycles and the slice to `SLICE/2..=SLICE·5/4` (4000–10000). B is jitter on that scope with its maximum drawn from 2, 4, 8, or 16.
 - A shorter slice, or A on every link, spends the 3 million event budget on preemptions and bus traffic before the stop rule.
+- M5.6a added C: its tie seed is the stream's first word.
 - The CI list is seeds 0–7 for the unpatched scenario under each mechanism. For each race and mechanism, a test pins the first diverging seed and checks that every earlier seed agrees: R1 0 and 0, R2 1 and 0, R3 0 and 1, R5 1 and 0 (A and B).
 
 ## 15. Schedule Evidence
@@ -381,6 +391,8 @@ Coverage measures what a workload and a campaign exercised. It is a report, neve
 - **Architectural coverage** of the `arch` stream: the instructions retired, the exception and interrupt causes and the modes they were taken in, and the Sv32 PTE cases walked. It is the measurement that M4.7 had to do by hand (m4-design §30.7). `m3-reference` gets the same report, for comparison.
 - **Schedule coverage** across a campaign: the number of distinct schedule streams, and the preemption points per program (the `pc` of each preempted instruction).
 - **Perturbation coverage**: per mechanism, the fraction of seeds whose schedule differed from the unperturbed one. A mechanism that never changes the schedule is reported as ineffective for that workload.
+
+C is ineffective on `m5-reference` (§7.3): a test checks that every stream of every subject is unchanged under it.
 
 ## 18. Reproducer
 
@@ -444,7 +456,9 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.4a** | complete | `outcome` and `schedule` streams, the `m5.*` profiles, projection state in M4 checkpoints, a perturbed `m5-reference` backend | code, tests |
 | **M5.4b** | complete | Schedule evidence: the first differing decision, the per-process trace, the perturbation records (O6, O7) | code, tests |
 | **M5.5** | complete | Planted races R1–R3 and R5; campaigns over A and B | code, CI |
-| **M5.6** | next | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
+| **M5.6a** | complete | Tie order (C): rank-major sequences, snapshot version 3, the property tests, C on every reference platform and in the campaigns | code, tests |
+| **M5.6b** | next | Perturbation minimization (A and B) and `perturbation.bin` in reproducers | code, CI |
+| **M5.6c** | planned | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
 | **M5.8** | planned | Exit audit | docs |
 
@@ -563,3 +577,14 @@ M5.5 planted R1–R3 and R5 in `m5-reference` and ran campaigns over A and B (`t
 | §12.3 | R5 drops a wake in an idle trap where the timer expired, instead of checking `Blocked` before the acknowledgement | the kernel runs atomically and blocks a reader before its command, so the original check cannot race |
 | §13.1, §20 | The instruction limit is a stop rule of the `outcome` projection, with a fifth observation kind `limit { instret }`, and R5 runs at `DEFECT_MAX_INSTRUCTIONS` | the CPU's default limit (10 million) is far past the event budget, and an `rv32.halt` was a projection error |
 | §14 | Seeds 0–7 per mechanism for the unpatched scenario; one pinned first divergence per race and mechanism | about 2–4 seconds per run keeps the CI step within the test budget |
+
+### 27.8 M5.6a
+
+M5.6a implemented tie order, perturbation C (`runtime/src/ties.rs`, `runtime/src/scheduler.rs`, `runtime/src/snapshot.rs`), and added it to `Perturbation`, the reference builders, and the campaigns. Every M0–M4 and M5 golden passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| §7.3 | Restore checks a tied event's counter against `next_sequence`, and refuses two events with one counter | the whole sequence of a tied event is above `next_sequence` by construction |
+| §7.3, §19 | A tied session's snapshot is format version 3, carrying the jitter as an option and the tie seed | the tie seed is part of the session, like the jitter of version 2, and an untied session's layout stays as it was |
+| §16 | C's minimization is not built | C diverges for no subject (§7.3), so it has no finding to minimize |
+| §25 | M5.6 is split into M5.6a (C), M5.6b (minimization and reproducers), and M5.6c (coverage and the seed freeze) | each touches a different layer: the runtime's scheduler, M4's engine and bundle, and reports |
