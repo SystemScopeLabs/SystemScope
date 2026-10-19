@@ -367,7 +367,7 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
             ties: config.ties,
             ..SchedulerConfig::default()
         },
-        jitter: config.jitter,
+        jitter: config.jitter.clone(),
     })
     .map_err(|e| BuildError::Elaboration(format!("{e:?}")))
 }

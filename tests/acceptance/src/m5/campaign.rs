@@ -67,6 +67,7 @@ pub fn perturbation(mechanism: Mechanism, seed: u64) -> Perturbation {
                 max_cycles: B_MAX_CYCLES
                     [(draw(mechanism, seed, 1) % B_MAX_CYCLES.len() as u64) as usize],
                 links: LinkSet::of(&JITTER_LINKS),
+                only: None,
             }),
             ..Perturbation::default()
         },

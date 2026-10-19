@@ -114,6 +114,7 @@ fn jitter(seed: u64, max_cycles: u64) -> Perturbation {
             seed,
             max_cycles,
             links: LinkSet::of(&JITTER_LINKS),
+            only: None,
         }),
         ..Perturbation::default()
     }

@@ -34,6 +34,12 @@ pub const JITTERED_FORMAT_VERSION: u32 = 2;
 /// (`docs/m5-design.md` §7.3). A session without ties never writes it.
 pub const TIED_FORMAT_VERSION: u32 = 3;
 
+/// Version of the layout of a snapshot whose jitter lists the messages it may delay
+/// (`docs/m5-design.md` §16): version 1 with, after the topology hash, the jitter (tag 2,
+/// its setting, its list, and its lanes) and the ties as an option. No other session
+/// writes it.
+pub const LISTED_FORMAT_VERSION: u32 = 4;
+
 /// A snapshot decoded but not yet checked against a session.
 struct Decoded<'a> {
     seed: u64,
@@ -64,6 +70,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         SNAPSHOT_FORMAT_VERSION,
         JITTERED_FORMAT_VERSION,
         TIED_FORMAT_VERSION,
+        LISTED_FORMAT_VERSION,
     ]
     .contains(&version)
     {
@@ -99,12 +106,36 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
                 .into());
             }
         },
+        LISTED_FORMAT_VERSION => match d.u8()? {
+            2 => {
+                let mut jitter = Jitter::decode(&mut d)?;
+                jitter.decode_only(&mut d)?;
+                Some((jitter, JitterState::decode_lanes(&mut d)?))
+            }
+            tag => {
+                return Err(DecodeError::InvalidTag {
+                    what: "listed jitter",
+                    tag,
+                }
+                .into());
+            }
+        },
         _ => None,
     };
-    let ties = if version == TIED_FORMAT_VERSION {
-        Some(Ties::decode(&mut d)?)
-    } else {
-        None
+    let ties = match version {
+        TIED_FORMAT_VERSION => Some(Ties::decode(&mut d)?),
+        LISTED_FORMAT_VERSION => match d.u8()? {
+            0 => None,
+            1 => Some(Ties::decode(&mut d)?),
+            tag => {
+                return Err(DecodeError::InvalidTag {
+                    what: "option",
+                    tag,
+                }
+                .into());
+            }
+        },
+        _ => None,
     };
     let last_dispatched = match d.u8()? {
         0 => None,
@@ -202,7 +233,12 @@ impl Runtime {
         let mut e = Encoder::new();
         e.raw(&SNAPSHOT_MAGIC);
         let ties = self.config.scheduler.ties;
+        let listed = self
+            .jitter
+            .as_ref()
+            .is_some_and(|j| j.jitter.only.is_some());
         e.u32(match (&self.jitter, ties) {
+            _ if listed => LISTED_FORMAT_VERSION,
             (_, Some(_)) => TIED_FORMAT_VERSION,
             (Some(_), None) => JITTERED_FORMAT_VERSION,
             (None, None) => SNAPSHOT_FORMAT_VERSION,
@@ -214,6 +250,19 @@ impl Runtime {
         encode_clock_domains(&mut e, &self.domains);
         e.raw(&self.topology_hash);
         match (&self.jitter, ties) {
+            (Some(jitter), ties) if listed => {
+                e.u8(2);
+                jitter.jitter.encode(&mut e);
+                jitter.jitter.encode_only(&mut e);
+                jitter.encode_lanes(&mut e);
+                match ties {
+                    None => e.u8(0),
+                    Some(ties) => {
+                        e.u8(1);
+                        ties.encode(&mut e);
+                    }
+                }
+            }
             (None, None) => {}
             (Some(jitter), None) => jitter.encode(&mut e),
             (jitter, Some(ties)) => {
@@ -325,7 +374,7 @@ impl Runtime {
         if snap.topology_hash != self.topology_hash {
             return Err(RestoreError::TopologyMismatch);
         }
-        let jitter = match (snap.jitter, self.config.jitter) {
+        let jitter = match (snap.jitter, self.config.jitter.clone()) {
             (None, None) => None,
             (Some((found, lanes)), Some(own)) if found == own => Some(
                 JitterState::with_lanes(own, lanes).ok_or(RestoreError::InvalidState(

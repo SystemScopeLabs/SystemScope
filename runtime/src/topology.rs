@@ -220,8 +220,8 @@ impl TopologyBuilder {
             });
         }
 
-        if let Some(jitter) = config.jitter {
-            check_jitter(&jitter, &links)?;
+        if let Some(jitter) = &config.jitter {
+            check_jitter(jitter, &links)?;
         }
 
         for (slot, slot_peers) in slots.iter().zip(&peers) {
@@ -271,6 +271,21 @@ fn check_jitter(jitter: &Jitter, links: &[LinkDecl]) -> Result<(), ElaborationEr
                     "a jittered link has no Cycles latency",
                 ));
             }
+        }
+    }
+    if let Some(only) = &jitter.only {
+        if only.windows(2).any(|w| w[0] >= w[1]) {
+            return Err(ElaborationError::InvalidJitter(
+                "the listed messages are not ascending",
+            ));
+        }
+        if only
+            .iter()
+            .any(|&(link, dir, _)| dir > 1 || !jitter.links.contains(link))
+        {
+            return Err(ElaborationError::InvalidJitter(
+                "a listed message is not on a jittered link",
+            ));
         }
     }
     Ok(())

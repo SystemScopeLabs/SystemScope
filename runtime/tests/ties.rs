@@ -183,32 +183,33 @@ fn snapshots_carry_the_ties_and_restore_only_into_the_same_setting() {
         seed: 3,
         max_cycles: 2,
         links: LinkSet::of(&[0]),
+        only: None,
     };
     let t = Ties { seed: 5 };
-    for j in [None, Some(jitter)] {
-        let reference = run(Some(t), j);
-        let mut rt = platform(Some(t), j);
+    for j in [None, Some(jitter.clone())] {
+        let reference = run(Some(t), j.clone());
+        let mut rt = platform(Some(t), j.clone());
         rt.init().unwrap();
         assert_eq!(version(&rt), TIED_FORMAT_VERSION);
         for k in 0..reference.len() {
             let snapshot = rt.snapshot().unwrap();
-            let mut restored = platform(Some(t), j);
+            let mut restored = platform(Some(t), j.clone());
             restored.restore(&snapshot).unwrap();
             assert_eq!(restored.snapshot().unwrap(), snapshot, "{k}");
             let rest: Vec<Dispatched> = std::iter::from_fn(|| restored.step().unwrap()).collect();
             assert_eq!(rest, reference[k..], "{k}");
             let other_jitter = match j {
-                None => Some(jitter),
+                None => Some(jitter.clone()),
                 Some(_) => None,
             };
             for (ties, jitter) in [
-                (None, j),
-                (Some(Ties { seed: 6 }), j),
+                (None, j.clone()),
+                (Some(Ties { seed: 6 }), j.clone()),
                 (Some(t), other_jitter),
             ] {
                 assert!(
                     matches!(
-                        platform(ties, jitter).restore(&snapshot),
+                        platform(ties, jitter.clone()).restore(&snapshot),
                         Err(RuntimeError::Restore(RestoreError::InvalidState(_)))
                     ),
                     "{k} into {ties:?} {jitter:?}"

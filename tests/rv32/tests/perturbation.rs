@@ -26,6 +26,7 @@ fn jitter(seed: u64, max_cycles: u64, links: u32) -> Option<Jitter> {
         seed,
         max_cycles,
         links: all(links),
+        only: None,
     })
 }
 
@@ -225,6 +226,7 @@ fn builders_reject_invalid_overrides() {
             seed: 1,
             max_cycles: 1,
             links: LinkSet::of(&[m3ref::LINKS]),
+            only: None,
         }),
         ..m3ref::Config::frozen()
     };

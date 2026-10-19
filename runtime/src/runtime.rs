@@ -35,7 +35,7 @@ use crate::scheduler::{Scheduler, SchedulerConfig};
 use crate::trace::{ResumeError, Trace, check_prefix, dispatch_record};
 
 /// Settings fixed for the lifetime of a session.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionConfig {
     /// Seeds every component's random stream (§5.2).
     pub seed: u64,
@@ -229,9 +229,9 @@ impl Runtime {
             peers,
             links,
             topology_hash: *blake3::hash(topology.as_bytes()).as_bytes(),
-            config,
             scheduler: Scheduler::new(config.scheduler),
-            jitter: config.jitter.map(JitterState::new),
+            jitter: config.jitter.clone().map(JitterState::new),
+            config,
             execution_digest: [0; 32],
             lifecycle: Lifecycle::Elaborated,
             fault: None,
@@ -681,14 +681,14 @@ impl Ctx<'_> {
         let sent = resolve(when, self.scheduler.now(), self.clock, self.domains)?;
         let mut tick = add_latency(peer.latency, sent, self.clock, self.domains)?;
         let lane = self.jitter.as_deref_mut().and_then(|j| {
-            let jitter = j.jitter;
-            j.lane(peer.link, peer.dir).map(|lane| (jitter, lane))
+            let ordinal = j.lane(peer.link, peer.dir)?.sent;
+            let extra = j.jitter.draw(peer.link, peer.dir, ordinal);
+            j.lane(peer.link, peer.dir).map(|lane| (extra, lane))
         });
-        if let Some((jitter, lane)) = lane {
+        if let Some((extra, lane)) = lane {
             let Some(LinkLatency::Cycles { domain, k }) = peer.latency else {
                 unreachable!("elaboration admits only Cycles links to jitter");
             };
-            let extra = jitter.draw(peer.link, peer.dir, lane.sent);
             let late = k
                 .checked_add(extra)
                 .ok_or(SimError::Time(TimeError::TimeOverflow))?;

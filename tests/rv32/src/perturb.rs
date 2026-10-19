@@ -82,7 +82,8 @@ impl Perturbation {
 
     /// The canonical encoding, a reproducer's `perturbation.bin`: the link overrides in
     /// index order, the response overrides in path order, then the slice, the jitter
-    /// setting, and the tie setting, each after a tag.
+    /// setting, and the tie setting, each after a tag. A jitter setting with a list of
+    /// messages has tag 2 and the list after the setting.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.len(self.latencies.links.len());
@@ -104,9 +105,14 @@ impl Perturbation {
         }
         match &self.jitter {
             None => e.u8(0),
-            Some(j) => {
+            Some(j) if j.only.is_none() => {
                 e.u8(1);
                 j.encode(&mut e);
+            }
+            Some(j) => {
+                e.u8(2);
+                j.encode(&mut e);
+                j.encode_only(&mut e);
             }
         }
         match &self.ties {
@@ -157,6 +163,11 @@ impl Perturbation {
         p.jitter = match d.u8()? {
             0 => None,
             1 => Some(Jitter::decode(&mut d)?),
+            2 => {
+                let mut j = Jitter::decode(&mut d)?;
+                j.decode_only(&mut d)?;
+                Some(j)
+            }
             tag => {
                 return Err(DecodeError::InvalidTag {
                     what: "jitter",
@@ -195,6 +206,7 @@ mod tests {
                 seed: 0x5eed,
                 max_cycles: 8,
                 links: LinkSet::of(&[2, 4]),
+                only: None,
             }),
             ties: Some(Ties { seed: 0x71e5 }),
         }
@@ -215,6 +227,13 @@ mod tests {
         let mut ties = sample();
         ties.ties = None;
         assert_ne!(ties.identity(), sample().identity());
+        let mut listed = sample();
+        listed.jitter.as_mut().unwrap().only = Some(vec![(2, 0, 3), (4, 1, 0)].into());
+        assert_eq!(
+            Perturbation::from_bytes(&listed.to_bytes()),
+            Ok(listed.clone())
+        );
+        assert_ne!(listed.identity(), sample().identity());
     }
 
     #[test]
@@ -260,10 +279,10 @@ mod tests {
             })
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[], &[], [0, 2, 0])),
+            Perturbation::from_bytes(&encoded(&[], &[], [0, 3, 0])),
             Err(DecodeError::InvalidTag {
                 what: "jitter",
-                tag: 2
+                tag: 3
             })
         );
         assert_eq!(

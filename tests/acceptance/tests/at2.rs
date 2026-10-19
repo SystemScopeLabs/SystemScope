@@ -243,12 +243,13 @@ fn malformed_snapshots_are_rejected() {
         RestoreError::BadMagic
     );
     assert_eq!(
-        restore_error(seed, &doctored(|b, l| put_u32(b, l.format_version, 4))),
-        RestoreError::FormatVersion(4)
+        restore_error(seed, &doctored(|b, l| put_u32(b, l.format_version, 5))),
+        RestoreError::FormatVersion(5)
     );
-    // Version 2 is a jittered session's layout (m5-design §27.1), and version 3 a tied
-    // one's (§27.8): a version 1 body under either does not decode.
-    for version in [2, 3] {
+    // Version 2 is a jittered session's layout (m5-design §27.1), version 3 a tied one's
+    // (§27.8), and version 4 a listed jitter's (§27.9): a version 1 body under any of them
+    // does not decode.
+    for version in [2, 3, 4] {
         assert!(matches!(
             restore_error(
                 seed,

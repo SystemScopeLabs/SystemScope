@@ -33,6 +33,7 @@ fn jitter(seed: u64, max_cycles: u64) -> Perturbation {
             seed,
             max_cycles,
             links: LinkSet::of(&JITTER_LINKS),
+            only: None,
         }),
         ..Perturbation::default()
     }
@@ -62,7 +63,7 @@ fn lanes(snapshot: &[u8]) -> (Jitter, Vec<[Lane; 2]>) {
 fn the_recomputed_jitter_matches_the_runtime_lanes() {
     let fixture = fixture();
     for p in [jitter(1, 4), jitter(0x5eed, 8)] {
-        let setting = p.jitter.unwrap();
+        let setting = p.jitter.clone().unwrap();
         let (trace, snapshot) = run_traced(&fixture, &p);
         let (delivered, applied) = applied_jitter(&trace, &setting, u64::MAX).unwrap();
         let (found, lanes) = lanes(&snapshot);
