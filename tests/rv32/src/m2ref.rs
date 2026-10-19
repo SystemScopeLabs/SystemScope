@@ -46,7 +46,9 @@ use systemscope_platform::{
 };
 use systemscope_runtime::jitter::{Jitter, JitterState};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
-use systemscope_runtime::snapshot::JITTERED_FORMAT_VERSION;
+use systemscope_runtime::scheduler::SchedulerConfig;
+use systemscope_runtime::snapshot::{JITTERED_FORMAT_VERSION, TIED_FORMAT_VERSION};
+use systemscope_runtime::ties::Ties;
 use systemscope_runtime::topology::TopologyBuilder;
 
 use crate::perturb::Latencies;
@@ -134,6 +136,8 @@ pub struct Config {
     pub latencies: Latencies,
     /// Perturbation B (`docs/m5-design.md` §7.2); `None` in `m2-reference`.
     pub jitter: Option<Jitter>,
+    /// Perturbation C (`docs/m5-design.md` §7.3); `None` in `m2-reference`.
+    pub ties: Option<Ties>,
 }
 
 impl Config {
@@ -152,6 +156,7 @@ impl Config {
             bad_blocks: BTreeSet::new(),
             latencies: Latencies::default(),
             jitter: None,
+            ties: None,
         }
     }
 }
@@ -358,8 +363,11 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
     t.connect((irqc, "cpu"), (cpu, "irq"), link(8));
     t.elaborate(SessionConfig {
         seed: config.seed,
+        scheduler: SchedulerConfig {
+            ties: config.ties,
+            ..SchedulerConfig::default()
+        },
         jitter: config.jitter,
-        ..SessionConfig::default()
     })
     .map_err(|e| BuildError::Elaboration(format!("{e:?}")))
 }
@@ -430,8 +438,11 @@ pub fn components(snapshot: &[u8]) -> Result<Vec<ComponentState>, DecodeError> {
         d.raw(3 * 8 + 1)?;
     }
     d.raw(32)?; // topology hash
-    if version == JITTERED_FORMAT_VERSION {
+    if version == JITTERED_FORMAT_VERSION || version == TIED_FORMAT_VERSION && d.u8()? == 1 {
         JitterState::decode(&mut d)?;
+    }
+    if version == TIED_FORMAT_VERSION {
+        Ties::decode(&mut d)?;
     }
     if d.u8()? == 1 {
         EventKey::decode(&mut d)?;

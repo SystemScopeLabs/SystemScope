@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_runtime::jitter::Jitter;
+use systemscope_runtime::ties::Ties;
 
 /// The largest cycle count an override may set.
 pub const MAX_CYCLES: u64 = 64;
@@ -57,8 +58,8 @@ impl Latencies {
     }
 }
 
-/// A run's whole perturbation (`docs/m5-design.md` §7.4): A and B. C, the tie order,
-/// comes in M5.6. The empty value is the identity.
+/// A run's whole perturbation (`docs/m5-design.md` §7.4): A, B, and C. The empty value
+/// is the identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Perturbation {
     /// Perturbation A.
@@ -69,6 +70,8 @@ pub struct Perturbation {
     pub slice: Option<u32>,
     /// Perturbation B.
     pub jitter: Option<Jitter>,
+    /// Perturbation C, the tie order.
+    pub ties: Option<Ties>,
 }
 
 impl Perturbation {
@@ -78,8 +81,8 @@ impl Perturbation {
     }
 
     /// The canonical encoding, a reproducer's `perturbation.bin`: the link overrides in
-    /// index order, the response overrides in path order, then the slice and the jitter
-    /// setting, each after a tag.
+    /// index order, the response overrides in path order, then the slice, the jitter
+    /// setting, and the tie setting, each after a tag.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.len(self.latencies.links.len());
@@ -104,6 +107,13 @@ impl Perturbation {
             Some(j) => {
                 e.u8(1);
                 j.encode(&mut e);
+            }
+        }
+        match &self.ties {
+            None => e.u8(0),
+            Some(t) => {
+                e.u8(1);
+                t.encode(&mut e);
             }
         }
         e.into_bytes()
@@ -154,6 +164,11 @@ impl Perturbation {
                 });
             }
         };
+        p.ties = match d.u8()? {
+            0 => None,
+            1 => Some(Ties::decode(&mut d)?),
+            tag => return Err(DecodeError::InvalidTag { what: "ties", tag }),
+        };
         d.finish()?;
         Ok(p)
     }
@@ -181,6 +196,7 @@ mod tests {
                 max_cycles: 8,
                 links: LinkSet::of(&[2, 4]),
             }),
+            ties: Some(Ties { seed: 0x71e5 }),
         }
     }
 
@@ -192,16 +208,18 @@ mod tests {
         }
         assert!(Perturbation::default().is_empty());
         assert!(!sample().is_empty());
-        assert_eq!(Perturbation::default().to_bytes(), [0; 10]);
+        assert_eq!(Perturbation::default().to_bytes(), [0; 11]);
         let mut seed = sample();
         seed.jitter.as_mut().unwrap().seed += 1;
         assert_ne!(seed.identity(), sample().identity());
+        let mut ties = sample();
+        ties.ties = None;
+        assert_ne!(ties.identity(), sample().identity());
     }
 
     #[test]
     fn a_perturbation_refuses_disorder_a_bad_tag_and_trailing_bytes() {
-        let encoded = |links: &[(u32, u64)], paths: &[&str], tag: u8| {
-            let (slice, jitter) = (tag >> 4, tag & 0xf);
+        let encoded = |links: &[(u32, u64)], paths: &[&str], tags: [u8; 3]| {
             let mut e = Encoder::new();
             e.len(links.len());
             for &(i, c) in links {
@@ -213,8 +231,9 @@ mod tests {
                 e.str(path);
                 e.u64(1);
             }
-            e.u8(slice);
-            e.u8(jitter);
+            for tag in tags {
+                e.u8(tag);
+            }
             e.into_bytes()
         };
         let order = Err(DecodeError::InvalidTag {
@@ -222,28 +241,35 @@ mod tests {
             tag: 0,
         });
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[(3, 1), (3, 2)], &[], 0)),
+            Perturbation::from_bytes(&encoded(&[(3, 1), (3, 2)], &[], [0; 3])),
             order
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[(4, 1), (3, 2)], &[], 0)),
+            Perturbation::from_bytes(&encoded(&[(4, 1), (3, 2)], &[], [0; 3])),
             order
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[], &["b", "a"], 0)),
+            Perturbation::from_bytes(&encoded(&[], &["b", "a"], [0; 3])),
             order
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[], &[], 0x20)),
+            Perturbation::from_bytes(&encoded(&[], &[], [2, 0, 0])),
             Err(DecodeError::InvalidTag {
                 what: "slice",
                 tag: 2
             })
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[], &[], 2)),
+            Perturbation::from_bytes(&encoded(&[], &[], [0, 2, 0])),
             Err(DecodeError::InvalidTag {
                 what: "jitter",
+                tag: 2
+            })
+        );
+        assert_eq!(
+            Perturbation::from_bytes(&encoded(&[], &[], [0, 0, 2])),
+            Err(DecodeError::InvalidTag {
+                what: "ties",
                 tag: 2
             })
         );

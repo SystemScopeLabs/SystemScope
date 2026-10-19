@@ -1,13 +1,14 @@
-//! M5.1: perturbations A and B on the frozen reference platforms (`docs/m5-design.md`
-//! §7.1, §7.2, §21).
+//! M5.1 and M5.6a: perturbations A, B, and C on the frozen reference platforms
+//! (`docs/m5-design.md` §7.1–§7.3, §21).
 //!
 //! The M2 and M3 reference workloads are race-free, so their results must not depend on
-//! timing: under every latency override and jitter seed here they end the same way,
+//! timing: under every latency override, jitter seed, and tie seed here they end the same way,
 //! print the same bytes, and leave the same disk, while the schedule itself changes. A
 //! perturbed run is as deterministic and as restorable as a frozen one.
 
 use systemscope_runtime::jitter::{Jitter, LinkSet};
 use systemscope_runtime::runtime::Runtime;
+use systemscope_runtime::ties::Ties;
 use systemscope_rv32::block_irq;
 use systemscope_rv32::m2ref;
 use systemscope_rv32::m3::{self, M3Run, Scenario};
@@ -325,7 +326,92 @@ fn a_jittered_run_restores_to_the_same_end() {
     }
 }
 
-/// An unjittered snapshot keeps format version 1; a jittered one is version 2.
+#[test]
+fn m2_reference_passes_under_tie_order() {
+    let frozen = m2_run(&m2ref::Config::frozen());
+    for seed in [1, 2, 3, 0x5eed] {
+        for j in [None, jitter(seed, 2, m2ref::LINKS)] {
+            let config = m2ref::Config {
+                ties: Some(Ties { seed }),
+                jitter: j,
+                ..m2ref::Config::frozen()
+            };
+            let run = m2_run(&config);
+            block_irq::judge(&run).unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+            assert_eq!(run.output, frozen.output, "seed {seed}");
+            assert_eq!(
+                digests(&run.finished.finished.outcome),
+                digests(&m2_run(&config).finished.finished.outcome),
+                "seed {seed} is deterministic"
+            );
+        }
+    }
+}
+
+#[test]
+fn m3_reference_passes_under_tie_order() {
+    for seed in [1, 2, 0x5eed] {
+        for j in [None, jitter(seed, 2, m3ref::LINKS)] {
+            let config = m3ref::Config {
+                ties: Some(Ties { seed }),
+                jitter: j,
+                ..m3ref::Config::frozen()
+            };
+            let run = m3_run(&config, traced());
+            m3::judge_without_trace(&run, Scenario::Reference)
+                .unwrap_or_else(|e| panic!("seed {seed}: {e}"));
+        }
+    }
+}
+
+/// Checkpoints across a tied run restore to the same end; a platform with another tie
+/// seed, or none, refuses them.
+#[test]
+fn a_tied_run_restores_to_the_same_end() {
+    let config = m3ref::Config {
+        ties: Some(Ties { seed: 7 }),
+        ..m3ref::Config::frozen()
+    };
+    let reference = m3_run(&config, Start::Init { traced: false });
+    let n = reference.finished.dispatched.len();
+    let mut rt = m3_platform(&config);
+    rt.init().unwrap();
+    let mut done = 0;
+    for k in (1..5).map(|i| i * n / 5) {
+        while done < k {
+            let ev = rt.step().unwrap().unwrap();
+            assert_eq!(ev, reference.finished.dispatched[done], "event {done}");
+            done += 1;
+        }
+        let snapshot = rt.snapshot().unwrap();
+        for other in [
+            m3ref::Config::frozen(),
+            m3ref::Config {
+                ties: Some(Ties { seed: 8 }),
+                ..m3ref::Config::frozen()
+            },
+        ] {
+            assert!(m3_platform(&other).restore(&snapshot).is_err(), "{k}");
+        }
+        let resumed = m3_run(
+            &config,
+            Start::Restore {
+                snapshot,
+                prefix: None,
+            },
+        );
+        let (x, y) = (&reference.finished.outcome, &resumed.finished.outcome);
+        assert_eq!(
+            (x.state, x.execution, &x.end),
+            (y.state, y.execution, &y.end),
+            "{k}"
+        );
+        assert_eq!(reference.snapshot, resumed.snapshot, "{k}");
+    }
+}
+
+/// An unjittered snapshot keeps format version 1; a jittered one is version 2; a tied
+/// one, jittered or not, is version 3.
 #[test]
 fn snapshot_versions_follow_the_jitter() {
     let version = |config: &m3ref::Config| {
@@ -340,4 +426,11 @@ fn snapshot_versions_follow_the_jitter() {
         ..m3ref::Config::frozen()
     };
     assert_eq!(version(&jittered), 2);
+    for config in [m3ref::Config::frozen(), jittered] {
+        let tied = m3ref::Config {
+            ties: Some(Ties { seed: 1 }),
+            ..config
+        };
+        assert_eq!(version(&tied), 3);
+    }
 }

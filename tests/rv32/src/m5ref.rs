@@ -54,6 +54,7 @@ use systemscope_platform::{
     SimpleIrqController, SimpleTimer, SimpleUart, TimerConfig, UartConfig, dma, irqc, timer, uart,
 };
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
+use systemscope_runtime::scheduler::SchedulerConfig;
 use systemscope_runtime::topology::TopologyBuilder;
 use systemscope_rv32i::{Rv32iConfig, Rv32iCpu, Rv32iProfile};
 
@@ -387,8 +388,11 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
     t.connect((low, "irq"), (cpu, "irq"), link(13));
     t.elaborate(SessionConfig {
         seed: m3.seed,
+        scheduler: SchedulerConfig {
+            ties: m3.ties,
+            ..SchedulerConfig::default()
+        },
         jitter: m3.jitter,
-        ..SessionConfig::default()
     })
     .map_err(|e| BuildError::M3(m3ref::BuildError::Elaboration(format!("{e:?}"))))
 }

@@ -58,6 +58,8 @@ use systemscope_platform::{
 };
 use systemscope_runtime::jitter::Jitter;
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
+use systemscope_runtime::scheduler::SchedulerConfig;
+use systemscope_runtime::ties::Ties;
 use systemscope_runtime::topology::TopologyBuilder;
 
 use crate::perturb::Latencies;
@@ -180,6 +182,8 @@ pub struct Config {
     pub latencies: Latencies,
     /// Perturbation B (`docs/m5-design.md` §7.2); `None` in `m3-reference`.
     pub jitter: Option<Jitter>,
+    /// Perturbation C (`docs/m5-design.md` §7.3); `None` in `m3-reference`.
+    pub ties: Option<Ties>,
     /// The kernel's configuration; [`build`] replaces its clock with the platform's.
     pub kernel: KernelConfig,
     /// The kernel's disk boot.
@@ -198,6 +202,7 @@ impl Config {
             bad_blocks: BTreeSet::new(),
             latencies: Latencies::default(),
             jitter: None,
+            ties: None,
             kernel: kernel_config(ClockDomainId(0)),
             boot: DiskBoot {
                 layout: UserLayout::M3,
@@ -511,8 +516,11 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
     t.connect((kernel, "mem"), (bus, MASTERS[2]), link(10));
     t.elaborate(SessionConfig {
         seed: config.seed,
+        scheduler: SchedulerConfig {
+            ties: config.ties,
+            ..SchedulerConfig::default()
+        },
         jitter: config.jitter,
-        ..SessionConfig::default()
     })
     .map_err(|e| BuildError::Elaboration(format!("{e:?}")))
 }
