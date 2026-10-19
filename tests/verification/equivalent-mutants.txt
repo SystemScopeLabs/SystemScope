@@ -4,7 +4,7 @@
 
 # Equivalent for any input: after `v << 8` the low byte is zero, so `| b` and `^ b` with a
 # byte `b` are the same.
-components/rv32i/src/cpu.rs:1199:50: replace | with ^ in Rv32iCpu::commit_fields
+components/rv32i/src/cpu.rs:1285:50: replace | with ^ in Rv32iCpu::commit_fields
 
 # m3-reference retires no LB, LH, or LHU: its loads are LW and LBU only (checked by
 # m4_mutants::m3_reference_retires_only_the_listed_instructions).
