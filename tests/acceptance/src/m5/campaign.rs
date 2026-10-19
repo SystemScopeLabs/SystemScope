@@ -3,6 +3,7 @@
 //! race, runs under it and is compared with its unperturbed run under `m5.outcome`.
 
 use systemscope_runtime::jitter::{Jitter, LinkSet};
+use systemscope_runtime::ties::Ties;
 use systemscope_rv32::m5ref::SLICE;
 use systemscope_rv32::perturb::{Latencies, Perturbation};
 use systemscope_verify::backend::{Backend, Side, run};
@@ -22,6 +23,8 @@ pub enum Mechanism {
     A,
     /// B: jitter on [`JITTER_LINKS`], its maximum drawn from [`B_MAX_CYCLES`].
     B,
+    /// C: the tie order, its seed drawn from the stream.
+    C,
 }
 
 /// The largest link latency A draws.
@@ -64,6 +67,12 @@ pub fn perturbation(mechanism: Mechanism, seed: u64) -> Perturbation {
                 max_cycles: B_MAX_CYCLES
                     [(draw(mechanism, seed, 1) % B_MAX_CYCLES.len() as u64) as usize],
                 links: LinkSet::of(&JITTER_LINKS),
+            }),
+            ..Perturbation::default()
+        },
+        Mechanism::C => Perturbation {
+            ties: Some(Ties {
+                seed: draw(mechanism, seed, 0),
             }),
             ..Perturbation::default()
         },

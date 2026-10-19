@@ -655,6 +655,7 @@ pub fn defective_config(perturbation: &Perturbation, defect: Option<Defect>) -> 
     let mut c = Config::frozen();
     c.m3.latencies = perturbation.latencies.clone();
     c.m3.jitter = perturbation.jitter;
+    c.m3.ties = perturbation.ties;
     if let Some(slice) = perturbation.slice {
         c.m5.slice = slice;
     }

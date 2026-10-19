@@ -1,7 +1,8 @@
-//! M5.5 on `m5-reference` (`docs/m5-design.md` §12.3, §14): planted races and
+//! M5.5 and M5.6a on `m5-reference` (`docs/m5-design.md` §12.3, §14): planted races and
 //! campaigns. The unpatched scenario agrees under `m5.outcome` for every CI seed of
-//! perturbations A and B, and every planted race diverges for a pinned seed of each, with
-//! every earlier seed agreeing.
+//! perturbations A, B, and C, and every planted race diverges for a pinned seed of A and
+//! of B, with every earlier seed agreeing. C reorders simultaneous events, which no model
+//! depends on: every stream of every subject is unchanged under it.
 
 use systemscope_acceptance::m5::Fixture;
 use systemscope_acceptance::m5::campaign::{
@@ -11,6 +12,7 @@ use systemscope_acceptance::m5::races::Race;
 use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::workspace_root;
 use systemscope_verify::case::InputVariant;
+use systemscope_verify::compare::{Verdict, compare_recordings};
 
 /// The seeds CI runs the unpatched campaign over, for each mechanism.
 const CI_SEEDS: std::ops::Range<u64> = 0..8;
@@ -61,6 +63,39 @@ fn the_unpatched_scenario_agrees_under_a() {
 #[test]
 fn the_unpatched_scenario_agrees_under_b() {
     unpatched_agrees(Mechanism::B);
+}
+
+#[test]
+fn the_unpatched_scenario_agrees_under_c() {
+    unpatched_agrees(Mechanism::C);
+}
+
+/// Under C, the auxiliary `os`, `arch`, and `schedule` streams agree too, for the
+/// unpatched scenario and every race: the tie order reaches the scheduler, but no
+/// component's behavior depends on the order of events with equal `(tick, phase)`.
+#[test]
+fn tie_order_changes_no_stream_of_any_subject() {
+    let f = fixture();
+    let plan = the_plan(&f);
+    let subjects = std::iter::once(Subject(None)).chain(Race::ALL.map(|r| Subject(Some(r))));
+    for subject in subjects {
+        let base = record(&f, subject, &Perturbation::default());
+        let tied = record(&f, subject, &perturbation(Mechanism::C, 0));
+        match compare_recordings(&plan, &base, &tied) {
+            Ok(Verdict::Compared(c)) => {
+                assert!(c.primary.agrees(), "{}", subject.name());
+                assert!(c.failures.is_empty(), "{}", subject.name());
+                assert_eq!(c.auxiliary.len(), 3, "{}", subject.name());
+                assert!(
+                    c.auxiliary.iter().all(|a| a.agrees()),
+                    "{}: {:?}",
+                    subject.name(),
+                    c.auxiliary
+                );
+            }
+            other => panic!("{}: {other:?}", subject.name()),
+        }
+    }
 }
 
 /// Runs `race`'s campaign under `mechanism` up to its first divergence, which must come
