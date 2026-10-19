@@ -14,6 +14,9 @@
 //! [`DmaBlockController`] (`docs/m2-design.md` §9) is the control plane of a block DMA
 //! controller: its registers, lifecycle, validation, and interrupt line.
 //!
+//! M5 adds [`SimpleTimer`] (`docs/m5-design.md` §10), a memory-mapped down-counter that
+//! raises an `irq.v0` line with one self-wake per expiry.
+//!
 //! Like the M0 toy components, they depend only on `systemscope-contracts`.
 
 pub mod bus;
@@ -22,6 +25,7 @@ pub mod irqc;
 pub mod media;
 pub mod mmbus;
 pub mod ram;
+pub mod timer;
 pub mod uart;
 
 pub use bus::{AddressBus, BusConfigError, Region};
@@ -30,4 +34,5 @@ pub use irqc::{IrqControllerConfig, IrqControllerConfigError, SimpleIrqControlle
 pub use media::{BlockMediaConfig, BlockMediaConfigError, MediaImage, SimpleBlockMedia};
 pub use mmbus::{MultiMasterBus, MultiMasterBusConfig, MultiMasterBusConfigError};
 pub use ram::{Ram, RamConfig, RamConfigError, RamImage, Segment};
+pub use timer::{SimpleTimer, TimerConfig};
 pub use uart::{SimpleUart, UartConfig};
