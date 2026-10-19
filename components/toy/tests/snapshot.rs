@@ -153,6 +153,7 @@ fn build(v: Variant) -> Runtime {
             max_events_per_phase: v
                 .max_events_per_phase
                 .unwrap_or(SchedulerConfig::default().max_events_per_phase),
+            ties: None,
         },
         jitter: None,
     };

@@ -3,13 +3,16 @@
 //! The scheduler is compared step by step against a deliberately naive reference model:
 //! pending events live in a `Vec`, the next event is found by a linear scan over plain
 //! `(tick, phase, sequence)` tuples, and every rule is written out independently. Any
-//! difference in dispatch order, assigned keys, or errors fails the test.
+//! difference in dispatch order, assigned keys, or errors fails the test. Every property
+//! also runs under random tie seeds (perturbation C, `docs/m5-design.md` §7.3), where the
+//! model assigns the rank-major sequence itself.
 
 use proptest::prelude::*;
 use systemscope_contracts::error::SimError;
 use systemscope_contracts::event::{EventKey, Phase};
 use systemscope_contracts::time::Tick;
 use systemscope_runtime::scheduler::{Event, Scheduler, SchedulerConfig, SchedulerSnapshot};
+use systemscope_runtime::ties::{COUNTER_BITS, Ties};
 
 #[derive(Clone, Debug)]
 enum Op {
@@ -34,6 +37,7 @@ struct Model {
     last: Option<(u64, u8, u64)>,
     count: u64,
     next_seq: u64,
+    ties: Option<Ties>,
     pending: Vec<(u64, u8, u64, u32)>,
 }
 
@@ -74,11 +78,25 @@ impl Model {
         if tick == now && rank < cur {
             return Err(violation);
         }
-        if self.next_seq == u64::MAX {
+        let last_counter = match self.ties {
+            None => u64::MAX,
+            Some(_) => (1 << COUNTER_BITS) - 1,
+        };
+        if self.next_seq >= last_counter {
             return Err(SimError::SequenceOverflow);
         }
-        let seq = self.next_seq;
+        let counter = self.next_seq;
         self.next_seq += 1;
+        let seq = match self.ties {
+            None => counter,
+            Some(t) => {
+                let floor = match self.last {
+                    Some((lt, lp, ls)) if lt == tick && lp == rank => ls >> COUNTER_BITS,
+                    _ => 0,
+                };
+                t.rank(counter, floor) << COUNTER_BITS | counter
+            }
+        };
         self.pending.push((tick, rank, seq, payload));
         Ok(key_of((tick, rank, seq)))
     }
@@ -115,19 +133,20 @@ enum Outcome {
     Popped(Result<Option<(EventKey, u32)>, SimError>),
 }
 
-fn scheduler_at(start_seq: u64, limit: u64) -> Scheduler<u32> {
+fn scheduler_at(start_seq: u64, limit: u64, ties: Option<Ties>) -> Scheduler<u32> {
     let snapshot = SchedulerSnapshot {
         last_dispatched: None,
         dispatched_in_phase: 0,
         next_sequence: start_seq,
         queue: Vec::new(),
     };
-    Scheduler::restore(config(limit), snapshot).unwrap()
+    Scheduler::restore(config(limit, ties), snapshot).unwrap()
 }
 
-fn config(limit: u64) -> SchedulerConfig {
+fn config(limit: u64, ties: Option<Ties>) -> SchedulerConfig {
     SchedulerConfig {
         max_events_per_phase: limit,
+        ties,
     }
 }
 
@@ -155,6 +174,18 @@ fn start_seq() -> impl Strategy<Value = u64> {
     prop_oneof![Just(0u64), (u64::MAX - 8)..=u64::MAX]
 }
 
+fn ties() -> impl Strategy<Value = Option<Ties>> {
+    prop::option::of(any::<u64>().prop_map(|seed| Ties { seed }))
+}
+
+/// `start` moved to the end of a tied session's counter range when it is near `u64::MAX`.
+fn start_for(start: u64, ties: Option<Ties>) -> u64 {
+    match ties {
+        Some(_) if start > 8 => start - (u64::MAX - ((1 << COUNTER_BITS) - 1)),
+        _ => start,
+    }
+}
+
 fn limit() -> impl Strategy<Value = u64> {
     prop_oneof![1u64..=4, Just(1_000_000)]
 }
@@ -179,12 +210,20 @@ proptest! {
         ops in prop::collection::vec(op(), 0..200),
         start in start_seq(),
         limit in limit(),
+        ties in ties(),
     ) {
-        let mut s = scheduler_at(start, limit);
+        let start = start_for(start, ties);
+        let mut s = scheduler_at(start, limit, ties);
         prop_assert_eq!(s.config().max_events_per_phase, limit);
-        let mut m = Model { limit, last: None, count: 0, next_seq: start, pending: Vec::new() };
+        let mut m = Model { limit, last: None, count: 0, next_seq: start, ties, pending: Vec::new() };
+        let mut popped = None;
         for (i, op) in ops.iter().enumerate() {
-            prop_assert_eq!(apply(&mut s, op, i as u32), apply_model(&mut m, op, i as u32));
+            let outcome = apply(&mut s, op, i as u32);
+            prop_assert_eq!(&outcome, &apply_model(&mut m, op, i as u32));
+            if let Outcome::Popped(Ok(Some((key, _)))) = outcome {
+                prop_assert!(popped.is_none_or(|last| last < key));
+                popped = Some(key);
+            }
             prop_assert_eq!(s.next_sequence(), m.next_seq);
             prop_assert_eq!(s.len(), m.pending.len());
             prop_assert_eq!(s.is_empty(), m.pending.is_empty());
@@ -214,14 +253,38 @@ proptest! {
     }
 
     #[test]
+    fn same_tick_and_phase_dispatches_in_a_seeded_permutation_under_ties(
+        tick in 0u64..=u64::MAX,
+        phase in 0usize..4,
+        n in 20usize..300,
+        seed in any::<u64>(),
+    ) {
+        let ties = Some(Ties { seed });
+        let order = || {
+            let mut s: Scheduler<u32> = Scheduler::new(config(1_000_000, ties));
+            for i in 0..n {
+                s.schedule(Tick(tick), Phase::ALL[phase], i as u32).unwrap();
+            }
+            std::iter::from_fn(|| s.pop().unwrap().map(|e| e.payload)).collect::<Vec<_>>()
+        };
+        let first = order();
+        let mut sorted = first.clone();
+        sorted.sort_unstable();
+        prop_assert_eq!(&sorted, &(0..n as u32).collect::<Vec<_>>());
+        prop_assert_ne!(&first, &sorted);
+        prop_assert_eq!(first, order());
+    }
+
+    #[test]
     fn snapshot_restore_is_transparent(
         prefix in prop::collection::vec(op(), 0..150),
         suffix in prop::collection::vec(op(), 0..150),
         shuffle in prop::collection::vec(any::<u64>(), 150),
         start in start_seq(),
         limit in limit(),
+        ties in ties(),
     ) {
-        let mut s = scheduler_at(start, limit);
+        let mut s = scheduler_at(start_for(start, ties), limit, ties);
         for (i, op) in prefix.iter().enumerate() {
             apply(&mut s, op, i as u32);
         }
@@ -234,7 +297,7 @@ proptest! {
             shuffle.iter().copied().zip(permuted.queue.drain(..)).collect();
         tagged.sort_by_key(|(tag, _)| *tag);
         permuted.queue = tagged.into_iter().map(|(_, e)| e).collect();
-        let mut r = Scheduler::restore(config(limit), permuted).unwrap();
+        let mut r = Scheduler::restore(config(limit, ties), permuted).unwrap();
         prop_assert_eq!(r.snapshot(), snap.clone());
 
         for (i, op) in suffix.iter().enumerate() {

@@ -13,6 +13,8 @@ use systemscope_contracts::error::SimError;
 use systemscope_contracts::event::{EventKey, Phase};
 use systemscope_contracts::time::Tick;
 
+use crate::ties::{self, COUNTER_BITS, Ties};
+
 /// A scheduled event: its key and the payload delivered when it runs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Event<T> {
@@ -28,12 +30,15 @@ pub struct Event<T> {
 pub struct SchedulerConfig {
     /// S5: the most events that may run in one `(tick, phase)`.
     pub max_events_per_phase: u64,
+    /// Perturbation C, tie order (`docs/m5-design.md` §7.3), or `None`.
+    pub ties: Option<Ties>,
 }
 
 impl Default for SchedulerConfig {
     fn default() -> SchedulerConfig {
         SchedulerConfig {
             max_events_per_phase: 1_000_000,
+            ties: None,
         }
     }
 }
@@ -45,7 +50,8 @@ pub struct SchedulerSnapshot<T> {
     pub last_dispatched: Option<EventKey>,
     /// Events dispatched so far in `last_dispatched`'s `(tick, phase)`.
     pub dispatched_in_phase: u64,
-    /// The sequence number the next scheduled event will receive.
+    /// The scheduling counter the next scheduled event will receive: its whole sequence
+    /// in an untied session, the sequence's low [`COUNTER_BITS`] in a tied one.
     pub next_sequence: u64,
     /// Pending events, sorted by key.
     pub queue: Vec<Event<T>>,
@@ -54,9 +60,10 @@ pub struct SchedulerSnapshot<T> {
 /// Why a [`SchedulerSnapshot`] was rejected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SchedulerRestoreError {
-    /// Two pending events share a sequence number.
+    /// Two pending events share a sequence number, or a counter in a tied session.
     DuplicateSequence(u64),
-    /// A pending event's sequence was not yet assigned according to `next_sequence`.
+    /// A pending event's counter was not yet assigned according to `next_sequence`, or an
+    /// untied session's event has a rank.
     SequenceNotYetAssigned(u64),
     /// A pending event is not after the last dispatched event.
     EventBeforeCursor(EventKey),
@@ -155,7 +162,8 @@ impl<T> Scheduler<T> {
         self.config
     }
 
-    /// The sequence number the next scheduled event will receive.
+    /// The scheduling counter the next scheduled event will receive: its sequence in an
+    /// untied session.
     pub fn next_sequence(&self) -> u64 {
         self.next_sequence
     }
@@ -179,7 +187,8 @@ impl<T> Scheduler<T> {
     ///
     /// Enforces S1 (not in the past), S2 (no earlier phase in the current tick),
     /// S3 (never `OBSERVE`), S4 (runtime-assigned sequence), and S6 (no wrap-around).
-    /// On error the scheduler is unchanged.
+    /// In a tied session the sequence is rank-major (`docs/m5-design.md` §7.3), and S6
+    /// applies to the counter below `2^COUNTER_BITS`. On error the scheduler is unchanged.
     pub fn schedule(&mut self, tick: Tick, phase: Phase, payload: T) -> Result<EventKey, SimError> {
         let (now, current) = (self.now(), self.phase());
         let violation = SimError::PhaseViolation {
@@ -200,8 +209,24 @@ impl<T> Scheduler<T> {
         if tick == now && phase < current {
             return Err(violation);
         }
-        let sequence = self.next_sequence;
-        self.next_sequence = sequence.checked_add(1).ok_or(SimError::SequenceOverflow)?;
+        let counter = self.next_sequence;
+        let next = counter.checked_add(1).ok_or(SimError::SequenceOverflow)?;
+        let sequence = match self.config.ties {
+            None => counter,
+            Some(t) => {
+                if next >> COUNTER_BITS != 0 {
+                    return Err(SimError::SequenceOverflow);
+                }
+                let floor = match self.last_dispatched {
+                    Some(last) if last.tick == tick && last.phase == phase => {
+                        ties::rank(last.sequence)
+                    }
+                    _ => 0,
+                };
+                t.rank(counter, floor) << COUNTER_BITS | counter
+            }
+        };
+        self.next_sequence = next;
         let key = EventKey {
             tick,
             phase,
@@ -279,9 +304,13 @@ impl<T> Scheduler<T> {
             ));
         }
 
-        queue.sort_by_key(|e| e.key.sequence);
+        let counter = |sequence| match config.ties {
+            None => sequence,
+            Some(_) => ties::counter(sequence),
+        };
+        queue.sort_by_key(|e| counter(e.key.sequence));
         for pair in queue.windows(2) {
-            if pair[0].key.sequence == pair[1].key.sequence {
+            if counter(pair[0].key.sequence) == counter(pair[1].key.sequence) {
                 return Err(SchedulerRestoreError::DuplicateSequence(
                     pair[0].key.sequence,
                 ));
@@ -289,7 +318,7 @@ impl<T> Scheduler<T> {
         }
         for event in &queue {
             let key = event.key;
-            if key.sequence >= next_sequence {
+            if counter(key.sequence) >= next_sequence {
                 return Err(SchedulerRestoreError::SequenceNotYetAssigned(key.sequence));
             }
             if key.phase == Phase::Observe {
@@ -413,6 +442,7 @@ mod tests {
         let limit = 5;
         let mut s = Scheduler::new(SchedulerConfig {
             max_events_per_phase: limit,
+            ties: None,
         });
         // A zero-delay chain: every event schedules the next in the same (tick, phase).
         s.schedule(Tick(3), Phase::Transfer, 0).unwrap();
@@ -437,6 +467,7 @@ mod tests {
     fn s5_counter_resets_on_phase_or_tick_change() {
         let mut s = Scheduler::new(SchedulerConfig {
             max_events_per_phase: 1,
+            ties: None,
         });
         s.schedule(Tick(1), Phase::Request, 0).unwrap();
         s.schedule(Tick(1), Phase::Transfer, 1).unwrap();

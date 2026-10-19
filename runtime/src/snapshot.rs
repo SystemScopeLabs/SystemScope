@@ -16,6 +16,7 @@ use crate::jitter::{Jitter, JitterState, Lane};
 use crate::rng::Xoshiro256StarStar;
 use crate::runtime::{Lifecycle, Pending, Runtime, RuntimeError};
 use crate::scheduler::{Event, Scheduler, SchedulerRestoreError, SchedulerSnapshot};
+use crate::ties::Ties;
 
 /// First bytes of every snapshot.
 pub const SNAPSHOT_MAGIC: [u8; 8] = *b"SSSNAP\0\0";
@@ -28,6 +29,11 @@ pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
 /// session always writes version 1, byte for byte as before M5.
 pub const JITTERED_FORMAT_VERSION: u32 = 2;
 
+/// Version of the layout of a tied session's snapshot: version 1 with, after the topology
+/// hash, the jitter as an option (setting and lanes) and the tie setting
+/// (`docs/m5-design.md` §7.3). A session without ties never writes it.
+pub const TIED_FORMAT_VERSION: u32 = 3;
+
 /// A snapshot decoded but not yet checked against a session.
 struct Decoded<'a> {
     seed: u64,
@@ -37,6 +43,7 @@ struct Decoded<'a> {
     clock_domains: Vec<(u32, u64, u64, u64, u8)>,
     topology_hash: [u8; 32],
     jitter: Option<(Jitter, Vec<[Lane; 2]>)>,
+    ties: Option<Ties>,
     last_dispatched: Option<EventKey>,
     dispatched_in_phase: u64,
     next_sequence: u64,
@@ -53,7 +60,13 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         return Err(RestoreError::BadMagic);
     }
     let version = d.u32()?;
-    if version != SNAPSHOT_FORMAT_VERSION && version != JITTERED_FORMAT_VERSION {
+    if ![
+        SNAPSHOT_FORMAT_VERSION,
+        JITTERED_FORMAT_VERSION,
+        TIED_FORMAT_VERSION,
+    ]
+    .contains(&version)
+    {
         return Err(RestoreError::FormatVersion(version));
     }
     let seed = d.u64()?;
@@ -73,8 +86,23 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         clock_domains.push(domain);
     }
     let topology_hash = d.array()?;
-    let jitter = if version == JITTERED_FORMAT_VERSION {
-        Some(JitterState::decode(&mut d)?)
+    let jitter = match version {
+        JITTERED_FORMAT_VERSION => Some(JitterState::decode(&mut d)?),
+        TIED_FORMAT_VERSION => match d.u8()? {
+            0 => None,
+            1 => Some(JitterState::decode(&mut d)?),
+            tag => {
+                return Err(DecodeError::InvalidTag {
+                    what: "option",
+                    tag,
+                }
+                .into());
+            }
+        },
+        _ => None,
+    };
+    let ties = if version == TIED_FORMAT_VERSION {
+        Some(Ties::decode(&mut d)?)
     } else {
         None
     };
@@ -113,6 +141,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         clock_domains,
         topology_hash,
         jitter,
+        ties,
         last_dispatched,
         dispatched_in_phase,
         next_sequence,
@@ -172,9 +201,11 @@ impl Runtime {
         self.require_state(Lifecycle::Ready)?;
         let mut e = Encoder::new();
         e.raw(&SNAPSHOT_MAGIC);
-        e.u32(match self.jitter {
-            None => SNAPSHOT_FORMAT_VERSION,
-            Some(_) => JITTERED_FORMAT_VERSION,
+        let ties = self.config.scheduler.ties;
+        e.u32(match (&self.jitter, ties) {
+            (_, Some(_)) => TIED_FORMAT_VERSION,
+            (Some(_), None) => JITTERED_FORMAT_VERSION,
+            (None, None) => SNAPSHOT_FORMAT_VERSION,
         });
         e.u64(self.config.seed);
         e.u64(self.clock.ticks_per_second());
@@ -182,8 +213,19 @@ impl Runtime {
         e.str(CONTRACTS_VERSION);
         encode_clock_domains(&mut e, &self.domains);
         e.raw(&self.topology_hash);
-        if let Some(jitter) = &self.jitter {
-            jitter.encode(&mut e);
+        match (&self.jitter, ties) {
+            (None, None) => {}
+            (Some(jitter), None) => jitter.encode(&mut e),
+            (jitter, Some(ties)) => {
+                match jitter {
+                    None => e.u8(0),
+                    Some(jitter) => {
+                        e.u8(1);
+                        jitter.encode(&mut e);
+                    }
+                }
+                ties.encode(&mut e);
+            }
         }
 
         let scheduler = self.scheduler.snapshot();
@@ -296,6 +338,11 @@ impl Runtime {
                 ));
             }
         };
+        if snap.ties != self.config.scheduler.ties {
+            return Err(RestoreError::InvalidState(
+                "the snapshot's tie order differs from the session's",
+            ));
+        }
         let entries = self.components.iter().zip(&snap.components);
         for (id, (component, &(_, found, _))) in (0u32..).zip(entries) {
             let expected = component.snapshot_schema_version();

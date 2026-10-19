@@ -8,5 +8,6 @@ pub mod rng;
 pub mod runtime;
 pub mod scheduler;
 pub mod snapshot;
+pub mod ties;
 pub mod topology;
 pub mod trace;

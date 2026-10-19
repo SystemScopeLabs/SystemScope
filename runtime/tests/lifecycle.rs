@@ -452,6 +452,7 @@ fn livelock_faults_and_cannot_be_bypassed() {
         .elaborate(SessionConfig {
             scheduler: SchedulerConfig {
                 max_events_per_phase: 10,
+                ties: None,
             },
             ..SessionConfig::default()
         })
