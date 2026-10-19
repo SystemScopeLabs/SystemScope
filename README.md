@@ -9,7 +9,7 @@ events, the same state, and the same trace, on every supported platform.
 **M4: Verification & Debugging Engine** is complete and tagged `v0.5.0-m4`; see
 [docs/releases/m4-exit-audit.md](docs/releases/m4-exit-audit.md). The next milestone,
 **M5: Timing Exploration**, has a frozen design ([docs/m5-design.md](docs/m5-design.md));
-M5.3b is complete and M5.4 is next. SystemScope is still an early system, not a usable
+M5.4a is complete and M5.4b is next. SystemScope is still an early system, not a usable
 simulator of real hardware.
 
 | Milestone | Status | Tag |
@@ -19,7 +19,7 @@ simulator of real hardware.
 | M2 | complete | `v0.3.0-m2` |
 | M3 | complete | `v0.4.0-m3` |
 | M4 | complete | `v0.5.0-m4` |
-| M5 | M5.3b complete; M5.4 next | none |
+| M5 | M5.4a complete; M5.4b next | none |
 
 On `m3-reference`, a bare-metal firmware boots a small modeled kernel. The kernel loads
 five user programs from a disk image through the DMA block controller. It runs them as

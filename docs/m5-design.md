@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.3b complete, M5.4 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.4a complete, M5.4b next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -303,9 +303,16 @@ R5 is a kernel input variant, which is a configuration flag of the modeled kerne
 
 The ordinal is per process. So two runs that interleave processes differently, and do nothing else differently, produce the same `outcome` stream.
 
+M5.4a implemented it (`tests/acceptance/src/m5/verify.rs`):
+- The ordinal is M4's, per stream. The stream holds the processes one after another in pid order, so a process's observations take the same ordinals whatever the interleaving.
+- A process's observations are held until it and every process with a lower pid have ended, then emitted. The shutdown emits every process still held. The `final` observations come last.
+- `end` has the fields `pid`, `status`, `cause`, `epc`, and `tval`. After an exit, `cause`, `epc`, and `tval` are `Absent`; after a fault, `status` is.
+- A UART byte outside a `write`, or a record that names a process that was never created or has ended, is a projection error.
+- The held observations and the bytes of a `write` in progress are projection state across event boundaries. It is saved in every checkpoint (§27.5).
+
 ### 13.2 Syscalls Whose Results Are Invariant
 
-`write`, `blk_read`, `getpid`, `exit`, and `exit_group` are in the invariant set. `sched_yield` always returns 0, so it is in too. **(open)** A syscall that reports time or scheduling, if M5 adds one, is excluded.
+`write`, `blk_read`, `getpid`, `exit`, and `exit_group` are in the invariant set. `sched_yield` is left out (§27.5): it always returns 0, but how often a process calls it depends on the schedule. A waiting `counter` yields, and so does `spinner` while it polls the mailbox. A syscall that reports time or scheduling, if M5 adds one, is excluded too.
 
 ### 13.3 Profiles
 
@@ -329,7 +336,7 @@ Both profiles use M4's stop rules and report window.
 
 A divergence in `outcome` is a symptom. The cause is an interleaving. M5 adds evidence to connect them. It is evidence, never a verdict (m4-design §15).
 
-- **The schedule stream.** Each `os.process.switch`, `os.process.preempt`, `os.process.block`, and `os.process.wake`, with the event index and the preempted process's saved `sepc`. It is projected from the `os` records.
+- **The schedule stream.** Each `os.process.switch`, `os.process.preempt`, `os.process.block`, and `os.process.wake`, with the event index and the preempted process's saved `sepc`. It is projected from the `os` records. M5.4a implemented it as `switch { from, to }`, `preempt { pid, sepc }`, `block { pid, lba }`, and `wake { pid }`. `sepc` is the `epc` of the latest `rv32.interrupt`, which the projection keeps as state. The event index is not a field: the engine already maps every observation to the event that emitted it.
 - **First differing decision.** The engine compares the two sides' schedule streams and reports the first decision that differs. It reports both sides' records around it and the perturbation elements that applied up to that event (§7.4).
 - **Per-process trace.** For the diverging process, M4's state diff at the outcome divergence is shown, together with the shared-page words it read since its last dispatch. Those words come from the trace's memory records, through M4's slice links.
 
@@ -408,7 +415,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.2** | complete | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
 | **M5.3a** | complete | Kernel: interrupt traps, preemption, `blk_read`, idle, shared page, the shutdown's dump | code, tests |
 | **M5.3b** | complete | `m5-reference` platform, firmware and trampoline, the six correct workload programs (§12.2), golden; `SLICE` frozen | code, fixtures |
-| **M5.4** | next | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
+| **M5.4a** | complete | `outcome` and `schedule` streams, the `m5.*` profiles, projection state in M4 checkpoints, a perturbed `m5-reference` backend | code, tests |
+| **M5.4b** | next | Schedule evidence: the first differing decision, the per-process trace, the perturbation records (O6, O7) | code, tests |
 | **M5.5** | planned | Planted races R1–R5; campaigns over A and B | code, CI |
 | **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
@@ -491,3 +499,16 @@ M5.3b implemented `m5-reference` (`tests/rv32/src/m5ref.rs`), its firmware and w
 | §12.2 | The second reader reads twice | its last read comes when every other process is done or blocked, so the kernel idles, and a timer expiry lands while a read is in flight, so a trap finds both sources pending |
 | §19 | `m5-reference`'s every-event check is linear: each checkpoint is restored into a freshly built platform, must snapshot back to itself, then dispatch the uninterrupted run's next event and reach its next checkpoint byte for byte (`cargo xtask m5-golden every-event`, 8 CI shards). The mid snapshot, with both readers blocked, is resumed to the end | M2's and M3's resume to the end is quadratic in the run's length, which is 1.3 million events. By induction the linear check implies it |
 | §19 | The M5 golden snapshot is a runtime snapshot, checked by its BLAKE3 and by resuming it to the golden end on each operating system. It has no independent portable decoder | M3's decoder covers `m3-reference`'s components; the M5 snapshot's portability is shown by cross-OS resume |
+
+### 27.5 M5.4a
+
+M5.4a implemented the `outcome` and `schedule` streams, the `os` stream with the M5 records, the `m5.outcome` and `m5.lockstep` profiles, and a runtime backend on `m5-reference` under a perturbation (`tests/acceptance/src/m5/verify.rs`). The unperturbed run agrees with itself under both profiles. Under two jitter seeds and a latency override, `outcome` agrees and `schedule` diverges. Every M0–M4 golden, bundle, and corpus entry passes unchanged.
+
+| Section | Revision | Why |
+|---|---|---|
+| m4-design §11.3 | A projection may hold state across event boundaries. `Projection::save` gives it as bytes, the checkpoint stores it after the snapshot, and `Projection::load` takes it up on restore. A projection that keeps none uses the defaults, and its checkpoint encodes as in M4 | `outcome` holds each process's observations until the processes before it end. Rebuilding that from the kernel's state would make the kernel keep a record of past output for the verifier. The engine already owns checkpoints, so the state goes there |
+| §13.1 | The ordinal is per stream, over the processes in pid order | the same ordinals as per-process ordinals, within M4's stream model |
+| §13.2 | `sched_yield` is not in the invariant set | its result is constant, but its number of calls depends on the schedule |
+| §15 | The schedule stream carries no event-index field | the engine's event map already records it |
+| §7.2 | The default jitter scope on `m5-reference` is the device, DMA, and interrupt links (`JITTER_LINKS`) | jitter on every link, RAM and the kernel's included, stretches the run past the event budget |
+| §7.1 | The media's latency on `m5-reference`, 3000 cycles, is above the override limit `MAX_CYCLES` (64), so A cannot override it yet | M5.5 sets the ranges its campaigns sample |
