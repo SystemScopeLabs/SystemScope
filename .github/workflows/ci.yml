@@ -110,6 +110,13 @@ jobs:
         run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --test m3_reference
       - name: M3.6 m3-reference verify (fixtures, both disks by §12.3, two identical runs)
         run: cargo xtask m3-reference verify
+      # docs/m5-design.md §12: m5-reference and its workload, end to end: preemption by
+      # the timer, blk_read with two readers queued, the idle spin, the shared page, and
+      # the shutdown's dump.
+      - name: M5.3b m5-reference and its workload (builder, end to end, determinism, snapshots)
+        run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --test m5_reference
+      - name: M5.3b m5-reference verify (fixtures, the judge, two identical runs)
+        run: cargo xtask m5-reference verify
       # docs/m1-design.md §10.4: the committed ACT4 corpus, generated with Sail on Linux by
       # the act4 job, run from the same bytes on both operating systems.
       - name: ACT4 corpus matches its manifest (pins, config, audit)
@@ -152,9 +159,16 @@ jobs:
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m3_golden
       - name: M3 golden verify
         run: cargo xtask m3-golden verify
-      - name: rv32ui fixtures, hello.elf, block_irq.elf, the M3 fixtures, and the ACT4 corpus unchanged
+      # docs/m5-design.md §12: the M5 golden files; the mid snapshot resumes to the end,
+      # and the checkpoints around it and the end resume exactly. The resume of every
+      # checkpoint is the m5-every-event job.
+      - name: M5.3b golden reproduction (golden files, doctoring, checkpoints)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_golden
+      - name: M5 golden verify
+        run: cargo xtask m5-golden verify
+      - name: rv32ui fixtures, hello.elf, block_irq.elf, the M3 and M5 fixtures, and the ACT4 corpus unchanged
         shell: bash
-        run: git diff --exit-code -- tests/rv32/fixtures tests/rv32/hello tests/rv32/block_irq tests/rv32/m3 tests/act4
+        run: git diff --exit-code -- tests/rv32/fixtures tests/rv32/hello tests/rv32/block_irq tests/rv32/m3 tests/rv32/m5 tests/act4
       # Only `cargo xtask bless` writes golden files; a test that wrote one would show here.
       - name: Golden files unchanged
         shell: bash
@@ -187,6 +201,17 @@ jobs:
         with:
           name: m3-result-${{ matrix.os }}
           path: systemscope/target/m3-result
+          if-no-files-found: error
+      # This machine's own M5 result and mid snapshot, for the m5-cross-os job.
+      - name: Emit this machine's M5 result
+        run: cargo xtask m5-golden emit target/m5-result
+      - name: M5 result and committed golden hashes
+        shell: bash
+        run: sha256sum target/m5-result/* tests/golden/m5-reference.json tests/golden/m5-reference.mid.snap
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m5-result-${{ matrix.os }}
+          path: systemscope/target/m5-result
           if-no-files-found: error
       # This machine's own M4 reproducers, for the m4-cross-os job. The bundle writer
       # refuses an existing directory, and the cache may restore an earlier run's.
@@ -317,6 +342,44 @@ jobs:
       - name: Check the ${{ matrix.from }} result and restore its snapshot
         run: cargo xtask m3-golden check target/m3-foreign
 
+  # docs/m5-design.md §12: each operating system resumes the M5 mid snapshot the other
+  # one took to the end, and checks the other one's golden result against the committed
+  # files and its own run.
+  m5-cross-os:
+    name: M5 cross-OS (${{ matrix.os }} checks ${{ matrix.from }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            from: ubuntu-latest
+          - os: ubuntu-latest
+            from: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
+      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+      - uses: actions/download-artifact@v8
+        with:
+          name: m5-result-${{ matrix.from }}
+          path: systemscope/target/m5-foreign
+      - name: Check the ${{ matrix.from }} result and resume its snapshot
+        run: cargo xtask m5-golden check target/m5-foreign
+
   # docs/m4-design.md §16.2: each operating system's reproducer bundles equal the other
   # one's byte for byte and replay there.
   m4-cross-os:
@@ -423,10 +486,43 @@ jobs:
       - name: Resume every checkpoint of shard ${{ matrix.shard }}
         run: cargo run --release --locked -p xtask -- m3-golden every-event shard ${{ matrix.shard }} 8
 
+  # docs/m5-design.md §19: every checkpoint of m5-reference, restored into a freshly
+  # built platform, must snapshot back to itself, dispatch the uninterrupted run's next
+  # event, and reach its next checkpoint byte for byte; split into shards of equal
+  # length. Linear, unlike M3's resume to the end, which the run's length rules out.
+  m5-every-event:
+    name: M5 every-event resume (shard ${{ matrix.shard }} of 8)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
+      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+      - name: M5 fixtures match their manifest
+        run: cargo xtask m5-reference verify
+      - name: Resume every checkpoint of shard ${{ matrix.shard }}
+        run: cargo run --release --locked -p xtask -- m5-golden every-event shard ${{ matrix.shard }} 8
+
   # docs/m1-design.md §10.6: rebuilds the rv32ui fixtures from the pinned riscv-tests,
   # hello.elf from tests/rv32/hello, and block_irq.elf and its disk fixture from
   # tests/rv32/block_irq (docs/m2-design.md §18), and the M3 firmware, user programs,
-  # disks, and expected traces from tests/rv32/m3 (docs/m3-design.md §12, §17.3), with
+  # disks, and expected traces from tests/rv32/m3 (docs/m3-design.md §12, §17.3), and
+  # the M5 ones from tests/rv32/m5 (docs/m5-design.md §12), with
   # the pinned toolchain on a clean machine, and requires the committed bytes and
   # manifests back. The only job that installs a RISC-V toolchain or fetches riscv-tests.
   rv32-fixtures:
