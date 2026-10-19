@@ -196,6 +196,11 @@ jobs:
       # a latency override, and resume from a checkpoint's projection state.
       - name: M5.4a outcome and schedule streams (profiles, perturbations, projection state)
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_verify
+      # M5.4b: the jitter recomputed from the dispatch records matches the runtime's
+      # lanes, the evidence names the engine's schedule divergence, and the state decoder
+      # reads the shutdown's words.
+      - name: M5.4b schedule evidence (jitter recompute, first differing decision, state decoder)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_evidence
       - name: rv32ui fixtures, hello.elf, block_irq.elf, the M3 and M5 fixtures, and the ACT4 corpus unchanged
         shell: bash
         run: git diff --exit-code -- tests/rv32/fixtures tests/rv32/hello tests/rv32/block_irq tests/rv32/m3 tests/rv32/m5 tests/act4

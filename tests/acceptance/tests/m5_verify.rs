@@ -5,13 +5,13 @@
 
 use systemscope_acceptance::m5::Fixture;
 use systemscope_acceptance::m5::verify::{
-    self, JITTER_LINKS, OUTCOME, Perturbation, SCHEDULE, lockstep_profile, outcome_profile,
+    self, JITTER_LINKS, OUTCOME, SCHEDULE, lockstep_profile, outcome_profile,
 };
 use systemscope_contracts::trace::Value;
 use systemscope_runtime::jitter::{Jitter, LinkSet};
 use systemscope_rv32::m5::expected_final;
 use systemscope_rv32::m5ref;
-use systemscope_rv32::perturb::Latencies;
+use systemscope_rv32::perturb::{Latencies, Perturbation};
 use systemscope_rv32::workspace_root;
 use systemscope_verify::backend::{Backend, Side, run};
 use systemscope_verify::case::InputVariant;

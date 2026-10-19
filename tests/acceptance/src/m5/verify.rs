@@ -21,10 +21,9 @@ use systemscope_os::procop::{
 };
 use systemscope_os::syscall::{SYS_BLK_READ, SYS_EXIT, SYS_EXIT_GROUP, SYS_GETPID, SYS_WRITE};
 use systemscope_platform::uart::TX_KIND;
-use systemscope_runtime::jitter::Jitter;
 use systemscope_rv32::m5::{self, DISK_FILE};
 use systemscope_rv32::m5ref::{self, Config};
-use systemscope_rv32::perturb::Latencies;
+use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::projection::{self, HALT_TRAP, INTERRUPT_FIELDS, Rv32Projection};
 use systemscope_rv32i::cpu::INTERRUPT_KIND as CPU_INTERRUPT_KIND;
 use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario};
@@ -35,6 +34,7 @@ use systemscope_verify::profile::{
 use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
 
 use super::{Fixture, SCENARIO};
+use crate::hex;
 
 /// The timing-invariant stream (§13.1).
 pub const OUTCOME: &str = "outcome";
@@ -626,37 +626,21 @@ impl Projection for M5Projection {
 /// declaration index. The CPU's, RAM's, and the kernel's memory links are left out.
 pub const JITTER_LINKS: [u32; 9] = [2, 3, 4, 5, 6, 7, 8, 11, 12];
 
-/// A perturbation of `m5-reference` (§7.1, §7.2): latency overrides and jitter.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Perturbation {
-    /// Perturbation A.
-    pub latencies: Latencies,
-    /// Perturbation B.
-    pub jitter: Option<Jitter>,
+/// The frozen `m5-reference` configuration under `perturbation`.
+pub fn platform_config(perturbation: &Perturbation) -> Config {
+    let mut c = Config::frozen();
+    c.m3.latencies = perturbation.latencies.clone();
+    c.m3.jitter = perturbation.jitter;
+    c
 }
 
-impl Perturbation {
-    /// Whether it is the identity.
-    pub fn is_empty(&self) -> bool {
-        *self == Perturbation::default()
-    }
-
-    /// The frozen platform's configuration under this perturbation.
-    pub fn config(&self) -> Config {
-        let mut c = Config::frozen();
-        c.m3.latencies = self.latencies.clone();
-        c.m3.jitter = self.jitter;
-        c
-    }
-
-    /// The backend build that names it: the scenario's name, and the perturbation when
-    /// there is one.
-    pub fn build(&self) -> String {
-        if self.is_empty() {
-            SCENARIO.to_owned()
-        } else {
-            format!("{SCENARIO} {self:?}")
-        }
+/// The backend build that names `perturbation`: the scenario's name, and the
+/// perturbation's identity when it is not empty.
+pub fn build_name(perturbation: &Perturbation) -> String {
+    if perturbation.is_empty() {
+        SCENARIO.to_owned()
+    } else {
+        format!("{SCENARIO} perturbed {}", hex(&perturbation.identity()))
     }
 }
 
@@ -683,12 +667,12 @@ pub fn config() -> BackendRunConfig {
 /// able to apply media patches to the disk.
 pub fn backend(fixture: &Fixture, perturbation: &Perturbation) -> RuntimeBackend {
     let fixture = fixture.clone();
-    let config = perturbation.config();
+    let config = platform_config(perturbation);
     RuntimeBackend::new(
         BackendId {
             name: "systemscope".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            build: perturbation.build(),
+            build: build_name(perturbation),
         },
         Box::new(move |_, input| {
             let mut disk = fixture.disk.clone();
@@ -700,6 +684,7 @@ pub fn backend(fixture: &Fixture, perturbation: &Perturbation) -> RuntimeBackend
         }),
         Box::new(|| Box::new(M5Projection::default())),
     )
+    .with_decoder(Box::new(super::evidence::decode_state))
 }
 
 #[cfg(test)]
