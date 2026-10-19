@@ -63,6 +63,10 @@ impl Latencies {
 pub struct Perturbation {
     /// Perturbation A.
     pub latencies: Latencies,
+    /// Perturbation A on an M5 kernel: its time slice in timer cycles, replacing the
+    /// platform's. A preemption point moves by the difference at every slice, so the
+    /// points spread over the programs' loops.
+    pub slice: Option<u32>,
     /// Perturbation B.
     pub jitter: Option<Jitter>,
 }
@@ -74,8 +78,8 @@ impl Perturbation {
     }
 
     /// The canonical encoding, a reproducer's `perturbation.bin`: the link overrides in
-    /// index order, the response overrides in path order, then the jitter setting, if
-    /// any, after a tag.
+    /// index order, the response overrides in path order, then the slice and the jitter
+    /// setting, each after a tag.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.len(self.latencies.links.len());
@@ -87,6 +91,13 @@ impl Perturbation {
         for (path, &cycles) in &self.latencies.respond {
             e.str(path);
             e.u64(cycles);
+        }
+        match self.slice {
+            None => e.u8(0),
+            Some(slice) => {
+                e.u8(1);
+                e.u32(slice);
+            }
         }
         match &self.jitter {
             None => e.u8(0),
@@ -128,6 +139,11 @@ impl Perturbation {
             }
             p.latencies.respond.insert(path, d.u64()?);
         }
+        p.slice = match d.u8()? {
+            0 => None,
+            1 => Some(d.u32()?),
+            tag => return Err(DecodeError::InvalidTag { what: "slice", tag }),
+        };
         p.jitter = match d.u8()? {
             0 => None,
             1 => Some(Jitter::decode(&mut d)?),
@@ -159,6 +175,7 @@ mod tests {
                 links: [(2, 5), (9, 1)].into(),
                 respond: [("soc.ram".to_owned(), 3)].into(),
             },
+            slice: Some(7000),
             jitter: Some(Jitter {
                 seed: 0x5eed,
                 max_cycles: 8,
@@ -175,7 +192,7 @@ mod tests {
         }
         assert!(Perturbation::default().is_empty());
         assert!(!sample().is_empty());
-        assert_eq!(Perturbation::default().to_bytes(), [0; 9]);
+        assert_eq!(Perturbation::default().to_bytes(), [0; 10]);
         let mut seed = sample();
         seed.jitter.as_mut().unwrap().seed += 1;
         assert_ne!(seed.identity(), sample().identity());
@@ -184,6 +201,7 @@ mod tests {
     #[test]
     fn a_perturbation_refuses_disorder_a_bad_tag_and_trailing_bytes() {
         let encoded = |links: &[(u32, u64)], paths: &[&str], tag: u8| {
+            let (slice, jitter) = (tag >> 4, tag & 0xf);
             let mut e = Encoder::new();
             e.len(links.len());
             for &(i, c) in links {
@@ -195,7 +213,8 @@ mod tests {
                 e.str(path);
                 e.u64(1);
             }
-            e.u8(tag);
+            e.u8(slice);
+            e.u8(jitter);
             e.into_bytes()
         };
         let order = Err(DecodeError::InvalidTag {
@@ -213,6 +232,13 @@ mod tests {
         assert_eq!(
             Perturbation::from_bytes(&encoded(&[], &["b", "a"], 0)),
             order
+        );
+        assert_eq!(
+            Perturbation::from_bytes(&encoded(&[], &[], 0x20)),
+            Err(DecodeError::InvalidTag {
+                what: "slice",
+                tag: 2
+            })
         );
         assert_eq!(
             Perturbation::from_bytes(&encoded(&[], &[], 2)),
