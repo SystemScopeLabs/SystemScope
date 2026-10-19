@@ -201,6 +201,10 @@ jobs:
       # reads the shutdown's words.
       - name: M5.4b schedule evidence (jitter recompute, first differing decision, state decoder)
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_evidence
+      # M5.5: the planted races R1-R3 and R5 each diverge under perturbations A and B for
+      # a pinned seed, and the unpatched scenario agrees under both for every CI seed.
+      - name: M5.5 planted races and campaigns (unpatched agreement, pinned divergences)
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_campaign
       - name: rv32ui fixtures, hello.elf, block_irq.elf, the M3 and M5 fixtures, and the ACT4 corpus unchanged
         shell: bash
         run: git diff --exit-code -- tests/rv32/fixtures tests/rv32/hello tests/rv32/block_irq tests/rv32/m3 tests/rv32/m5 tests/act4

@@ -34,7 +34,9 @@ use systemscope_rv32::runner::Start;
 
 use crate::hex;
 
+pub mod campaign;
 pub mod evidence;
+pub mod races;
 pub mod verify;
 
 /// The scenario's name in the golden file.

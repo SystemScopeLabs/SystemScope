@@ -9,9 +9,11 @@
 //! restore (`Projection::save`, `Projection::load`).
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_contracts::trace::{TraceRecord, Value};
+use systemscope_os::Defect;
 use systemscope_os::interrupts::{
     BLOCK_KIND, FINAL_KIND, INTERRUPT_KIND as OS_INTERRUPT_KIND, PREEMPT_KIND, WAKE_KIND,
 };
@@ -25,7 +27,7 @@ use systemscope_rv32::m5::{self, DISK_FILE};
 use systemscope_rv32::m5ref::{self, Config};
 use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::projection::{self, HALT_TRAP, INTERRUPT_FIELDS, Rv32Projection};
-use systemscope_rv32i::cpu::INTERRUPT_KIND as CPU_INTERRUPT_KIND;
+use systemscope_rv32i::cpu::{HALT_KIND, INTERRUPT_KIND as CPU_INTERRUPT_KIND};
 use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario};
 use systemscope_verify::observation::ObservedValue;
 use systemscope_verify::profile::{
@@ -76,9 +78,10 @@ const OS_RECORDS: [(&str, &str, &[&str]); 12] = [
 ];
 
 /// Each `outcome` boundary kind and its fields, in kind order.
-const OUTCOME_KINDS: [(&str, &[&str]); 4] = [
+const OUTCOME_KINDS: [(&str, &[&str]); 5] = [
     ("end", &["pid", "status", "cause", "epc", "tval"]),
     ("final", &["word", "value"]),
+    ("limit", &["instret"]),
     ("out", &["pid", "bytes"]),
     ("ret", &["pid", "nr", "value"]),
 ];
@@ -342,10 +345,15 @@ impl State {
 
 /// `rv32.*` records through [`Rv32Projection`] into `arch`; kernel records copied into
 /// `os`, and read into `outcome` and `schedule`; UART bytes read into `outcome`.
+///
+/// The CPU's instruction limit is a stop rule here, not an error (§20): every process
+/// still held is released and `outcome` ends with `limit`. Only a run that never shuts
+/// down reaches it, such as one under planted race R5.
 #[derive(Default)]
 pub struct M5Projection {
     rv32: Rv32Projection,
     state: State,
+    limited: bool,
 }
 
 fn get<'a>(record: &'a TraceRecord, name: &str) -> Result<&'a Value, String> {
@@ -587,6 +595,16 @@ impl Projection for M5Projection {
     }
 
     fn project(&mut self, record: &TraceRecord, out: &mut Vec<Projected>) -> Result<(), String> {
+        if record.kind == HALT_KIND {
+            self.state.release(true, out);
+            out.push(boundary(
+                OUTCOME,
+                "limit",
+                vec![("instret", present(Value::U64(u64_of(record, "instret")?)))],
+            ));
+            self.limited = true;
+            return Ok(());
+        }
         if record.kind.starts_with("rv32.") {
             self.rv32.project(record, out)?;
         }
@@ -609,7 +627,7 @@ impl Projection for M5Projection {
     }
 
     fn finished(&self) -> bool {
-        self.rv32.finished()
+        self.rv32.finished() || self.limited
     }
 
     fn save(&self) -> Vec<u8> {
@@ -628,20 +646,41 @@ pub const JITTER_LINKS: [u32; 9] = [2, 3, 4, 5, 6, 7, 8, 11, 12];
 
 /// The frozen `m5-reference` configuration under `perturbation`.
 pub fn platform_config(perturbation: &Perturbation) -> Config {
+    defective_config(perturbation, None)
+}
+
+/// The frozen `m5-reference` configuration under `perturbation`, its kernel with
+/// `defect` planted (§12.3).
+pub fn defective_config(perturbation: &Perturbation, defect: Option<Defect>) -> Config {
     let mut c = Config::frozen();
     c.m3.latencies = perturbation.latencies.clone();
     c.m3.jitter = perturbation.jitter;
+    if let Some(slice) = perturbation.slice {
+        c.m5.slice = slice;
+    }
+    c.m5.defect = defect;
+    if defect.is_some() {
+        c.max_instructions = DEFECT_MAX_INSTRUCTIONS;
+    }
     c
 }
 
-/// The backend build that names `perturbation`: the scenario's name, and the
-/// perturbation's identity when it is not empty.
-pub fn build_name(perturbation: &Perturbation) -> String {
-    if perturbation.is_empty() {
-        SCENARIO.to_owned()
-    } else {
-        format!("{SCENARIO} perturbed {}", hex(&perturbation.identity()))
+/// The instruction limit under a planted kernel defect: a kernel that loses a wake never
+/// shuts down, and stops here, within the event budget, as M4's stop rule (§20). The
+/// workload retires about 45,000 instructions.
+pub const DEFECT_MAX_INSTRUCTIONS: NonZeroU64 = NonZeroU64::new(60_000).expect("nonzero");
+
+/// The backend build that names `perturbation` and `defect`: the scenario's name, the
+/// planted defect if any, and the perturbation's identity when it is not empty.
+pub fn build_name(perturbation: &Perturbation, defect: Option<Defect>) -> String {
+    let mut name = SCENARIO.to_owned();
+    if let Some(d) = defect {
+        name += &format!(" defect {d:?}");
     }
+    if !perturbation.is_empty() {
+        name += &format!(" perturbed {}", hex(&perturbation.identity()));
+    }
+    name
 }
 
 /// The scenario of `fixture`, unperturbed.
@@ -666,13 +705,22 @@ pub fn config() -> BackendRunConfig {
 /// A SystemScope backend on `m5-reference` with `fixture`'s disk under `perturbation`,
 /// able to apply media patches to the disk.
 pub fn backend(fixture: &Fixture, perturbation: &Perturbation) -> RuntimeBackend {
+    defective_backend(fixture, perturbation, None)
+}
+
+/// [`backend`] with `defect` planted in the kernel.
+pub fn defective_backend(
+    fixture: &Fixture,
+    perturbation: &Perturbation,
+    defect: Option<Defect>,
+) -> RuntimeBackend {
     let fixture = fixture.clone();
-    let config = platform_config(perturbation);
+    let config = defective_config(perturbation, defect);
     RuntimeBackend::new(
         BackendId {
             name: "systemscope".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            build: build_name(perturbation),
+            build: build_name(perturbation, defect),
         },
         Box::new(move |_, input| {
             let mut disk = fixture.disk.clone();
