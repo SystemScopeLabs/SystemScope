@@ -339,7 +339,7 @@ impl fmt::Display for BuildError {
 impl std::error::Error for BuildError {}
 
 /// The platform's builder invariants, before anything is built.
-fn check(config: &Config) -> Result<(), BuildError> {
+pub(crate) fn check(config: &Config) -> Result<(), BuildError> {
     if config.controller_blocks != config.media_blocks {
         return Err(BuildError::CapacityMismatch {
             controller: config.controller_blocks,
@@ -518,7 +518,7 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
 }
 
 /// The load image as the RAM's initial image: the same offsets, bytes, and hash.
-fn ram_image(image: &LoadImage) -> RamImage {
+pub(crate) fn ram_image(image: &LoadImage) -> RamImage {
     RamImage {
         image_hash: image.image_hash,
         segments: image

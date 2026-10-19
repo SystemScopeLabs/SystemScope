@@ -1,0 +1,401 @@
+# m5-reference os.* trace (docs/m5-design.md §12.2)
+# disk disk.img image_hash 6ebfc4cb3fe1689190d7b1db27eb80aa6e5f43e5781f1e90ffb4c47a17fbc4f2
+os.boot entries=6
+os.load.segment pid=1 va=65536 memsz=152 perms="r-x"
+os.process.create pid=1 entry=65536 root=525312 error=""
+os.load.segment pid=2 va=65536 memsz=152 perms="r-x"
+os.process.create pid=2 entry=65536 root=525320 error=""
+os.load.segment pid=3 va=65536 memsz=319 perms="r-x"
+os.load.segment pid=3 va=69632 memsz=528 perms="rw-"
+os.process.create pid=3 entry=65536 root=525328 error=""
+os.load.segment pid=4 va=65536 memsz=319 perms="r-x"
+os.load.segment pid=4 va=69632 memsz=528 perms="rw-"
+os.process.create pid=4 entry=65536 root=525337 error=""
+os.load.segment pid=5 va=65536 memsz=296 perms="r-x"
+os.load.segment pid=5 va=69632 memsz=32 perms="rw-"
+os.process.create pid=5 entry=65536 root=525346 error=""
+os.load.segment pid=6 va=65536 memsz=64 perms="r-x"
+os.process.create pid=6 entry=65536 root=525355 error=""
+os.process.switch from=0 to=1
+os.syscall.enter pid=1 nr=172 a0=0 a1=0 a2=0
+os.syscall.exit pid=1 nr=172 ret=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.syscall.enter pid=2 nr=172 a0=0 a1=0 a2=0
+os.syscall.exit pid=2 nr=172 ret=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.syscall.enter pid=3 nr=172 a0=0 a1=0 a2=0
+os.syscall.exit pid=3 nr=172 ret=3
+os.syscall.enter pid=3 nr=244 a0=200 a1=69632 a2=0
+os.process.block pid=3 lba=200
+os.process.switch from=3 to=4
+os.syscall.enter pid=4 nr=172 a0=0 a1=0 a2=0
+os.syscall.exit pid=4 nr=172 ret=4
+os.syscall.enter pid=4 nr=244 a0=201 a1=69632 a2=0
+os.process.block pid=4 lba=201
+os.process.switch from=4 to=5
+os.interrupt sources=3
+os.syscall.exit pid=3 nr=244 ret=0
+os.process.wake pid=3
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=1
+os.interrupt sources=1
+os.syscall.exit pid=4 nr=244 ret=0
+os.process.wake pid=4
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.syscall.enter pid=2 nr=124 a0=2 a1=0 a2=0
+os.syscall.exit pid=2 nr=124 ret=0
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.syscall.enter pid=2 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=2 nr=124 ret=0
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=6 nr=124 ret=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=6
+os.syscall.enter pid=6 nr=93 a0=0 a1=0 a2=0
+os.process.exit pid=6 status=0
+os.process.switch from=6 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.syscall.enter pid=1 nr=124 a0=1 a1=0 a2=0
+os.syscall.exit pid=1 nr=124 ret=0
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.syscall.enter pid=1 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=1 nr=124 ret=0
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.syscall.enter pid=1 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=1 nr=124 ret=0
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.interrupt sources=2
+os.process.preempt pid=1
+os.process.switch from=1 to=2
+os.interrupt sources=2
+os.process.preempt pid=2
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.syscall.enter pid=1 nr=124 a0=0 a1=0 a2=0
+os.syscall.exit pid=1 nr=124 ret=0
+os.process.switch from=1 to=2
+os.syscall.enter pid=2 nr=93 a0=0 a1=0 a2=0
+os.process.exit pid=2 status=0
+os.process.switch from=2 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=1
+os.syscall.enter pid=1 nr=93 a0=0 a1=0 a2=0
+os.process.exit pid=1 status=0
+os.process.switch from=1 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.interrupt sources=2
+os.process.preempt pid=5
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=5
+os.syscall.enter pid=5 nr=64 a0=1 a1=69632 a2=26
+os.syscall.exit pid=5 nr=64 ret=26
+os.syscall.enter pid=5 nr=93 a0=0 a1=69632 a2=26
+os.process.exit pid=5 status=0
+os.process.switch from=5 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=3
+os.interrupt sources=2
+os.process.preempt pid=3
+os.process.switch from=3 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=3
+os.syscall.enter pid=3 nr=64 a0=1 a1=70144 a2=16
+os.syscall.exit pid=3 nr=64 ret=16
+os.syscall.enter pid=3 nr=93 a0=0 a1=70144 a2=16
+os.process.exit pid=3 status=0
+os.process.switch from=3 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.syscall.enter pid=4 nr=244 a0=201 a1=69632 a2=0
+os.process.block pid=4 lba=201
+os.interrupt sources=3
+os.syscall.exit pid=4 nr=244 ret=0
+os.process.wake pid=4
+os.process.switch from=0 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.interrupt sources=2
+os.process.preempt pid=4
+os.process.switch from=4 to=4
+os.syscall.enter pid=4 nr=64 a0=1 a1=70144 a2=16
+os.syscall.exit pid=4 nr=64 ret=16
+os.syscall.enter pid=4 nr=93 a0=0 a1=70144 a2=16
+os.process.exit pid=4 status=0
+os.shutdown reason=0 detail="the run queue is empty"
+os.final word=0 value=300
+os.final word=1 value=8
+os.final word=2 value=0

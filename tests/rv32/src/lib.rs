@@ -41,6 +41,12 @@
 //! - [`m3`] is the M3 scenario (§12, §17.3): `m3-firmware.elf` and the five user
 //!   programs, built from `m3/*.S` by `m3/build-m3.sh`, the disks and expected `os.*`
 //!   traces, pinned by `m3/manifest.json`, and the §12.3 judge and metrics.
+//! - [`m5ref`] builds `m5-reference`, the M5 reference platform (`docs/m5-design.md`
+//!   §12.1): `m3-reference` with the `M5` CPU, the timer, the interrupt-driven block
+//!   controller, and the kernel's M5 configuration, plus the disk's data blocks.
+//! - [`m5`] is the M5 workload (§12.2): `m5-firmware.elf` and the four user programs,
+//!   built from `m5/*.S` by `m5/build-m5.sh`, the disk and expected `os.*` trace, pinned by
+//!   `m5/manifest.json`, and its judge and coverage.
 //!
 //! Tests only read the committed fixtures. `cargo xtask rv32-fixtures build` rebuilds
 //! them on Linux, and `cargo xtask rv32-fixtures verify` checks them without a network or
@@ -55,6 +61,8 @@ pub mod hello;
 pub mod m2ref;
 pub mod m3;
 pub mod m3ref;
+pub mod m5;
+pub mod m5ref;
 pub mod manifest;
 pub mod perturb;
 pub mod privgen;

@@ -1,0 +1,63 @@
+{
+  "schema": 1,
+  "toolchain": {
+    "distro": "Ubuntu 24.04 (noble)",
+    "packages": [
+      {
+        "name": "gcc-riscv64-unknown-elf",
+        "version": "13.2.0-11ubuntu1+12",
+        "deb_sha256": "47d4670801c391c65513e2002a19280c6bbdba158f5a467ac5100bff813de0e3",
+        "version_line": "riscv64-unknown-elf-gcc (13.2.0-11ubuntu1+12) 13.2.0"
+      },
+      {
+        "name": "binutils-riscv64-unknown-elf",
+        "version": "2.42-1ubuntu1+6",
+        "deb_sha256": "d42d42efdaa0563155d0e1263675852255b20864cc525db9265247a5dec2ce30",
+        "version_line": "GNU assembler (2.42-1ubuntu1+6) 2.42"
+      }
+    ]
+  },
+  "firmware_flags": [
+    "-march=rv32i_zicsr",
+    "-mabi=ilp32",
+    "-static",
+    "-mcmodel=medany",
+    "-fvisibility=hidden",
+    "-nostdlib",
+    "-nostartfiles",
+    "-Wl,--build-id=none",
+    "-Wl,--no-relax"
+  ],
+  "user_flags": [
+    "-march=rv32i",
+    "-mabi=ilp32",
+    "-static",
+    "-mcmodel=medany",
+    "-fvisibility=hidden",
+    "-nostdlib",
+    "-nostartfiles",
+    "-Wl,--build-id=none",
+    "-Wl,--no-relax"
+  ],
+  "ram": { "base": "0x80000000", "size": "0x01000000" },
+  "inputs": [
+    { "path": "tests/rv32/m5/build-m5.sh", "blake3": "34facb3ae1c0dae80e346d3bb2fbdb45d831bbc4e5eefdbb73e1b7a57d49a0f7" },
+    { "path": "tests/rv32/m5/counter.S", "blake3": "bb8a410eb2d4bef362942c48e5bfb234d9a17030fa70d4d52992f8f6204a8661" },
+    { "path": "tests/rv32/m5/firmware.S", "blake3": "463ec3c18c44481a6ac43c818f2431f08d3c15eab218062f69db1554e20d5312" },
+    { "path": "tests/rv32/m5/firmware.ld", "blake3": "c697157cb553097b4bc9e36a3a34e2e54f716e65259db5cec29c9f1aa26c6251" },
+    { "path": "tests/rv32/m5/handoff.S", "blake3": "e9d2c944d7f73d8c788422397f05aff0e110d1b478a73f26df08bd434d1fc8ef" },
+    { "path": "tests/rv32/m5/reader.S", "blake3": "c5a1ee5c721cef099c19678724bd18bb1b57f8f9684669817272ef3ed6578c11" },
+    { "path": "tests/rv32/m5/spinner.S", "blake3": "fdeb8c21f4dbf57ba4ffc3e4b204b9b8d2c4b82f50c892ba668cb10481bd00b9" },
+    { "path": "tests/rv32/m5/user-bss.ld", "blake3": "71aa559e830122360e808e20e573a548c9f63da8875b15550b2c4a2af3c6a632" },
+    { "path": "tests/rv32/m5/user.ld", "blake3": "c9e3af57217b1cf45393745aa65297487d3c9b747adfde7cacefde019b05134e" }
+  ],
+  "firmware": { "file": "m5-firmware.elf", "blake3": "0a5871c71a59a741dc7c22123a79e2fdaa365b70ad1f6fcc4b171b33cdce5415", "image_hash": "0a5871c71a59a741dc7c22123a79e2fdaa365b70ad1f6fcc4b171b33cdce5415", "entry": "0x80000000" },
+  "programs": [
+    { "file": "counter.elf", "blake3": "5a85907082e2e7e3e024721deb27c17d845282ad8818be85ae3b754efe02c15d" },
+    { "file": "reader.elf", "blake3": "8bf3f0bf46296baeca27a5e51a4aad998aaa36d71d07576ace1360d99f41f73a" },
+    { "file": "spinner.elf", "blake3": "4800cb4d98638a26bfeed4d83d7d93d59bbced38455b3d00ceff3225ce7ca666" },
+    { "file": "handoff.elf", "blake3": "c20984d981a883182ada6f80a84d7a209e26aefccf45f1181913a61a0aa7ffe0" }
+  ],
+  "disk": { "file": "disk.img", "blocks": 256, "programs": ["counter", "counter", "reader", "reader", "spinner", "handoff"], "blake3": "6ebfc4cb3fe1689190d7b1db27eb80aa6e5f43e5781f1e90ffb4c47a17fbc4f2" },
+  "trace": { "file": "os-trace.txt", "blake3": "fa3b83357fec6798c2d945f5b7dcad44e51e642006ca0b71675e5ddf740e4445" }
+}
