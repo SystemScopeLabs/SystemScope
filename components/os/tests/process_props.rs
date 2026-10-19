@@ -133,6 +133,7 @@ fn observed(h: &Harness) -> Oracle {
             let c = match pcb.state {
                 ProcState::Ready => 'R',
                 ProcState::Running => 'U',
+                ProcState::Blocked => 'B',
                 ProcState::Faulted { .. } => 'F',
                 ProcState::Exited { .. } => 'E',
             };

@@ -9,6 +9,8 @@
 //!   frame in RAM does, until the kernel decides. The PCB holds **no** copy.
 //! - **Ready:** the PCB's `context` owns it: `x1`–`x31`, `pc` (the `sepc` to resume at),
 //!   and `sstatus`.
+//! - **Blocked** (M5): the PCB's `context` owns it, as for `Ready`; the process is not
+//!   queued until its block read completes.
 //! - **Exited / Faulted:** nobody; the process never runs again.
 //!
 //! The kernel moves a context from the trap frame into the PCB when the process is
@@ -44,6 +46,9 @@ pub enum ProcState {
     Ready,
     /// On the hart.
     Running,
+    /// Waiting for its `blk_read` (M5, `docs/m5-design.md` §11.3): not queued, holding its
+    /// context, which resumes after the `ecall`.
+    Blocked,
     /// Ended with `status`. Only M3.5's `exit` produces it.
     Exited {
         /// The exit status.
@@ -71,6 +76,7 @@ impl ProcState {
         match self {
             ProcState::Ready => "ready",
             ProcState::Running => "running",
+            ProcState::Blocked => "blocked",
             ProcState::Exited { .. } => "exited",
             ProcState::Faulted { .. } => "faulted",
         }
@@ -134,7 +140,7 @@ pub struct Pcb {
     pub pid: u32,
     /// The lifecycle state.
     pub state: ProcState,
-    /// The saved context; present exactly when `Ready`.
+    /// The saved context; present exactly when `Ready` or `Blocked`.
     pub context: Option<Context>,
     /// The root table's PPN. Kept after the process ends, as history.
     pub root: u32,
@@ -274,6 +280,38 @@ impl Processes {
         Ok(pid)
     }
 
+    /// Blocks the running process (M5): it becomes `Blocked` with `context`, not queued.
+    /// Returns its PID.
+    pub fn block_current(&mut self, context: Context) -> Result<u32, Violation> {
+        let pid = self
+            .current
+            .ok_or(Violation("block with no running process"))?;
+        let pcb = self
+            .pcb_mut(pid)
+            .ok_or(Violation("running PID has no PCB"))?;
+        pcb.state = ProcState::Blocked;
+        pcb.context = Some(context);
+        self.current = None;
+        Ok(pid)
+    }
+
+    /// Wakes the `Blocked` process `pid` (M5) with `a0` as its result: it becomes `Ready`
+    /// at the queue's tail.
+    pub fn wake(&mut self, pid: u32, a0: u32) -> Result<(), Violation> {
+        let pcb = self.pcb_mut(pid).ok_or(Violation("woken PID has no PCB"))?;
+        if pcb.state != ProcState::Blocked {
+            return Err(Violation("woken process is not Blocked"));
+        }
+        let context = pcb
+            .context
+            .as_mut()
+            .ok_or(Violation("blocked process has no context"))?;
+        context.regs[crate::syscall::A0] = a0;
+        pcb.state = ProcState::Ready;
+        self.queue.push_back(pid);
+        Ok(())
+    }
+
     /// Ends the running process with `state`, which is terminal, and frees its frames
     /// (§6.6). Returns its PID.
     pub fn end_current(&mut self, state: ProcState) -> Result<u32, Violation> {
@@ -331,7 +369,8 @@ impl Processes {
                 return v("PIDs not ascending, or outside 1..=images");
             }
             last = p.pid;
-            if (p.state == ProcState::Ready) != p.context.is_some() {
+            let holds = matches!(p.state, ProcState::Ready | ProcState::Blocked);
+            if holds != p.context.is_some() {
                 return v("a context on a process that is not Ready, or none on a Ready one");
             }
             if p.state.is_terminal() != p.tables.is_empty()

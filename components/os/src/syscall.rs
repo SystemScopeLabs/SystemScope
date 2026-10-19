@@ -14,6 +14,7 @@
 //! | 94 | `exit_group(status)` | does not return (the same as `exit`) |
 //! | 124 | `sched_yield()` | 0 |
 //! | 172 | `getpid()` | the PID |
+//! | 244 | `blk_read(lba, buf)` | 0 or `-EFAULT` / `-EIO`, after the caller blocks (M5 only, else `-ENOSYS`) |
 //! | any other | | `-ENOSYS` |
 //!
 //! Nothing here reaches the host: no host syscall, no host PID, no host output.
@@ -41,6 +42,12 @@ pub const SYS_EXIT_GROUP: u32 = 94;
 pub const SYS_SCHED_YIELD: u32 = 124;
 /// `getpid()`.
 pub const SYS_GETPID: u32 = 172;
+/// `blk_read(lba, buf)`: Linux's `__NR_arch_specific_syscall`, a number no generic
+/// syscall uses (`docs/m5-design.md` §11.3).
+pub const SYS_BLK_READ: u32 = 244;
+
+/// I/O error.
+pub const EIO: u32 = 5;
 
 /// Bad file descriptor.
 pub const EBADF: u32 = 9;
@@ -77,6 +84,8 @@ pub enum Syscall {
     SchedYield,
     /// 172.
     GetPid,
+    /// 244.
+    BlkRead,
     /// Any other number: `-ENOSYS`.
     Unsupported(u32),
 }
@@ -90,6 +99,7 @@ impl Syscall {
             SYS_EXIT_GROUP => Syscall::ExitGroup,
             SYS_SCHED_YIELD => Syscall::SchedYield,
             SYS_GETPID => Syscall::GetPid,
+            SYS_BLK_READ => Syscall::BlkRead,
             other => Syscall::Unsupported(other),
         }
     }
@@ -177,6 +187,12 @@ pub fn pte_address(table: u32, va: u32, level: u8) -> u64 {
 /// Decides the level-`level` PTE `pte` for a U-mode read of `va` with `SUM = MXR = 0`
 /// (the privileged specification's "Virtual Address Translation Process").
 pub fn walk_step(pte: u32, level: u8, va: u32) -> WalkStep {
+    walk_step_for(pte, level, va, false)
+}
+
+/// [`walk_step`] for a U-mode store when `store`: a leaf must also be writable and dirty,
+/// as the CPU requires (it never sets `D` itself). `blk_read`'s buffer is checked so.
+pub fn walk_step_for(pte: u32, level: u8, va: u32, store: bool) -> WalkStep {
     if pte & V == 0 || (pte & R == 0 && pte & W != 0) {
         return WalkStep::Fault;
     }
@@ -191,6 +207,9 @@ pub fn walk_step(pte: u32, level: u8, va: u32) -> WalkStep {
         };
     }
     if pte & U == 0 || pte & R == 0 || pte & A == 0 {
+        return WalkStep::Fault;
+    }
+    if store && (pte & W == 0 || pte & D == 0) {
         return WalkStep::Fault;
     }
     if level == 1 {

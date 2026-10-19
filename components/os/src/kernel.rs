@@ -18,6 +18,10 @@
 //!   first `ENTER` boots from the disk: the kernel reads the executable table and each
 //!   executable through the block controller and validates them itself (§8). This is
 //!   `m3-reference`'s kernel.
+//! - **M5** ([`ModeledKernel::with_processes_m5`], [`ModeledKernel::with_disk_m5`]): either
+//!   process source with [`crate::interrupts`]: interrupt traps, preemption, `blk_read`,
+//!   idle, and the shared page (`docs/m5-design.md` §11). Its whitelist also grants the
+//!   interrupt controller, the timer, and the shared page, and its snapshot is schema 2.
 //!
 //! All share the gate, the engine, and the snapshot's first sections.
 //!
@@ -88,10 +92,13 @@ use crate::config::{KernelConfig, KernelConfigError};
 use crate::core::{Access, Completion, Op, Operation};
 use crate::frames::Frames;
 use crate::image::{BootImage, DiskBoot, MAX_PROCESSES, PlanError, ProcessPlan, perm_bits};
+use crate::interrupts::{
+    BLK_BYTES, Irq, M5, M5Config, M5Stage, Origin, Request, Then, is_fill_start,
+};
 use crate::process::{Context, Pcb, ProcState, Processes, perms_from_bits};
 use crate::procop::{Life, Model, Note, ProcOp, Source, Stage};
 use crate::pte;
-use crate::space::{Region, Space, frames_needed, megapage_conflict, region_image};
+use crate::space::{Region, Space, frames_needed_with, megapage_conflict, region_image};
 use crate::syscall::Buffer;
 
 /// The offset of `ENTER` in the `kgate` window.
@@ -109,6 +116,8 @@ pub const ISSUE: u64 = 0;
 
 /// Layout of [`ModeledKernel`]'s snapshot.
 pub const SNAPSHOT_SCHEMA: u32 = 1;
+/// Layout of an M5 kernel's snapshot: schema 1 with the M5 additions.
+pub const SNAPSHOT_SCHEMA_M5: u32 = 2;
 
 /// Trace kind of an accepted `ENTER`: `txn` (the held one), `value`, `op`.
 pub const ENTER_KIND: &str = "os.gate.enter";
@@ -180,6 +189,15 @@ fn violation(v: crate::process::Violation) -> SimError {
     SimError::ComponentFault(v.0)
 }
 
+/// The whitelist (§6.3): the configuration's grants, and in an M5 kernel the interrupt
+/// controller, the timer, and the shared page; never `kgate`.
+fn permits(config: &KernelConfig, model: Option<&Model>, addr: u64, len: u64) -> bool {
+    config.permits(addr, len)
+        || model.and_then(Model::m5_config).is_some_and(|m5| {
+            !config.gate.overlaps(addr, len) && m5.grants().iter().any(|g| g.contains(addr, len))
+        })
+}
+
 impl ModeledKernel {
     /// Creates an idle prototype kernel with nothing held and the `mem` counter at 0, or
     /// the first rule of [`KernelConfig::validate`] the configuration breaks.
@@ -202,7 +220,7 @@ impl ModeledKernel {
         plan: ProcessPlan,
     ) -> Result<ModeledKernel, PlanError> {
         plan.validate(&config)?;
-        Ok(ModeledKernel::with_source(config, Source::Plan(plan)))
+        Ok(ModeledKernel::with_source(config, Source::Plan(plan), None))
     }
 
     /// Creates a kernel that boots from disk, awaiting boot: no process, no table read
@@ -210,17 +228,53 @@ impl ModeledKernel {
     /// [`DiskBoot::validate`] the configuration and disk boot break.
     pub fn with_disk(config: KernelConfig, disk: DiskBoot) -> Result<ModeledKernel, PlanError> {
         disk.validate(&config)?;
-        Ok(ModeledKernel::with_source(config, Source::Disk(disk)))
+        Ok(ModeledKernel::with_source(config, Source::Disk(disk), None))
     }
 
-    fn with_source(config: KernelConfig, source: Source) -> ModeledKernel {
+    /// [`ModeledKernel::with_processes`] for an M5 kernel (`docs/m5-design.md` §11): no
+    /// block request and not idle; or the first rule of [`ProcessPlan::validate`] or
+    /// [`M5Config::validate`] broken.
+    pub fn with_processes_m5(
+        config: KernelConfig,
+        plan: ProcessPlan,
+        m5: M5Config,
+    ) -> Result<ModeledKernel, PlanError> {
+        plan.validate(&config)?;
+        m5.validate(&config, &plan.layout)?;
+        Ok(ModeledKernel::with_source(
+            config,
+            Source::Plan(plan),
+            Some(m5),
+        ))
+    }
+
+    /// [`ModeledKernel::with_disk`] for an M5 kernel (`docs/m5-design.md` §11): no block
+    /// request and not idle; or the first rule of [`DiskBoot::validate`] or
+    /// [`M5Config::validate`] broken.
+    pub fn with_disk_m5(
+        config: KernelConfig,
+        disk: DiskBoot,
+        m5: M5Config,
+    ) -> Result<ModeledKernel, PlanError> {
+        disk.validate(&config)?;
+        m5.validate(&config, &disk.layout)?;
+        Ok(ModeledKernel::with_source(
+            config,
+            Source::Disk(disk),
+            Some(m5),
+        ))
+    }
+
+    fn with_source(config: KernelConfig, source: Source, m5: Option<M5Config>) -> ModeledKernel {
         let frames = Frames::new(config.frame_pool.base, config.frame_pool.size);
+        let mut model = Model::new(source, Processes::new(frames));
+        model.m5 = m5.map(M5::new);
         ModeledKernel {
             config,
             state: State::Idle,
             held: None,
             next_txn: TxnId(0),
-            model: Some(Model::new(source, Processes::new(frames))),
+            model: Some(model),
         }
     }
 
@@ -237,6 +291,11 @@ impl ModeledKernel {
     /// The processes, in process mode.
     pub fn processes(&self) -> Option<&Processes> {
         self.model.as_ref().map(|m| &m.procs)
+    }
+
+    /// The M5 state: the block requests and the idle flag, in an M5 kernel.
+    pub fn m5(&self) -> Option<&M5> {
+        self.model.as_ref().and_then(|m| m.m5.as_ref())
     }
 
     fn work(&self) -> Option<&Work> {
@@ -372,7 +431,12 @@ impl ModeledKernel {
         let access = work.access(&self.config).ok_or(SimError::ComponentFault(
             "modeled kernel: ISSUE wake after the last access",
         ))?;
-        if !self.config.permits(access.addr(), access.len()) {
+        if !permits(
+            &self.config,
+            self.model.as_ref(),
+            access.addr(),
+            access.len(),
+        ) {
             return Err(SimError::ComponentFault(
                 "modeled kernel: access outside the whitelist",
             ));
@@ -551,6 +615,8 @@ impl Component for ModeledKernel {
     /// With processes, also (§6.8): `life` (`await_boot`, `up`, `down`), `running` (the
     /// PID or `none`), `queue` (PIDs head first, comma-separated), `processes` (one
     /// `pid:state:root` per PCB, the root PPN in hex, `;`-separated), and `free_frames`.
+    /// An M5 kernel adds `idle` and `requests` (one `pid:lba` per block request, head
+    /// first, comma-separated).
     fn inspect(&self) -> StateView {
         let phase = match self.state {
             State::Idle => "idle",
@@ -617,12 +683,27 @@ impl Component for ModeledKernel {
                     Value::U64(procs.frames().free_count() as u64),
                 ),
             ]);
+            if let Some(m5) = &model.m5 {
+                let requests: Vec<String> = m5
+                    .requests
+                    .iter()
+                    .map(|r| format!("{}:{}", r.pid, r.lba))
+                    .collect();
+                fields.extend([
+                    ("idle", Value::Bool(m5.idle)),
+                    ("requests", Value::Str(requests.join(","))),
+                ]);
+            }
         }
         StateView { fields }
     }
 
     fn snapshot_schema_version(&self) -> u32 {
-        SNAPSHOT_SCHEMA
+        if self.m5().is_some() {
+            SNAPSHOT_SCHEMA_M5
+        } else {
+            SNAPSHOT_SCHEMA
+        }
     }
 
     /// Schema 1:
@@ -663,10 +744,28 @@ impl Component for ModeledKernel {
     ///    and the frames as a count and PPNs); the run queue head first (count and
     ///    PIDs); the running PID (tag 0, or 1 then the PID); and the frame bitmap
     ///    (length-prefixed bytes).
+    ///
+    /// Schema 2, an M5 kernel's, is schema 1 with:
+    ///
+    /// - after the source, the M5 configuration: the marker `0xE5`; the interrupt
+    ///   controller and timer windows; the block and timer sources (`u8` each); the slice
+    ///   (`u32`); the shared page (`u64`); `SHARED_VA` and the final word count (`u32`
+    ///   each);
+    /// - the process state `u8` 4 `Blocked`;
+    /// - the stages 12 `Pending`, 13 `TimerStatus`, 14 `TimerAck`, 15 `BlkStatus` with the
+    ///   trap, 16 `BlkAck` with the trap and the error `u8`, 17 `Fill` with the trap, the
+    ///   buffer VA, its pages, and the bytes copied, 18 `BlkCommand` with the LBA and what
+    ///   follows (tag `u8` 0 then the blocked PID, or 1 then the trap), 19 `BlkWalk` with
+    ///   the LBA, the buffer, the pages found, the table, the level `u8`, and the 33
+    ///   context words, 20 `Idle` with `satp`, 21 `Arm`, 22 `Disarm` and 23 `Final` with
+    ///   the reason; a trap is its origin (tag `u8` 0 then the 33 context words, or 1 for
+    ///   idle), the sources left (`u32`), and the preemption flag (`u8`);
+    /// - after the frame bitmap, the idle flag (`u8`) and the block requests head first
+    ///   (count, then per request the PID, the LBA, the buffer VA, and its pages).
     fn snapshot(&self, w: &mut SnapshotWriter) {
         self.config.encode(w);
         if let Some(model) = &self.model {
-            encode_source(&model.source, w);
+            encode_prefix(model, w);
         }
         match &self.state {
             State::Idle => w.u8(0),
@@ -732,12 +831,23 @@ impl Component for ModeledKernel {
     /// boot, with a table the configured disk rejects or not the one counted, an entry
     /// past it or a process at or after it, a staging read length no boot reads, or a
     /// load whose headers do not parse or whose frames do not fit their image.
+    ///
+    /// An M5 kernel also rejects block requests that are not exactly the `Blocked`
+    /// processes, each once, with a 512-byte buffer and its writable pages; idle with a
+    /// process running, or at rest with a process queued or no request; and an M5 stage
+    /// its state cannot be in: a trap whose origin is not the running process or idle,
+    /// with sources outside the two enabled, not handled in source order, or a preemption
+    /// before the timer's; a completion, a copy, or a command that is not the head
+    /// request's; a copy that is not at a chunk start; a block walk that is not the running
+    /// process's store mapping of its buffer, or whose context does not resume after the
+    /// `ecall`; idle with another `satp` than the head request's process; Arm after any
+    /// process ran; and Disarm or Final that was not decided.
     fn restore(&mut self, r: &mut SnapshotReader<'_>, _: u32) -> Result<(), RestoreError> {
         let invalid = RestoreError::InvalidState;
         let mut config = SnapshotWriter::new();
         self.config.encode(&mut config);
         if let Some(model) = &self.model {
-            encode_source(&model.source, &mut config);
+            encode_prefix(model, &mut config);
         }
         if r.raw(config.as_bytes().len())? != config.as_bytes() {
             return Err(invalid("modeled kernel: snapshot has a different config"));
@@ -767,7 +877,7 @@ impl Component for ModeledKernel {
         let next_txn = r.u64()?;
         let model = match &self.model {
             None => None,
-            Some(m) => Some(decode_model(r, &self.config, &m.source)?),
+            Some(m) => Some(decode_model(r, &self.config, &m.source, m.m5_config())?),
         };
         let work = match (raw_op, &model) {
             (None, _) => None,
@@ -792,7 +902,7 @@ impl Component for ModeledKernel {
             let access = work
                 .access(&self.config)
                 .expect("from_parts checked the step");
-            if !self.config.permits(access.addr(), access.len()) {
+            if !permits(&self.config, model.as_ref(), access.addr(), access.len()) {
                 return Err(invalid(
                     "modeled kernel: pending access outside the whitelist",
                 ));
@@ -877,15 +987,20 @@ enum RawStage {
         headers: Vec<u8>,
         frames: Vec<u32>,
     },
+    M5(M5Stage),
 }
 
 /// A decoded cursor before it is checked: the table's entries, if read, and the index.
 type RawCursor = (Option<Vec<ExecEntry>>, u32);
 
-fn encode_source(source: &Source, w: &mut SnapshotWriter) {
-    match source {
+/// The model's part of the configuration prefix: the source, then the M5 configuration.
+fn encode_prefix(model: &Model, w: &mut SnapshotWriter) {
+    match &model.source {
         Source::Plan(plan) => plan.encode(w),
         Source::Disk(disk) => disk.encode(w),
+    }
+    if let Some(m5) = model.m5_config() {
+        m5.encode(w);
     }
 }
 
@@ -1047,7 +1162,182 @@ fn encode_stage(stage: &Stage, w: &mut SnapshotWriter) {
             w.bytes(headers);
             encode_ppns(space.frames(), w);
         }
+        Stage::M5 { stage, .. } => encode_m5_stage(stage, w),
     }
+}
+
+fn encode_irq(irq: &Irq, w: &mut SnapshotWriter) {
+    match &irq.from {
+        Origin::Running(c) => {
+            w.u8(0);
+            encode_context(c, w);
+        }
+        Origin::Idle => w.u8(1),
+    }
+    w.u32(irq.todo);
+    w.u8(u8::from(irq.preempt));
+}
+
+fn decode_irq(r: &mut SnapshotReader<'_>) -> Result<Irq, RestoreError> {
+    let from = match r.u8()? {
+        0 => Origin::Running(decode_context(r)?),
+        1 => Origin::Idle,
+        tag => return Err(bad_tag("modeled kernel interrupt origin", tag)),
+    };
+    let todo = r.u32()?;
+    let preempt = match r.u8()? {
+        0 => false,
+        1 => true,
+        tag => return Err(bad_tag("modeled kernel preemption flag", tag)),
+    };
+    Ok(Irq {
+        from,
+        todo,
+        preempt,
+    })
+}
+
+fn encode_m5_stage(stage: &M5Stage, w: &mut SnapshotWriter) {
+    match stage {
+        M5Stage::Pending { irq } => {
+            w.u8(12);
+            encode_irq(irq, w);
+        }
+        M5Stage::TimerStatus { irq } => {
+            w.u8(13);
+            encode_irq(irq, w);
+        }
+        M5Stage::TimerAck { irq } => {
+            w.u8(14);
+            encode_irq(irq, w);
+        }
+        M5Stage::BlkStatus { irq } => {
+            w.u8(15);
+            encode_irq(irq, w);
+        }
+        M5Stage::BlkAck { irq, error } => {
+            w.u8(16);
+            encode_irq(irq, w);
+            w.u8(*error);
+        }
+        M5Stage::Fill {
+            irq,
+            buf,
+            pages,
+            done,
+        } => {
+            w.u8(17);
+            encode_irq(irq, w);
+            w.u32(*buf);
+            encode_ppns(pages, w);
+            w.u32(*done);
+        }
+        M5Stage::BlkCommand { lba, then } => {
+            w.u8(18);
+            w.u32(*lba);
+            match then {
+                Then::Dispatch { from } => {
+                    w.u8(0);
+                    w.u32(*from);
+                }
+                Then::Irq(irq) => {
+                    w.u8(1);
+                    encode_irq(irq, w);
+                }
+            }
+        }
+        M5Stage::BlkWalk {
+            lba,
+            buffer,
+            pages,
+            table,
+            level,
+            context,
+        } => {
+            w.u8(19);
+            w.u32(*lba);
+            encode_buffer(buffer, w);
+            encode_ppns(pages, w);
+            w.u32(*table);
+            w.u8(*level);
+            encode_context(context, w);
+        }
+        M5Stage::Idle { satp } => {
+            w.u8(20);
+            w.u32(*satp);
+        }
+        M5Stage::Arm => w.u8(21),
+        M5Stage::Disarm { reason } => {
+            w.u8(22);
+            w.u32(*reason);
+        }
+        M5Stage::Final { reason } => {
+            w.u8(23);
+            w.u32(*reason);
+        }
+    }
+}
+
+/// Decodes the M5 stage of `tag` (12 to 23).
+fn decode_m5_stage(tag: u8, r: &mut SnapshotReader<'_>) -> Result<M5Stage, RestoreError> {
+    Ok(match tag {
+        12 => M5Stage::Pending {
+            irq: decode_irq(r)?,
+        },
+        13 => M5Stage::TimerStatus {
+            irq: decode_irq(r)?,
+        },
+        14 => M5Stage::TimerAck {
+            irq: decode_irq(r)?,
+        },
+        15 => M5Stage::BlkStatus {
+            irq: decode_irq(r)?,
+        },
+        16 => M5Stage::BlkAck {
+            irq: decode_irq(r)?,
+            error: r.u8()?,
+        },
+        17 => M5Stage::Fill {
+            irq: decode_irq(r)?,
+            buf: r.u32()?,
+            pages: decode_ppns(r)?,
+            done: r.u32()?,
+        },
+        18 => M5Stage::BlkCommand {
+            lba: r.u32()?,
+            then: match r.u8()? {
+                0 => Then::Dispatch { from: r.u32()? },
+                1 => Then::Irq(decode_irq(r)?),
+                tag => return Err(bad_tag("modeled kernel block command", tag)),
+            },
+        },
+        19 => {
+            let lba = r.u32()?;
+            let (sepc, buf, n) = decode_buffer(r)?;
+            let pages = decode_ppns(r)?;
+            let table = r.u32()?;
+            let level = r.u8()?;
+            let context = decode_context(r)?;
+            let buffer = Buffer::new(sepc, buf, n)
+                .filter(|b| b.n == BLK_BYTES)
+                .ok_or(RestoreError::InvalidState(
+                    "modeled kernel: a blk_read buffer no blk_read produces",
+                ))?;
+            M5Stage::BlkWalk {
+                lba,
+                buffer,
+                pages,
+                table,
+                level,
+                context,
+            }
+        }
+        20 => M5Stage::Idle { satp: r.u32()? },
+        21 => M5Stage::Arm,
+        22 => M5Stage::Disarm { reason: r.u32()? },
+        23 => M5Stage::Final { reason: r.u32()? },
+        tag => return Err(bad_tag("modeled kernel stage", tag)),
+    })
 }
 
 fn decode_op(r: &mut SnapshotReader<'_>) -> Result<RawOp, RestoreError> {
@@ -1110,6 +1400,7 @@ fn decode_op(r: &mut SnapshotReader<'_>) -> Result<RawOp, RestoreError> {
                 headers: r.bytes()?.to_vec(),
                 frames: decode_ppns(r)?,
             },
+            tag @ 12..=23 => RawStage::M5(decode_m5_stage(tag, r)?),
             tag => {
                 return Err(RestoreError::Decode(DecodeError::InvalidTag {
                     what: "modeled kernel stage",
@@ -1143,6 +1434,7 @@ fn encode_model(model: &Model, w: &mut SnapshotWriter) {
         match p.state {
             ProcState::Ready => w.u8(0),
             ProcState::Running => w.u8(1),
+            ProcState::Blocked => w.u8(4),
             ProcState::Exited { status } => {
                 w.u8(2);
                 w.u32(status as u32);
@@ -1182,6 +1474,16 @@ fn encode_model(model: &Model, w: &mut SnapshotWriter) {
         }
     }
     w.bytes(&procs.frames().bitmap());
+    if let Some(m5) = &model.m5 {
+        w.u8(u8::from(m5.idle));
+        w.len(m5.requests.len());
+        for req in &m5.requests {
+            w.u32(req.pid);
+            w.u32(req.lba);
+            w.u32(req.buf);
+            encode_ppns(&req.pages, w);
+        }
+    }
 }
 
 fn bad_tag(what: &'static str, tag: u8) -> RestoreError {
@@ -1193,7 +1495,9 @@ fn decode_model(
     r: &mut SnapshotReader<'_>,
     config: &KernelConfig,
     source: &Source,
+    m5: Option<M5Config>,
 ) -> Result<Model, RestoreError> {
+    let shared = m5.map(|m| m.shared_mapping());
     let invalid = RestoreError::InvalidState;
     let life = match r.u8()? {
         0 => Life::AwaitBoot,
@@ -1228,6 +1532,7 @@ fn decode_model(
                 epc: r.u32()?,
                 tval: r.u32()?,
             },
+            4 if m5.is_some() => ProcState::Blocked,
             tag => return Err(bad_tag("modeled kernel process state", tag)),
         };
         let context = match r.u8()? {
@@ -1265,6 +1570,31 @@ fn decode_model(
         tag => return Err(bad_tag("modeled kernel running PID", tag)),
     };
     let bitmap = r.bytes()?.to_vec();
+    let m5 = match m5 {
+        None => None,
+        Some(config) => {
+            let idle = match r.u8()? {
+                0 => false,
+                1 => true,
+                tag => return Err(bad_tag("modeled kernel idle flag", tag)),
+            };
+            let n = count(r, 16)?;
+            let mut requests = VecDeque::with_capacity(n);
+            for _ in 0..n {
+                requests.push_back(Request {
+                    pid: r.u32()?,
+                    lba: r.u32()?,
+                    buf: r.u32()?,
+                    pages: decode_ppns(r)?,
+                });
+            }
+            Some(M5 {
+                config,
+                requests,
+                idle,
+            })
+        }
+    };
     let pool = Frames::new(config.frame_pool.base, config.frame_pool.size);
     if bitmap.len() != pool.count().div_ceil(8) {
         return Err(invalid("modeled kernel: frame bitmap of the wrong size"));
@@ -1293,7 +1623,7 @@ fn decode_model(
             continue;
         }
         let Source::Plan(plan) = source else {
-            if disk_space(config, source, p).is_none_or(|space| {
+            if disk_space(config, source, p, shared).is_none_or(|space| {
                 space.root != p.root || space.tables != p.tables || space.regions != p.regions
             }) {
                 return Err(invalid(
@@ -1311,21 +1641,21 @@ fn decode_model(
         };
         let mut frames = p.frames();
         frames.sort_unstable();
-        if frames.len() != frames_needed(&boot.image, &plan.layout)
+        if frames.len() != frames_needed_with(&boot.image, &plan.layout, shared.map(|s| s.0))
             || megapage_conflict(&boot.image, config)
         {
             return Err(invalid(
                 "modeled kernel: a process's frames do not fit its image",
             ));
         }
-        let space = Space::build(config, &plan.layout, boot, &frames);
+        let space = Space::build_with(config, &plan.layout, boot, &frames, shared);
         if space.root != p.root || space.tables != p.tables || space.regions != p.regions {
             return Err(invalid(
                 "modeled kernel: a process's tables or regions are not its image's",
             ));
         }
     }
-    Ok(Model {
+    let model = Model {
         source: source.clone(),
         entries,
         procs: Processes::from_parts(
@@ -1335,13 +1665,89 @@ fn decode_model(
             Frames::from_owners(pool.base(), owners),
         ),
         life,
+        m5,
+    };
+    check_requests(&model)?;
+    Ok(model)
+}
+
+/// The physical page `pcb` maps at `va` for a U-mode load, or a store when `store`: the
+/// shared page, or a region page with the permission.
+fn user_page(pcb: &Pcb, shared: Option<(u32, u32)>, va: u32, store: bool) -> Option<u32> {
+    if let Some((shared_va, ppn)) = shared
+        && va & !0xFFF == shared_va
+    {
+        return Some(ppn);
+    }
+    pcb.regions.iter().find_map(|r| {
+        let page = (va.checked_sub(r.va)? / 4096) as usize;
+        let frame = *r.frames.get(page)?;
+        let allowed = if store { r.perms.write } else { r.perms.read };
+        allowed.then_some(frame)
     })
+}
+
+/// The pages of `buffer` that `pcb` maps for a load, or a store when `store`, from the
+/// first, as far as they are mapped.
+fn buffer_pages(pcb: &Pcb, shared: Option<(u32, u32)>, buffer: &Buffer, store: bool) -> Vec<u32> {
+    (0..buffer.pages())
+        .map_while(|i| user_page(pcb, shared, buffer.page_va(i), store))
+        .collect()
+}
+
+/// Checks an M5 model's requests and idle flag: the requests are exactly the `Blocked`
+/// processes, each once, each with a 512-byte buffer and all its pages, writable; idle
+/// only after boot and with nothing running.
+fn check_requests(model: &Model) -> Result<(), RestoreError> {
+    let invalid = RestoreError::InvalidState;
+    let Some(m5) = &model.m5 else {
+        return Ok(());
+    };
+    let procs = &model.procs;
+    let shared = model.shared();
+    let mut blocked: Vec<u32> = procs
+        .pcbs()
+        .iter()
+        .filter(|p| p.state == ProcState::Blocked)
+        .map(|p| p.pid)
+        .collect();
+    let mut pids: Vec<u32> = m5.requests.iter().map(|r| r.pid).collect();
+    pids.sort_unstable();
+    blocked.sort_unstable();
+    if pids != blocked || pids.windows(2).any(|w| w[0] == w[1]) {
+        return Err(invalid(
+            "modeled kernel: block requests that are not the Blocked processes",
+        ));
+    }
+    for req in &m5.requests {
+        let pcb = procs.pcb(req.pid).expect("a Blocked process");
+        let fits = Buffer::new(0, req.buf, BLK_BYTES).is_some_and(|b| {
+            let pages = buffer_pages(pcb, shared, &b, true);
+            pages.len() == b.pages() && pages == req.pages
+        });
+        if !fits {
+            return Err(invalid(
+                "modeled kernel: a block request whose buffer is not its caller's",
+            ));
+        }
+    }
+    if m5.idle && (procs.current().is_some() || model.life == Life::AwaitBoot) {
+        return Err(invalid(
+            "modeled kernel: idle before boot or with a process running",
+        ));
+    }
+    Ok(())
 }
 
 /// For a disk boot, the address space the image `pcb`'s regions describe builds in its
 /// frames (§6.8: the kernel keeps no image after boot); `None` if no creation could have
 /// assigned them.
-fn disk_space(config: &KernelConfig, source: &Source, pcb: &Pcb) -> Option<Space> {
+fn disk_space(
+    config: &KernelConfig,
+    source: &Source,
+    pcb: &Pcb,
+    shared: Option<(u32, u32)>,
+) -> Option<Space> {
     let layout = source.layout();
     let boot = BootImage {
         staged: config.staging.base as u32,
@@ -1350,8 +1756,9 @@ fn disk_space(config: &KernelConfig, source: &Source, pcb: &Pcb) -> Option<Space
     };
     let mut frames = pcb.frames();
     frames.sort_unstable();
-    (frames.len() == frames_needed(&boot.image, layout) && !megapage_conflict(&boot.image, config))
-        .then(|| Space::build(config, layout, &boot, &frames))
+    let needed = frames_needed_with(&boot.image, layout, shared.map(|s| s.0));
+    (frames.len() == needed && !megapage_conflict(&boot.image, config))
+        .then(|| Space::build_with(config, layout, &boot, &frames, shared))
 }
 
 /// Checks a decoded disk boot cursor against the restored model: a boot in progress,
@@ -1432,8 +1839,10 @@ fn proc_op(
                 return Err(invalid("modeled kernel: creation out of boot order"));
             }
             let ascending = frames.windows(2).all(|w| w[0] < w[1]);
+            let shared = model.shared();
             if !ascending
-                || frames.len() != frames_needed(&boot.image, &plan.layout)
+                || frames.len()
+                    != frames_needed_with(&boot.image, &plan.layout, shared.map(|s| s.0))
                 || megapage_conflict(&boot.image, config)
             {
                 return Err(invalid(
@@ -1442,7 +1851,7 @@ fn proc_op(
             }
             Stage::Create {
                 pid,
-                space: Space::build(config, &plan.layout, boot, &frames),
+                space: Space::build_with(config, &plan.layout, boot, &frames, shared),
             }
         }
         RawStage::Command { cursor } => Stage::Command {
@@ -1478,8 +1887,9 @@ fn proc_op(
             let image = parse_user_elf32(&headers, entry.byte_len, disk.layout.image_range())
                 .map_err(|_| invalid("modeled kernel: a load whose headers do not parse"))?;
             let ascending = frames.windows(2).all(|w| w[0] < w[1]);
+            let shared = model.shared();
             if !ascending
-                || frames.len() != frames_needed(&image, &disk.layout)
+                || frames.len() != frames_needed_with(&image, &disk.layout, shared.map(|s| s.0))
                 || megapage_conflict(&image, config)
             {
                 return Err(invalid("modeled kernel: load frames do not fit the image"));
@@ -1489,7 +1899,7 @@ fn proc_op(
                 file_len: entry.byte_len,
                 image,
             };
-            let space = Space::build(config, &disk.layout, &boot, &frames);
+            let space = Space::build_with(config, &disk.layout, &boot, &frames, shared);
             Stage::Load {
                 cursor,
                 headers,
@@ -1498,7 +1908,7 @@ fn proc_op(
             }
         }
         RawStage::ReadFrame => {
-            if model.life != Life::Up || procs.current().is_none() {
+            if model.life != Life::Up || (procs.current().is_none() && !model.is_idle()) {
                 return Err(invalid(
                     "modeled kernel: frame read with no process running",
                 ));
@@ -1530,7 +1940,7 @@ fn proc_op(
             table,
             level,
         } => {
-            let (buffer, space, expected) = syscall_space(config, model, buffer)?;
+            let (buffer, space, expected) = syscall_space(config, model, buffer, false)?;
             let va = buffer.page_va(pages.len());
             let table_ok = match level {
                 1 => table == space.root,
@@ -1554,7 +1964,7 @@ fn proc_op(
             pages,
             done,
         } => {
-            let (buffer, _, expected) = syscall_space(config, model, buffer)?;
+            let (buffer, _, expected) = syscall_space(config, model, buffer, false)?;
             if pages != expected || !buffer.is_chunk_start(done) {
                 return Err(invalid(
                     "modeled kernel: output that is not the running process's buffer",
@@ -1574,20 +1984,27 @@ fn proc_op(
             }
             Stage::Return { sepc, value }
         }
+        RawStage::M5(stage) => Stage::M5 {
+            m5: model
+                .m5_config()
+                .ok_or(invalid("modeled kernel: an M5 stage without M5"))?,
+            stage: m5_stage(config, model, stage)?,
+        },
     };
     ProcOp::from_parts(config, stage, step, data).ok_or(invalid(
         "modeled kernel: operation step or working data not reachable",
     ))
 }
 
-/// For a `write` stage: the buffer, which must be one a `write` produces; the running
-/// process's address space, rebuilt from its image (for a disk boot, the one its regions
-/// describe); and the physical page of each buffer page from the first, as far as the
-/// pages are mapped readable.
+/// For a `write` stage, or a `blk_read` walk when `store`: the buffer, which must be one
+/// a `write` produces; the running process's address space, rebuilt from its image (for a
+/// disk boot, the one its regions describe); and the physical page of each buffer page
+/// from the first, as far as the pages are mapped readable (writable when `store`).
 fn syscall_space(
     config: &KernelConfig,
     model: &Model,
     (sepc, buf, n): (u32, u32, u32),
+    store: bool,
 ) -> Result<(Buffer, Space, Vec<u32>), RestoreError> {
     let invalid = RestoreError::InvalidState;
     let pcb = model
@@ -1598,27 +2015,122 @@ fn syscall_space(
         .ok_or(invalid("modeled kernel: a write with no process running"))?;
     let buffer = Buffer::new(sepc, buf, n)
         .ok_or(invalid("modeled kernel: a write buffer no write produces"))?;
+    let shared = model.shared();
     let space = match &model.source {
         Source::Plan(plan) => {
             let boot = &plan.images[pcb.pid as usize - 1];
             let mut frames = pcb.frames();
             frames.sort_unstable();
-            Space::build(config, &plan.layout, boot, &frames)
+            Space::build_with(config, &plan.layout, boot, &frames, shared)
         }
-        Source::Disk(_) => disk_space(config, &model.source, pcb)
+        Source::Disk(_) => disk_space(config, &model.source, pcb, shared)
             .ok_or(invalid("modeled kernel: a write with no process running"))?,
     };
-    let expected = (0..buffer.pages())
-        .map_while(|i| {
-            let va = buffer.page_va(i);
-            pcb.regions.iter().find_map(|r| {
-                let page = (va.checked_sub(r.va)? / 4096) as usize;
-                let frame = *r.frames.get(page)?;
-                r.perms.read.then_some(frame)
-            })
-        })
-        .collect();
+    let expected = buffer_pages(pcb, shared, &buffer, store);
     Ok((buffer, space, expected))
+}
+
+/// Checks a decoded M5 stage against the restored model (see `restore`).
+fn m5_stage(config: &KernelConfig, model: &Model, stage: M5Stage) -> Result<M5Stage, RestoreError> {
+    let invalid = RestoreError::InvalidState;
+    let m5 = model
+        .m5
+        .as_ref()
+        .ok_or(invalid("modeled kernel: an M5 stage without M5"))?;
+    let cfg = m5.config;
+    let procs = &model.procs;
+    let up = model.life == Life::Up;
+    let head = m5.requests.front();
+    let (timer, blk) = (u32::from(cfg.timer_source), u32::from(cfg.blk_source));
+    // The trap's origin is the running process or idle, and its sources are enabled ones.
+    let trap = |irq: &Irq| {
+        let origin = match irq.from {
+            Origin::Running(_) => procs.current().is_some() && !m5.idle,
+            Origin::Idle => procs.current().is_none() && m5.idle,
+        };
+        up && origin && irq.todo & !cfg.sources() == 0
+    };
+    // No source at or below `source` is left, and a preemption only after the timer's.
+    let past = |irq: &Irq, source: u32| {
+        let at_or_below = ((1u64 << (source + 1)) - 1) as u32;
+        trap(irq) && irq.todo & at_or_below == 0 && (!irq.preempt || timer < source)
+    };
+    let at = |irq: &Irq, source: u32| {
+        trap(irq) && irq.todo.trailing_zeros() == source && (!irq.preempt || timer < source)
+    };
+    let ok = match &stage {
+        M5Stage::Arm => {
+            up && procs.current().is_none()
+                && !m5.idle
+                && m5.requests.is_empty()
+                && procs.pcbs().iter().all(|p| p.state == ProcState::Ready)
+        }
+        M5Stage::Pending { irq } => trap(irq) && irq.todo == 0 && !irq.preempt,
+        M5Stage::TimerStatus { irq } => at(irq, timer),
+        M5Stage::TimerAck { irq } => past(irq, timer) && !irq.preempt,
+        M5Stage::BlkStatus { irq } => at(irq, blk),
+        M5Stage::BlkAck { irq, .. } => past(irq, blk) && head.is_some(),
+        M5Stage::Fill {
+            irq,
+            buf,
+            pages,
+            done,
+        } => {
+            past(irq, blk)
+                && head.is_some_and(|h| h.buf == *buf && h.pages == *pages)
+                && is_fill_start(config.staging.base, *buf, *done)
+        }
+        M5Stage::BlkCommand { lba, then } => {
+            let state = match then {
+                Then::Dispatch { from } => {
+                    up && procs.current().is_none()
+                        && !m5.idle
+                        && m5.requests.len() == 1
+                        && head.is_some_and(|h| h.pid == *from)
+                }
+                Then::Irq(irq) => past(irq, blk),
+            };
+            state && head.is_some_and(|h| h.lba == *lba)
+        }
+        M5Stage::BlkWalk {
+            buffer,
+            pages,
+            table,
+            level,
+            context,
+            ..
+        } => {
+            let raw = (buffer.sepc, buffer.buf, buffer.n);
+            let (buffer, space, expected) = syscall_space(config, model, raw, true)?;
+            let va = buffer.page_va(pages.len());
+            let table_ok = match level {
+                1 => *table == space.root,
+                0 => space.table_for(va) == Some(*table),
+                _ => false,
+            };
+            !m5.idle
+                && pages.len() < buffer.pages()
+                && expected.starts_with(pages)
+                && table_ok
+                && context.pc == buffer.sepc.wrapping_add(4)
+        }
+        M5Stage::Idle { satp } => {
+            let root = head.and_then(|h| procs.pcb(h.pid)).map(|p| p.root);
+            up && m5.idle
+                && procs.current().is_none()
+                && procs.queue().is_empty()
+                && root.is_some_and(|root| pte::satp(root) == *satp)
+        }
+        M5Stage::Disarm { reason } | M5Stage::Final { reason } => {
+            model.life == Life::Down && *reason <= 1
+        }
+    };
+    if !ok {
+        return Err(invalid(
+            "modeled kernel: an M5 stage its state cannot be in",
+        ));
+    }
+    Ok(stage)
 }
 
 /// The checks that tie the process table to the life and the operation. On success the
@@ -1686,9 +2198,18 @@ fn check_life(model: &mut Model, work: Option<&Work>) -> Result<(), RestoreError
         (Life::AwaitBoot, None) if !procs.pcbs().is_empty() => {
             return Err(invalid("modeled kernel: processes before boot"));
         }
-        (Life::Up, None) if procs.current().is_none() => {
+        (Life::Up, None) if procs.current().is_none() && !model.is_idle() => {
             return Err(invalid(
                 "modeled kernel: idle after boot with no process running",
+            ));
+        }
+        (Life::Up, None)
+            if model.is_idle()
+                && (!procs.queue().is_empty()
+                    || model.m5.as_ref().is_some_and(|m| m.requests.is_empty())) =>
+        {
+            return Err(invalid(
+                "modeled kernel: idle at rest with a process queued or no request",
             ));
         }
         _ => {}

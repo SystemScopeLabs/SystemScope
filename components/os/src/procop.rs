@@ -96,9 +96,10 @@ use crate::boot::{
 use crate::config::{FRAME_ACTION, FRAME_BYTES, KernelConfig};
 use crate::core::{Access, Completion, CoreError, chunks};
 use crate::image::{BootImage, DiskBoot, ProcessPlan, UserLayout, perm_str};
+use crate::interrupts::{M5, M5Config, M5Stage};
 use crate::process::{CONTEXT_BYTES, Context, Pcb, ProcState, Processes, Violation};
 use crate::pte;
-use crate::space::{Space, frames_needed, megapage_conflict};
+use crate::space::{Space, frames_needed_with, megapage_conflict};
 use crate::syscall::{
     A0, Buffer, EBADF, EFAULT, ENOSYS, FRAME_A0, FRAME_A1, FRAME_A2, FRAME_A7, SYS_WRITE, Syscall,
     WRITE_MAX, WalkStep, neg, pte_address, walk_step,
@@ -245,6 +246,13 @@ pub enum Stage {
         /// The address space.
         space: Space,
     },
+    /// An M5 stage (`docs/m5-design.md` §11), with the M5 configuration its accesses use.
+    M5 {
+        /// The configuration.
+        m5: M5Config,
+        /// The stage.
+        stage: M5Stage,
+    },
 }
 
 impl Stage {
@@ -263,6 +271,7 @@ impl Stage {
             Stage::Ack { .. } => "blk_ack",
             Stage::Staged { .. } => "read_staging",
             Stage::Load { .. } => "load",
+            Stage::M5 { stage, .. } => stage.name(),
         }
     }
 }
@@ -296,7 +305,7 @@ fn staged_chunks(config: &KernelConfig, len: u32) -> Vec<(u64, u64)> {
 }
 
 /// The bytes the first `step` accesses of a read of `chunks` return.
-fn read_len(chunks: &[(u64, u64)], step: u32) -> usize {
+pub(crate) fn read_len(chunks: &[(u64, u64)], step: u32) -> usize {
     chunks[..step as usize].iter().map(|c| c.1 as usize).sum()
 }
 
@@ -306,7 +315,7 @@ fn physical(buffer: &Buffer, pages: &[u32], va: u32) -> u64 {
     u64::from(pages[page]) * crate::core::PAGE + u64::from(va & 0xFFF)
 }
 
-fn word(frame: &[u8], offset: u64) -> u32 {
+pub(crate) fn word(frame: &[u8], offset: u64) -> u32 {
     let at = offset as usize;
     u32::from_le_bytes(frame[at..at + 4].try_into().expect("4 bytes"))
 }
@@ -383,6 +392,7 @@ impl ProcOp {
             Stage::Command { .. } => 4,
             Stage::Poll { .. } | Stage::Ack { .. } => 1,
             Stage::Staged { len, .. } => staged_chunks(config, *len).len(),
+            Stage::M5 { m5, stage } => stage.steps(config, m5),
         };
         u32::try_from(n).expect("a bounded number of accesses")
     }
@@ -394,6 +404,7 @@ impl ProcOp {
             Stage::ReadFrame => read_len(&frame_chunks(config), step),
             Stage::Staged { len, .. } => read_len(&staged_chunks(config, *len), step),
             Stage::Output { buffer, done, .. } if step > 0 => buffer.chunk(*done).1 as usize,
+            Stage::M5 { m5, stage } => stage.data_len(config, m5, step),
             Stage::Dispatch { .. }
             | Stage::Shutdown { .. }
             | Stage::Walk { .. }
@@ -511,6 +522,7 @@ impl ProcOp {
                     len: len as u32,
                 })
             }
+            Stage::M5 { m5, stage } => stage.access(config, m5, step, &self.data),
         }
     }
 
@@ -578,9 +590,11 @@ pub struct Model {
     pub procs: Processes,
     /// Where the kernel is in its life.
     pub life: Life,
+    /// The M5 state, in an M5 kernel.
+    pub m5: Option<M5>,
 }
 
-fn note(kind: &'static str, fields: Vec<(&'static str, Value)>) -> Note {
+pub(crate) fn note(kind: &'static str, fields: Vec<(&'static str, Value)>) -> Note {
     Note { kind, fields }
 }
 
@@ -594,7 +608,7 @@ fn shutdown_note(reason: u32, detail: String) -> Note {
     )
 }
 
-fn exit_note(pid: u32, nr: u32, ret: u32) -> Note {
+pub(crate) fn exit_note(pid: u32, nr: u32, ret: u32) -> Note {
     note(
         SYSCALL_EXIT_KIND,
         vec![
@@ -629,6 +643,7 @@ impl Model {
             entries,
             procs,
             life: Life::AwaitBoot,
+            m5: None,
         }
     }
 
@@ -659,7 +674,7 @@ impl Model {
                 1,
                 "ENTER value is not the trap frame".to_owned(),
             ));
-            return Ok(ProcOp::new(Stage::Shutdown { reason: 1 }));
+            return Ok(self.shutdown_op(1));
         }
         match self.life {
             Life::AwaitBoot => {
@@ -675,7 +690,9 @@ impl Model {
                 ));
                 self.next_creation(config, 0, notes)
             }
-            Life::Up if self.procs.current().is_some() => Ok(ProcOp::new(Stage::ReadFrame)),
+            Life::Up if self.procs.current().is_some() || self.is_idle() => {
+                Ok(ProcOp::new(Stage::ReadFrame))
+            }
             Life::Up => Err(Violation("ENTER with no process running")),
             Life::Down => Err(Violation("ENTER after the shutdown")),
         }
@@ -782,11 +799,12 @@ impl Model {
                 })))
             }
             Stage::Dispatch { .. } | Stage::Shutdown { .. } | Stage::Return { .. } => Ok(None),
+            Stage::M5 { stage, .. } => self.advance_m5(config, stage, &op.data, notes),
         }
     }
 
     /// The running process's root table.
-    fn running_root(&self) -> Result<u32, Violation> {
+    pub(crate) fn running_root(&self) -> Result<u32, Violation> {
         let pid = self
             .procs
             .current()
@@ -800,7 +818,7 @@ impl Model {
 
     /// Returns `value` from syscall `nr` to the running process, which called it at
     /// `sepc`: the `os.syscall.exit` record and the Return stage.
-    fn ret(
+    pub(crate) fn ret(
         &self,
         nr: u32,
         sepc: u32,
@@ -840,6 +858,8 @@ impl Model {
         ));
         match Syscall::decode(nr) {
             Syscall::GetPid => self.ret(nr, sepc, pid, notes),
+            Syscall::BlkRead if self.m5.is_some() => self.blk_read(frame, sepc, a0, a1, notes),
+            Syscall::BlkRead => self.ret(nr, sepc, neg(ENOSYS), notes),
             Syscall::Unsupported(_) => self.ret(nr, sepc, neg(ENOSYS), notes),
             Syscall::Write => {
                 if a0 != 1 && a0 != 2 {
@@ -906,15 +926,16 @@ impl Model {
                 ));
                 continue;
             }
-            let n = frames_needed(&boot.image, &plan.layout);
+            let shared = self.shared();
+            let n = frames_needed_with(&boot.image, &plan.layout, shared.map(|s| s.0));
             let Some(frames) = self.procs.frames_mut().reserve(pid, n) else {
                 notes.push(create_error(pid, boot.image.entry, "frame pool exhausted"));
                 continue;
             };
-            let space = Space::build(config, &plan.layout, boot, &frames);
+            let space = Space::build_with(config, &plan.layout, boot, &frames, shared);
             return Ok(ProcOp::new(Stage::Create { pid, space }));
         }
-        self.dispatch_next(0, notes)
+        self.boot_done(notes)
     }
 
     /// Admits the created process `pid` of `image`, built in `space`, and traces its
@@ -952,10 +973,10 @@ impl Model {
     }
 
     /// Decides a failure shutdown with reason 1 and `detail`.
-    fn fail(&mut self, detail: String, notes: &mut Vec<Note>) -> ProcOp {
+    pub(crate) fn fail(&mut self, detail: String, notes: &mut Vec<Note>) -> ProcOp {
         self.life = Life::Down;
         notes.push(shutdown_note(1, detail));
-        ProcOp::new(Stage::Shutdown { reason: 1 })
+        self.shutdown_op(1)
     }
 
     /// Loads table entry `index` and the ones after it; or, when none is left, the first
@@ -973,7 +994,7 @@ impl Model {
                     index,
                 },
             })),
-            _ => self.dispatch_next(0, notes),
+            _ => self.boot_done(notes),
         }
     }
 
@@ -1053,7 +1074,8 @@ impl Model {
             ));
             return self.next_load(cursor.table, next, notes);
         }
-        let n = frames_needed(&image, &disk.layout);
+        let shared = self.shared();
+        let n = frames_needed_with(&image, &disk.layout, shared.map(|s| s.0));
         let Some(frames) = self.procs.frames_mut().reserve(pid, n) else {
             notes.push(create_error(pid, image.entry, "frame pool exhausted"));
             return self.next_load(cursor.table, next, notes);
@@ -1063,7 +1085,7 @@ impl Model {
             file_len: entry.byte_len,
             image,
         };
-        let space = Space::build(config, &disk.layout, &boot, &frames);
+        let space = Space::build_with(config, &disk.layout, &boot, &frames, shared);
         Ok(ProcOp::new(Stage::Load {
             cursor,
             headers: data,
@@ -1072,8 +1094,13 @@ impl Model {
         }))
     }
 
-    /// Dispatches the queue's head, or shuts down when the queue is empty (§6.6).
-    fn dispatch_next(&mut self, from: u32, notes: &mut Vec<Note>) -> Result<ProcOp, Violation> {
+    /// Dispatches the queue's head, or shuts down when the queue is empty (§6.6); an M5
+    /// kernel with a block request in flight goes idle instead.
+    pub(crate) fn dispatch_next(
+        &mut self,
+        from: u32,
+        notes: &mut Vec<Note>,
+    ) -> Result<ProcOp, Violation> {
         match self.procs.schedule_next()? {
             Some((pid, context)) => {
                 let root = self.procs.pcb(pid).expect("scheduled").root;
@@ -1091,10 +1118,13 @@ impl Model {
                 }))
             }
             None => {
+                if let Some(op) = self.idle_op()? {
+                    return Ok(op);
+                }
                 let reason = self.empty_queue_reason();
                 self.life = Life::Down;
                 notes.push(shutdown_note(reason, "the run queue is empty".to_owned()));
-                Ok(ProcOp::new(Stage::Shutdown { reason }))
+                Ok(self.shutdown_op(reason))
             }
         }
     }
@@ -1116,13 +1146,11 @@ impl Model {
         let scause = word(frame, FRAME_SCAUSE);
         let sepc = word(frame, crate::config::FRAME_SEPC);
         let stval = word(frame, FRAME_STVAL);
+        if let Some(op) = self.decide_m5(frame, notes) {
+            return op;
+        }
         if sstatus & SSTATUS_SPP != 0 {
-            self.life = Life::Down;
-            notes.push(shutdown_note(
-                1,
-                format!("trap from S-mode: {}", cause_name(scause)),
-            ));
-            return Ok(ProcOp::new(Stage::Shutdown { reason: 1 }));
+            return Ok(self.fail(format!("trap from S-mode: {}", cause_name(scause)), notes));
         }
         if scause == ECALL_FROM_U {
             return self.syscall(frame, notes);

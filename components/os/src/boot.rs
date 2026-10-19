@@ -24,6 +24,8 @@ pub const LBA: u64 = 0x08;
 pub const MEM_ADDR: u64 = 0x0C;
 /// Offset of `BLOCK_COUNT`.
 pub const BLOCK_COUNT: u64 = 0x10;
+/// Offset of `IRQ_ENABLE`, which only an M5 kernel writes.
+pub const IRQ_ENABLE: u64 = 0x14;
 /// Offset of `ACK`.
 pub const ACK: u64 = 0x18;
 /// `COMMAND` value of a READ.

@@ -42,7 +42,7 @@ pub(crate) const PLAN_MARKER: u8 = 0xA5;
 /// [`PLAN_MARKER`], so each kind of kernel rejects the others' snapshots.
 pub(crate) const DISK_MARKER: u8 = 0xD5;
 /// The block controller registers the kernel uses end at `ACK` + 4 (§8.2).
-const BLK_REGISTERS: u64 = 0x1C;
+pub(crate) const BLK_REGISTERS: u64 = 0x1C;
 
 /// The user layout (§6.2, §6.4): where user segments may lie and where the stack is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -124,6 +124,8 @@ pub enum PlanError {
         /// The rule.
         rule: &'static str,
     },
+    /// The M5 configuration breaks the named rule (`docs/m5-design.md` §11).
+    M5(&'static str),
 }
 
 impl fmt::Display for PlanError {
@@ -136,6 +138,7 @@ impl fmt::Display for PlanError {
                 write!(f, "{n} boot images, not 1 to {MAX_PROCESSES}")
             }
             PlanError::Image { index, rule } => write!(f, "boot image {index}: {rule}"),
+            PlanError::M5(rule) => write!(f, "M5: {rule}"),
         }
     }
 }

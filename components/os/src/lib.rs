@@ -16,6 +16,8 @@
 //! - [`syscall`] is the syscall ABI (§6.5) and the kernel's user-copy walk.
 //! - [`boot`] is booting from disk: the block controller registers the kernel drives and
 //!   where boot is on the disk.
+//! - [`interrupts`] is M5's kernel (`docs/m5-design.md` §11): interrupt traps,
+//!   preemption, the blocking `blk_read`, idle, the shared page, and the shutdown's dump.
 //! - [`procop`] is the process-mode pure core: boot, traps, syscalls, dispatch, and
 //!   shutdown as chains of bus accesses.
 //! - [`kernel`] is the component: the held entry, the Issue/Wait engine, its snapshot
@@ -29,6 +31,7 @@ pub mod config;
 pub mod core;
 pub mod frames;
 pub mod image;
+pub mod interrupts;
 pub mod kernel;
 pub mod process;
 pub mod procop;
@@ -38,4 +41,5 @@ pub mod syscall;
 
 pub use config::{KernelConfig, KernelConfigError, Window};
 pub use image::{BootImage, DiskBoot, PlanError, ProcessPlan, UserLayout};
+pub use interrupts::M5Config;
 pub use kernel::ModeledKernel;

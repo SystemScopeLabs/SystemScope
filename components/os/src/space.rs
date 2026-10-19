@@ -24,6 +24,15 @@
 //!
 //! Every frame is therefore written before any PTE points at it, and every level-0
 //! table is complete before the level-1 entry that points at it (§8.3).
+//!
+//! # The M5 shared page
+//!
+//! An M5 kernel maps one shared physical page into every process at `SHARED_VA`, below
+//! `USER_BASE`, `U R W` (`docs/m5-design.md` §11.4). The page is the kernel's, not the
+//! process's: it is in no region and in no PCB's frames, and a creation never zeroes it.
+//! Its level-0 table is the process's: the one of its 4 MiB slot if a page already uses
+//! the slot, else one more table, assigned after every page's. Its leaf is the last
+//! level-0 leaf written.
 
 use systemscope_elf::{PagePlan, Perms, UserImage, UserSegment};
 
@@ -79,8 +88,15 @@ fn pages(image: &UserImage, layout: &UserLayout) -> Vec<Page> {
 /// The number of frames a process for `image` needs: the root, a level-0 table per
 /// touched slot, and one per segment and stack page.
 pub fn frames_needed(image: &UserImage, layout: &UserLayout) -> usize {
+    frames_needed_with(image, layout, None)
+}
+
+/// [`frames_needed`] for an address space that also maps the shared page at `shared_va`:
+/// one more table when no page uses its slot.
+pub fn frames_needed_with(image: &UserImage, layout: &UserLayout, shared_va: Option<u32>) -> usize {
     let pages = pages(image, layout);
     let mut slots: Vec<u32> = pages.iter().map(|p| vpn1(u64::from(p.va))).collect();
+    slots.extend(shared_va.map(|va| vpn1(u64::from(va))));
     slots.sort_unstable();
     slots.dedup();
     1 + slots.len() + pages.len()
@@ -173,6 +189,18 @@ impl Space {
         boot: &BootImage,
         frames: &[u32],
     ) -> Space {
+        Space::build_with(config, layout, boot, frames, None)
+    }
+
+    /// [`Space::build`] that also maps the shared page `(va, ppn)`, in exactly
+    /// [`frames_needed_with`] frames.
+    pub fn build_with(
+        config: &KernelConfig,
+        layout: &UserLayout,
+        boot: &BootImage,
+        frames: &[u32],
+        shared: Option<(u32, u32)>,
+    ) -> Space {
         let mut next = frames.iter().copied();
         let mut take = || next.next().expect("frames_needed frames");
         let root = take();
@@ -207,6 +235,24 @@ impl Space {
                 split_copy(src, dst, u64::from(len), &mut copies);
             }
             placed.push((page.va, page.perms, frame));
+        }
+        if let Some((va, ppn)) = shared {
+            let slot = vpn1(u64::from(va));
+            let table = match slots.iter().find(|s| s.0 == slot) {
+                Some(&(_, t)) => t,
+                None => {
+                    let t = take();
+                    slots.push((slot, t));
+                    tables.push(t);
+                    order.push(t);
+                    t
+                }
+            };
+            let vpn0 = u64::from(va >> 12 & 0x3FF);
+            leaves.push((
+                u64::from(table) * PAGE + 4 * vpn0,
+                pte::user_leaf(ppn, STACK_PERMS),
+            ));
         }
         let kernel = kernel_megapage(config);
         let mut l1: Vec<(u32, u32)> = slots

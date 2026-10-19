@@ -237,6 +237,7 @@ fn observed(h: &Harness) -> Oracle {
         .map(|pcb| match pcb.state {
             ProcState::Ready => (pcb.pid, 'R', 0),
             ProcState::Running => (pcb.pid, 'U', 0),
+            ProcState::Blocked => (pcb.pid, 'B', 0),
             ProcState::Exited { status } => (pcb.pid, 'E', status),
             ProcState::Faulted { .. } => (pcb.pid, 'F', 0),
         })
