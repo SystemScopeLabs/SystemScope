@@ -2,9 +2,13 @@
 //!
 //! A replaces constant latencies, which only the platform builder knows: the links' in
 //! the topology and the targets' response latencies in their configurations. B is the
-//! runtime's per-message jitter, passed through to the session.
+//! runtime's per-message jitter, passed through to the session. [`Perturbation`] is both,
+//! with its canonical encoding and identity.
 
 use std::collections::BTreeMap;
+
+use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
+use systemscope_runtime::jitter::Jitter;
 
 /// The largest cycle count an override may set.
 pub const MAX_CYCLES: u64 = 64;
@@ -50,5 +54,177 @@ impl Latencies {
             }
         }
         Ok(())
+    }
+}
+
+/// A run's whole perturbation (`docs/m5-design.md` §7.4): A and B. C, the tie order,
+/// comes in M5.6. The empty value is the identity.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Perturbation {
+    /// Perturbation A.
+    pub latencies: Latencies,
+    /// Perturbation B.
+    pub jitter: Option<Jitter>,
+}
+
+impl Perturbation {
+    /// Whether it is the identity.
+    pub fn is_empty(&self) -> bool {
+        *self == Perturbation::default()
+    }
+
+    /// The canonical encoding, a reproducer's `perturbation.bin`: the link overrides in
+    /// index order, the response overrides in path order, then the jitter setting, if
+    /// any, after a tag.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.len(self.latencies.links.len());
+        for (&index, &cycles) in &self.latencies.links {
+            e.u32(index);
+            e.u64(cycles);
+        }
+        e.len(self.latencies.respond.len());
+        for (path, &cycles) in &self.latencies.respond {
+            e.str(path);
+            e.u64(cycles);
+        }
+        match &self.jitter {
+            None => e.u8(0),
+            Some(j) => {
+                e.u8(1);
+                j.encode(&mut e);
+            }
+        }
+        e.into_bytes()
+    }
+
+    /// Reads exactly one perturbation, refusing overrides out of order.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Perturbation, DecodeError> {
+        let mut d = Decoder::new(bytes);
+        let mut p = Perturbation::default();
+        let out_of_order = DecodeError::InvalidTag {
+            what: "override order",
+            tag: 0,
+        };
+        for _ in 0..d.len()? {
+            let index = d.u32()?;
+            if p.latencies
+                .links
+                .last_key_value()
+                .is_some_and(|(&i, _)| i >= index)
+            {
+                return Err(out_of_order);
+            }
+            p.latencies.links.insert(index, d.u64()?);
+        }
+        for _ in 0..d.len()? {
+            let path = d.str()?.to_owned();
+            if p.latencies
+                .respond
+                .last_key_value()
+                .is_some_and(|(q, _)| *q >= path)
+            {
+                return Err(out_of_order);
+            }
+            p.latencies.respond.insert(path, d.u64()?);
+        }
+        p.jitter = match d.u8()? {
+            0 => None,
+            1 => Some(Jitter::decode(&mut d)?),
+            tag => {
+                return Err(DecodeError::InvalidTag {
+                    what: "jitter",
+                    tag,
+                });
+            }
+        };
+        d.finish()?;
+        Ok(p)
+    }
+
+    /// The BLAKE3 of the canonical encoding.
+    pub fn identity(&self) -> [u8; 32] {
+        *blake3::hash(&self.to_bytes()).as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use systemscope_runtime::jitter::LinkSet;
+
+    fn sample() -> Perturbation {
+        Perturbation {
+            latencies: Latencies {
+                links: [(2, 5), (9, 1)].into(),
+                respond: [("soc.ram".to_owned(), 3)].into(),
+            },
+            jitter: Some(Jitter {
+                seed: 0x5eed,
+                max_cycles: 8,
+                links: LinkSet::of(&[2, 4]),
+            }),
+        }
+    }
+
+    #[test]
+    fn a_perturbation_round_trips_and_its_identity_follows_its_bytes() {
+        for p in [Perturbation::default(), sample()] {
+            assert_eq!(Perturbation::from_bytes(&p.to_bytes()), Ok(p.clone()));
+            assert_eq!(p.identity(), *blake3::hash(&p.to_bytes()).as_bytes());
+        }
+        assert!(Perturbation::default().is_empty());
+        assert!(!sample().is_empty());
+        assert_eq!(Perturbation::default().to_bytes(), [0; 9]);
+        let mut seed = sample();
+        seed.jitter.as_mut().unwrap().seed += 1;
+        assert_ne!(seed.identity(), sample().identity());
+    }
+
+    #[test]
+    fn a_perturbation_refuses_disorder_a_bad_tag_and_trailing_bytes() {
+        let encoded = |links: &[(u32, u64)], paths: &[&str], tag: u8| {
+            let mut e = Encoder::new();
+            e.len(links.len());
+            for &(i, c) in links {
+                e.u32(i);
+                e.u64(c);
+            }
+            e.len(paths.len());
+            for path in paths {
+                e.str(path);
+                e.u64(1);
+            }
+            e.u8(tag);
+            e.into_bytes()
+        };
+        let order = Err(DecodeError::InvalidTag {
+            what: "override order",
+            tag: 0,
+        });
+        assert_eq!(
+            Perturbation::from_bytes(&encoded(&[(3, 1), (3, 2)], &[], 0)),
+            order
+        );
+        assert_eq!(
+            Perturbation::from_bytes(&encoded(&[(4, 1), (3, 2)], &[], 0)),
+            order
+        );
+        assert_eq!(
+            Perturbation::from_bytes(&encoded(&[], &["b", "a"], 0)),
+            order
+        );
+        assert_eq!(
+            Perturbation::from_bytes(&encoded(&[], &[], 2)),
+            Err(DecodeError::InvalidTag {
+                what: "jitter",
+                tag: 2
+            })
+        );
+        let mut trailing = sample().to_bytes();
+        trailing.push(0);
+        assert!(Perturbation::from_bytes(&trailing).is_err());
+        let bytes = sample().to_bytes();
+        assert!(Perturbation::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     }
 }
