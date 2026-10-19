@@ -138,6 +138,8 @@ pub struct Config {
     pub m5: M5Config,
     /// The timer's `COMPARE` at reset.
     pub compare_reset: NonZeroU32,
+    /// The CPU's instruction limit: a run that never shuts down stops at it.
+    pub max_instructions: NonZeroU64,
 }
 
 impl Config {
@@ -147,6 +149,7 @@ impl Config {
             m3: m3ref::Config::frozen(),
             m5: m5_config(),
             compare_reset: NonZeroU32::new(COMPARE_RESET).expect("nonzero"),
+            max_instructions: NonZeroU64::new(MAX_INSTRUCTIONS).expect("nonzero"),
         }
     }
 }
@@ -168,6 +171,7 @@ pub fn m5_config() -> M5Config {
         shared: u64::from(SHARED),
         shared_va: SHARED_VA,
         final_words: FINAL_WORDS,
+        defect: None,
     }
 }
 
@@ -292,7 +296,7 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
     let cpu = Rv32iCpu::new(Rv32iConfig {
         clock: cpu_clock,
         entry: firmware.entry,
-        max_instructions: NonZeroU64::new(MAX_INSTRUCTIONS).expect("nonzero"),
+        max_instructions: config.max_instructions,
         profile: PROFILE,
     })
     .expect("the loader guarantees an aligned entry");

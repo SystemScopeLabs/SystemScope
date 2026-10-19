@@ -41,5 +41,5 @@ pub mod syscall;
 
 pub use config::{KernelConfig, KernelConfigError, Window};
 pub use image::{BootImage, DiskBoot, PlanError, ProcessPlan, UserLayout};
-pub use interrupts::M5Config;
+pub use interrupts::{Defect, M5Config};
 pub use kernel::ModeledKernel;

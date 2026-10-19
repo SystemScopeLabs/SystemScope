@@ -121,6 +121,19 @@ pub const FINAL_KIND: &str = "os.final";
 
 /// The snapshot marker of an M5 configuration, after the process source.
 const M5_MARKER: u8 = 0xE5;
+/// Marks a planted defect after the M5 configuration; absent without one.
+const DEFECT_MARKER: u8 = 0xD5;
+
+/// A defect planted in the kernel for M5's campaigns to find (`docs/m5-design.md`
+/// §12.3). Only tests set one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Defect {
+    /// R5 `kernel-wake-lost`: an interrupt trap taken while idle in which the timer
+    /// expired goes back to idle, even when the same trap completed a block request.
+    /// The woken process stays `Ready` and is never dispatched: every later idle trap is
+    /// a timer tick too.
+    IdleTickDropsWake,
+}
 
 /// The M5 part of a kernel's configuration (`docs/m5-design.md` §11, §12.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -141,6 +154,8 @@ pub struct M5Config {
     pub shared_va: u32,
     /// The number of shared words, from the first, a shutdown dumps.
     pub final_words: u32,
+    /// A planted defect, `None` in every kernel but a campaign's planted race.
+    pub defect: Option<Defect>,
 }
 
 impl M5Config {
@@ -242,6 +257,13 @@ impl M5Config {
         w.u64(self.shared);
         w.u32(self.shared_va);
         w.u32(self.final_words);
+        match self.defect {
+            None => {}
+            Some(Defect::IdleTickDropsWake) => {
+                w.u8(DEFECT_MARKER);
+                w.u8(1);
+            }
+        }
     }
 }
 
@@ -897,6 +919,13 @@ impl Model {
             }
             Origin::Running(_) => Ok(None),
             Origin::Idle if self.procs.queue().is_empty() => Ok(None),
+            Origin::Idle
+                if irq.preempt
+                    && self.m5_config().and_then(|m| m.defect)
+                        == Some(Defect::IdleTickDropsWake) =>
+            {
+                Ok(None)
+            }
             Origin::Idle => {
                 self.m5_mut()?.idle = false;
                 self.dispatch_next(0, notes).map(Some)

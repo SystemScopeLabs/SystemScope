@@ -70,6 +70,7 @@ pub fn m5_config() -> M5Config {
         shared: SHARED,
         shared_va: SHARED_VA,
         final_words: FINAL_WORDS,
+        defect: None,
     }
 }
 
