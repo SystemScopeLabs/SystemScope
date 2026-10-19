@@ -389,9 +389,10 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.0** | complete | Design freeze (this document) | docs |
 | **M5.1** | complete | Perturbation core: A in the builders, B in the runtime, the encoding, identity, and snapshot state; identity proven on every M0–M4 golden; every existing reference scenario run under B | code, tests |
 | **M5.2** | complete | `M5` CPU profile and `SimpleTimer`; Spike-directed SEI tests | code, CI |
-| **M5.3** | next | Kernel: interrupt traps, preemption, `blk_read`, shared page; `m5-reference` platform and golden | code, fixtures |
+| **M5.3a** | complete | Kernel: interrupt traps, preemption, `blk_read`, idle, shared page, the shutdown's dump | code, tests |
+| **M5.3b** | next | `m5-reference` platform, firmware and trampoline, the six correct workload programs (§12.2), golden; `SLICE` frozen | code, fixtures |
 | **M5.4** | planned | `outcome` and `schedule` streams, the `m5.*` profiles, schedule evidence | code, tests |
-| **M5.5** | planned | Workload programs and planted races R1–R5; campaigns over A and B | code, CI |
+| **M5.5** | planned | Planted races R1–R5; campaigns over A and B | code, CI |
 | **M5.6** | planned | Tie order (C), perturbation minimization, coverage reports, reproducer support | code, CI |
 | **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
 | **M5.8** | planned | Exit audit | docs |
@@ -440,3 +441,21 @@ M5.2 implemented the `M5` profile (`components/rv32i/src/sei.rs`) and `SimpleTim
 | §10 | The line is `EXPIRED`. A one-shot expiry clears `ENABLE`; a periodic one re-arms `COMPARE` cycles from the expiry. The timer emits `platform.timer.arm` {`cycles`, `generation`} and `platform.timer.expire` {`generation`, `periodic`} | the trace shows every preemption point a campaign moves |
 | §21 | The Spike profile is `spike-m5-sei` (`cargo xtask spike`, part M5 SEI). Spike logs `interrupt #9` with no `tval`. It logs a write of `mip` with `mvip` and with `MTIP` always set, and a write of `sie` with the `mie` it changes. The parser drops `mvip` and that `mie`, and masks `MTIP` | Spike's CLINT timer is always pending under `--priv`; SystemScope has no `MTIP` |
 | §21 | The directed programs write `mip` only with a `csrrs`/`csrrc` of `SEIP`, `mideleg` only with `SEIP` or 0, and never `sip` | Spike also delegates `SSIP` and `STIP`, which `M5` does not have |
+
+### 27.3 M5.3a
+
+M5.3a implemented the kernel additions (`components/os/src/interrupts.rs`) and drove them through the kernel's memory protocol against device models written from the register maps (`components/os/tests/m5_kernel.rs`), restoring at every access boundary. The runtime platform, the firmware, the trampoline's idle path, and the workload are M5.3b's. An M3 kernel is unchanged byte for byte.
+
+| Section | Revision | Why |
+|---|---|---|
+| §11 | The M5 settings are a separate `M5Config` (interrupt controller and timer windows, the two sources, `SLICE`, the shared page and `SHARED_VA`, the number of final words), given to `ModeledKernel::with_processes_m5` or `with_disk_m5`. `KernelConfig` is unchanged | M3's configuration, snapshot, and goldens stay as they are |
+| §11.1 | After boot's last creation and before its first dispatch, **Arm** zeroes the shared page, writes the controller's `ENABLE` with both sources, the block controller's `IRQ_ENABLE = 1`, the timer's `COMPARE = SLICE`, and `CONTROL = ENABLE \| PERIODIC` | the kernel arms once, from memory, in a fixed order |
+| §11.1 | `PENDING` bits are only candidates. The kernel masks them to its two sources, traces them as `os.interrupt { sources }` (0 included), and checks each source's device `STATUS`, lowest source first. A timer source is handled only with `EXPIRED`, a block source only with `DONE` and a request in flight. An interrupt that handles nothing resumes the interrupted context with no write | under jitter an interrupt can be taken after its condition is gone (§23) |
+| §11.2 | After every source: a preempted process goes to the queue's tail, then the head is dispatched. A process woken in the same trap was queued first, so it runs before the preempted one | wakes and preemptions keep one FIFO order |
+| §11.3 | `blk_read` is syscall 244, `EIO` is 5. The buffer is checked as a U-mode store (`W` and `D`) through the caller's table, page by page; a bad buffer returns `-EFAULT` without blocking. Without an `M5Config`, `blk_read` returns `-ENOSYS` | 244 is the first of the generic Linux table's architecture-specific numbers (244–259), unused on RISC-V except 259 |
+| §11.3 | `Blocked` is a unit state; the LBA, buffer, and buffer pages are in the request FIFO, head in flight. The caller's context is saved at the block with `pc = sepc + 4`, and `a0` is set at the wake. `os.syscall.exit` of a `blk_read` that blocks is traced at the wake | the request is the one place the in-flight transfer is described |
+| §11.3 | On completion the kernel acknowledges `ACK`, then copies the block from staging in chunks of at most 16 bytes that cross no page on either side, then wakes the caller and commands the next request, if any. A controller error wakes the caller with `-EIO` and copies nothing | the copy is ordinary kernel accesses, each one an event boundary |
+| §11.3 | Idle is the frame's `action = 2`, written with the `satp` of the head request's process. While idle the kernel accepts only an interrupt from S (`SPP = S`); any other trap is a failure shutdown. A timer expiry while idle is acknowledged and preempts nothing | the trampoline needs a valid `satp` to return through; anything but the spin's interrupt means the platform broke the idle contract |
+| §11.4 | The shared page is a fixed physical page of the configuration, outside the frame pool, the trap frame, and staging, mapped `U R W` at `SHARED_VA` (a nonzero page below `USER_BASE`, outside the megapage slots). It is zeroed by Arm and never freed | a fixed page needs no allocation order and keeps the dump's address in the configuration |
+| §11.4 | Every M5 shutdown runs **Disarm** (timer `CONTROL = 0`), then **Final** (each declared shared word traced as `os.final { word, value }`, at most 1024, none when 0), then M3's Shutdown | disarming first lets a finished run's event queue drain |
+| §11.5 | An M5 kernel writes snapshot schema 2: the M5 configuration after the process source, `Blocked` as process state tag 4, and after the frame bitmap the idle flag and the request FIFO. Restore rejects an M5 snapshot into an M3 kernel and the reverse, a different `M5Config`, requests that are not exactly the `Blocked` processes, and an idle flag without requests or with a running process | schema 1 stays M3's, so M3 snapshots are unchanged |
