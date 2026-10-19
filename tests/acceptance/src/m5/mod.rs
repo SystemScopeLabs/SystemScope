@@ -36,6 +36,7 @@ use crate::hex;
 
 pub mod campaign;
 pub mod evidence;
+pub mod minimize;
 pub mod races;
 pub mod verify;
 
