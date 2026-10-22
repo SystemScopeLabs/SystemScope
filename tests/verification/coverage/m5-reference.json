@@ -1,0 +1,69 @@
+{
+  "arch": {
+    "csrs_written": {
+      "0x100": 128,
+      "0x104": 1,
+      "0x105": 1,
+      "0x140": 257,
+      "0x141": 127,
+      "0x180": 128,
+      "0x300": 2,
+      "0x302": 1,
+      "0x303": 1,
+      "0x341": 1
+    },
+    "exceptions": {
+      "EnvironmentCallFromS to M": 1,
+      "EnvironmentCallFromU to S": 29
+    },
+    "instructions": {
+      "add": 4620,
+      "addi": 6062,
+      "andi": 1536,
+      "auipc": 10,
+      "beq": 954,
+      "bge": 8,
+      "bgeu": 2,
+      "blt": 1568,
+      "bne": 5183,
+      "csrrc": 1,
+      "csrrs": 642,
+      "csrrsi": 1,
+      "csrrw": 643,
+      "jal": 807,
+      "jalr": 504,
+      "lbu": 1558,
+      "lui": 140,
+      "lw": 5584,
+      "mret": 1,
+      "sb": 58,
+      "sfence.vma": 128,
+      "slli": 4116,
+      "sret": 127,
+      "srli": 532,
+      "sub": 3080,
+      "sw": 5979,
+      "xor": 1500,
+      "xori": 2
+    },
+    "interrupts": {
+      "SupervisorExternal to S": 99
+    },
+    "modes": {
+      "M": 21,
+      "S": 11529,
+      "U": 33796
+    },
+    "retired": 45346,
+    "sv32": {
+      "page_faults": {},
+      "translated": {
+        "load": 2693,
+        "store": 1428
+      }
+    }
+  },
+  "format": "systemscope-coverage",
+  "platform": "m5-reference",
+  "version": 1
+}

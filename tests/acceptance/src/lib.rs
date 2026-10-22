@@ -20,6 +20,7 @@
 
 pub mod checkpoint;
 pub mod corpus;
+pub mod coverage;
 pub mod digests;
 pub mod golden;
 pub mod layout;

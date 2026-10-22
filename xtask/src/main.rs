@@ -77,6 +77,12 @@
 //!   `tests/verification/expected/m3-reference` (`docs/m4-design.md` §25.2), the expected
 //!   side of the source-mutant cases, then verifies.
 //! - `m4-expected verify`: requires this build to reproduce those streams byte for byte.
+//! - `m5-coverage bless | verify [campaign]`: the coverage reports in
+//!   `tests/verification/coverage` (`docs/m5-design.md` §17). Without `campaign`, the
+//!   architectural coverage of `m3-reference` and `m5-reference`, two runs; with it, the
+//!   `m5-reference` campaigns' schedule and perturbation coverage, about 500 runs, which
+//!   the weekly nightly verifies. `bless` writes, then verifies; `verify` requires this
+//!   build to reproduce the committed report byte for byte.
 //! - `m4-repro emit <dir>`: writes this machine's M4 reproducer bundles of
 //!   `m3-reference` (`docs/m4-design.md` §16) into `<dir>`, one `<name>.repro` directory
 //!   each, for another machine to `check`.
@@ -138,6 +144,7 @@ use systemscope_acceptance::m3::{
     Fixture as M3Fixture, checkpoint as m3c, expected as m4x, mutants as m4m, repro as m4r,
 };
 use systemscope_acceptance::m5 as m5g;
+use systemscope_acceptance::m5::coverage as m5cov;
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
@@ -169,6 +176,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask corpus replay | check <dir>\n       \
                      cargo xtask m4-mutants run <target> <out> | summarize <out>\n       \
                      cargo xtask m4-expected bless | verify\n       \
+                     cargo xtask m5-coverage bless | verify [campaign]\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
                      cargo xtask spike build | verify | diff | random | campaign [<dir>]\n       \
@@ -256,6 +264,10 @@ fn main() -> ExitCode {
         ["m4-mutants", "summarize", dir] => m4_mutants_summarize(Path::new(dir)),
         ["m4-expected", "bless"] => m4_expected_bless(),
         ["m4-expected", "verify"] => m4_expected_verify(),
+        ["m5-coverage", "bless"] => m5_coverage(true, m5cov::Reports::Arch),
+        ["m5-coverage", "verify"] => m5_coverage(false, m5cov::Reports::Arch),
+        ["m5-coverage", "bless", "campaign"] => m5_coverage(true, m5cov::Reports::Campaign),
+        ["m5-coverage", "verify", "campaign"] => m5_coverage(false, m5cov::Reports::Campaign),
         ["m4-repro", "emit", dir] => m4_emit(Path::new(dir)),
         ["m4-repro", "check", dir] => m4_check(Path::new(dir)),
         ["m4-repro", "replay", dir] => m4_replay(Path::new(dir)),
@@ -948,6 +960,28 @@ fn m4_expected_verify() -> ExitCode {
     report(
         result,
         &format!("this build reproduces the expected streams in {}", m4x::DIR),
+    )
+}
+
+fn m5_coverage(bless: bool, reports: m5cov::Reports) -> ExitCode {
+    let root = root();
+    let fixtures = m4_fixture().and_then(|m3f| {
+        m5g::Fixture::read(&root)
+            .map(|m5f| (m3f, m5f))
+            .map_err(|e| vec![e])
+    });
+    let result = fixtures.and_then(|(m3f, m5f)| {
+        if bless {
+            m5cov::bless(&m3f, &m5f, &root, reports).map_err(|e| vec![e])?;
+        }
+        m5cov::verify(&m3f, &m5f, &root, reports)
+    });
+    report(
+        result,
+        &format!(
+            "this build reproduces the {reports:?} coverage reports in {}",
+            m5cov::DIR
+        ),
     )
 }
 

@@ -1,0 +1,55 @@
+{
+  "arch": {
+    "csrs_written": {
+      "0x100": 23,
+      "0x105": 1,
+      "0x140": 47,
+      "0x141": 23,
+      "0x180": 23,
+      "0x300": 2,
+      "0x302": 1,
+      "0x341": 1
+    },
+    "exceptions": {
+      "EnvironmentCallFromS to M": 1,
+      "EnvironmentCallFromU to S": 22,
+      "StorePageFault to S": 1
+    },
+    "instructions": {
+      "addi": 130,
+      "auipc": 14,
+      "bne": 48,
+      "csrrc": 1,
+      "csrrs": 116,
+      "csrrw": 119,
+      "jal": 1,
+      "lbu": 16,
+      "lui": 31,
+      "lw": 807,
+      "mret": 1,
+      "sb": 17,
+      "sfence.vma": 23,
+      "sret": 23,
+      "sw": 829
+    },
+    "interrupts": {},
+    "modes": {
+      "M": 18,
+      "S": 1966,
+      "U": 192
+    },
+    "retired": 2176,
+    "sv32": {
+      "page_faults": {
+        "StorePageFault": 1
+      },
+      "translated": {
+        "load": 16,
+        "store": 17
+      }
+    }
+  },
+  "format": "systemscope-coverage",
+  "platform": "m3-reference",
+  "version": 1
+}

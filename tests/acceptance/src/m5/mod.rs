@@ -35,6 +35,7 @@ use systemscope_rv32::runner::Start;
 use crate::hex;
 
 pub mod campaign;
+pub mod coverage;
 pub mod evidence;
 pub mod minimize;
 pub mod races;
