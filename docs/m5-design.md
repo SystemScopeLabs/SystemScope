@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.6b complete, M5.6c next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.6c complete, M5.7 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -363,6 +363,12 @@ M5.5 implemented the campaigns (`tests/acceptance/src/m5/campaign.rs`, `races.rs
 - M5.6a added C: its tie seed is the stream's first word.
 - The CI list is seeds 0–7 for the unpatched scenario under each mechanism. For each race and mechanism, a test pins the first diverging seed and checks that every earlier seed agrees: R1 0 and 0, R2 1 and 0, R3 0 and 1, R5 1 and 0 (A and B).
 
+M5.6c froze the seeds and ranges (O5), from the measured cost of about 1.5 s per run:
+- The ranges stay as M5.5 and M5.6a drew them: A's links `1..=16` cycles and slice 4000–10000, B's maximum 2, 4, 8, or 16, and C's seed any `u64`.
+- CI runs seeds 0–7 of the unpatched scenario per mechanism, about 12 s each, and the pinned first diverging seeds.
+- The coverage campaign (§17) runs seeds 0–31 of every mechanism and subject, 480 runs. It is too long for every pull request, so its report is verified weekly by the nightly, on Linux and Windows.
+- The nightly printed seed for M5 campaigns is M5.7's.
+
 ## 15. Schedule Evidence
 
 A divergence in `outcome` is a symptom. The cause is an interleaving. M5 adds evidence to connect them. It is evidence, never a verdict (m4-design §15).
@@ -399,6 +405,15 @@ Coverage measures what a workload and a campaign exercised. It is a report, neve
 - **Perturbation coverage**: per mechanism, the fraction of seeds whose schedule differed from the unperturbed one. A mechanism that never changes the schedule is reported as ineffective for that workload.
 
 C is ineffective on `m5-reference` (§7.3): a test checks that every stream of every subject is unchanged under it.
+
+M5.6c implemented the reports (`tests/acceptance/src/coverage.rs`, `tests/acceptance/src/m5/coverage.rs`). Each is a reviewed JSON file under `tests/verification/coverage`. `cargo xtask m5-coverage bless [campaign]` writes it, and `verify [campaign]` requires this build to reproduce it byte for byte. Reproduction is the only check, so no coverage figure gates anything.
+- **Architectural coverage** of `m5-reference` and `m3-reference` is read from the `arch` stream of the unperturbed run alone: retirements by mnemonic and by mode, the CSRs written, each exception and interrupt cause with the mode it was taken in, and, for Sv32, the loads and stores a walk translated to another address and the page faults. CI verifies it.
+- **Schedule and perturbation coverage** come from the coverage campaign. For each mechanism and subject, the report gives how many seeds changed the schedule, how many distinct schedules ran (by the BLAKE3 of the `schedule` stream), and how many seeds diverged or failed. For the unpatched scenario, it gives each process's preemption points, the distinct `sepc` of its `preempt` decisions. A mechanism that changed no subject's schedule is reported as not effective.
+
+The first reports show:
+- `m5-reference` retires 45,346 instructions: 28 mnemonics, 33,796 in U, 11,529 in S, and 21 in M. It takes 29 `ECALL`s from U and 99 supervisor external interrupts, and a walk translates 2,693 loads and 1,428 stores. `m3-reference` retires 2,176 instructions with 15 mnemonics and takes no interrupt. Neither workload uses `fence`, `wfi`, or the misaligned and access-fault causes.
+- A and B change the schedule for all 32 seeds of every subject, and every seed runs a distinct schedule. The unpatched scenario agrees for every seed of every mechanism. Under A the races diverge for 32 (R1), 19 (R2), 27 (R3), and 27 (R5) seeds of 32, and under B for 23, 14, 20, and 26.
+- C changes no schedule, as §7.3 found, and is reported as not effective.
 
 ## 18. Reproducer
 
@@ -448,7 +463,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | O2 | `blk_read` syscall number | from the Linux-numbered range, chosen at M5.3 |
 | O3 | Idle when every process is blocked | **Decided (D10):** a spin loop in the trampoline. `WFI` would need a new CPU wait state and snapshot field, and Spike can be compared on it only with an interrupt already pending |
 | O4 | Reproducer bundle version bump | **Decided (M5.6b):** none. `perturbation.bin` is one more manifest entry (§18) |
-| O5 | Seed counts and ranges per mechanism | frozen in M5.6 from measured cost |
+| O5 | Seed counts and ranges per mechanism | **Decided (M5.6c):** the M5.5 ranges; seeds 0–7 in CI, 0–31 in the weekly coverage campaign (§14) |
 | O6 | How a trace records the perturbation (§7.4). `TraceHeader` is a contracts type, so a header field would move the contracts pin, which M5 keeps | **Decided (M5.4b):** `perturbation.bin` alone, with the evidence and the reproducer. The trace is unchanged (§27.6) |
 | O7 | How a message's jitter is recorded with its delivery (§7.4) | **Decided (M5.4b):** not recorded. It is recomputed from the dispatch records by ordinal per directed link (§7.4) |
 
@@ -466,8 +481,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.5** | complete | Planted races R1–R3 and R5; campaigns over A and B | code, CI |
 | **M5.6a** | complete | Tie order (C): rank-major sequences, snapshot version 3, the property tests, C on every reference platform and in the campaigns | code, tests |
 | **M5.6b** | complete | Perturbation minimization (A and B), the listed jitter, and `perturbation.bin` in reproducers | code, CI |
-| **M5.6c** | next | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
-| **M5.7** | planned | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
+| **M5.6c** | complete | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
+| **M5.7** | next | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
 | **M5.8** | planned | Exit audit | docs |
 
 ## 26. M5 Exit Criteria
@@ -618,3 +633,15 @@ The minimized perturbations (`m5_reproducer`):
 | R2 `peterson-turn` | link 4 at 4 and link 11 at 10 cycles, slice 5250 (seed 1) | 42 messages on links 3, 8, 11, and 12 (seed 0) |
 | R3 `mailbox-data-first` | link 11 at 15 cycles (seed 0) | not minimized |
 | R5 `kernel-wake-lost` | slice 7995 (seed 1) | 1 message, link 3 from its `b` end, ordinal 21 (seed 0) |
+
+### 27.10 M5.6c
+
+M5.6c implemented the coverage reports (`tests/acceptance/src/coverage.rs`, `tests/acceptance/src/m5/coverage.rs`, `cargo xtask m5-coverage`) and froze the campaign seeds (O5).
+
+| Section | Revision | Why |
+|---|---|---|
+| §17 | Sv32 coverage is the loads and stores a walk translated to another address and the page faults, not the PTE cases walked | a walk is not traced, and a trace record for it would change every M3 trace digest and golden |
+| §17 | The CSRs reported are those written | the `arch` stream names a CSR only when its write is architectural |
+| §17 | The reports are committed files whose reproduction is checked, never their figures | a report is never a gate, and reproduction is what keeps it deterministic and the same on both operating systems |
+| §17 | Preemption points are reported per process, not per program | the `schedule` stream names processes, and each process runs one program |
+| §14, §24 | O5 decided: the M5.5 ranges, seeds 0–7 in CI and 0–31 in the coverage campaign, verified weekly | the coverage campaign takes 480 runs |
