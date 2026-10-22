@@ -144,6 +144,33 @@ jobs:
           path: systemscope/target/spike-logs
           if-no-files-found: ignore
 
+  # docs/m5-design.md §17: the m5-reference campaigns' schedule and perturbation
+  # coverage, about 500 runs, must reproduce the committed report byte for byte on both
+  # operating systems. It depends only on the commit, so it runs with the weekly coverage.
+  m5-campaign-coverage:
+    name: M5 campaign coverage reproduces (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 17 * * 6'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+      - run: cargo xtask m5-coverage verify campaign
+
   coverage:
     name: coverage (report only)
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 17 * * 6'

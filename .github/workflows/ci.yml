@@ -205,6 +205,10 @@ jobs:
       # a pinned seed, and the unpatched scenario agrees under both for every CI seed.
       - name: M5.5 planted races and campaigns (unpatched agreement, pinned divergences)
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test m5_campaign
+      # M5.6c: the architectural coverage reports reproduce byte for byte. They are
+      # reports, never gates; the campaign report is verified weekly by the nightly.
+      - name: M5.6c coverage reports reproduce (m3-reference and m5-reference arch)
+        run: cargo xtask m5-coverage verify
       - name: rv32ui fixtures, hello.elf, block_irq.elf, the M3 and M5 fixtures, and the ACT4 corpus unchanged
         shell: bash
         run: git diff --exit-code -- tests/rv32/fixtures tests/rv32/hello tests/rv32/block_irq tests/rv32/m3 tests/rv32/m5 tests/act4
