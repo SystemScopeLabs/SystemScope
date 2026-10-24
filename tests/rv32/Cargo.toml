@@ -1,6 +1,6 @@
 [package]
 name = "systemscope-rv32"
-description = "SystemScope M1 rv32ui fixtures, hello.elf, the ACT4 corpus, m2-reference and block_irq.elf, m3-reference and the M3 scenario, their manifests, and the runners"
+description = "SystemScope RV32 fixtures and reference builders: rv32ui fixtures, hello.elf, the ACT4 corpus, m2-reference and block_irq.elf, m3-reference and m5-reference with their scenarios, their manifests, the runners, and the Spike differential"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

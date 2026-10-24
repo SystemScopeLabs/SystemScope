@@ -1,6 +1,6 @@
 [package]
 name = "systemscope-os"
-description = "The SystemScope M3 modeled OS backend: the ModeledKernel component, its kgate held entry, and its bus-master state engine"
+description = "The SystemScope modeled OS backend: the ModeledKernel component, its kgate held entry, and its bus-master state engine (M3), with timer preemption and interrupt-completed block reads (M5)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

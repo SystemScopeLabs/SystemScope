@@ -1,6 +1,6 @@
 [package]
 name = "systemscope-rv32i"
-description = "RV32I decode, architectural state, and CPU component for SystemScope M1"
+description = "RV32I decode, architectural state, and CPU component for SystemScope: the M1 to M5 CPU profiles, with CSRs, privilege, Sv32, and supervisor external interrupts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

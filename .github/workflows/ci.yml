@@ -23,6 +23,7 @@ jobs:
   lint:
     name: fmt, check, clippy, machete
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,6 +55,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -305,6 +307,7 @@ jobs:
           - os: ubuntu-latest
             from: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -343,6 +346,7 @@ jobs:
           - os: ubuntu-latest
             from: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -381,6 +385,7 @@ jobs:
           - os: ubuntu-latest
             from: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -419,6 +424,7 @@ jobs:
           - os: ubuntu-latest
             from: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -463,6 +469,7 @@ jobs:
           - os: ubuntu-latest
             from: windows-latest
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -501,6 +508,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -534,6 +542,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -566,6 +575,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -597,6 +607,7 @@ jobs:
   rv32-fixtures:
     name: rv32ui fixtures rebuild (Linux)
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -640,6 +651,7 @@ jobs:
   spike:
     name: M1-A3 Spike differential (Linux)
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
         with:
@@ -694,6 +706,7 @@ jobs:
   act4:
     name: ACT4/Sail external validation (Ubuntu)
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
         with:

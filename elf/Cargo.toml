@@ -1,6 +1,6 @@
 [package]
 name = "systemscope-elf"
-description = "Host-side ELF32 RISC-V loader for SystemScope M1: executable images to RAM load images"
+description = "Host-side ELF32 RISC-V loader for SystemScope: executable images to RAM load images (M1), and the user-executable parser and executable table (M3)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
