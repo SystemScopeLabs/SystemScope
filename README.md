@@ -7,8 +7,8 @@ events, the same state, and the same trace, on every supported platform.
 ## Status
 
 **M5: Timing Exploration** is complete and tagged `v0.6.0-m5`; see
-[docs/releases/m5-exit-audit.md](docs/releases/m5-exit-audit.md). SystemScope is still an early system, not a usable
-simulator of real hardware.
+[docs/releases/m5-exit-audit.md](docs/releases/m5-exit-audit.md). SystemScope is still an
+early system, not a usable simulator of real hardware.
 
 | Milestone | Status | Tag |
 |---|---|---|

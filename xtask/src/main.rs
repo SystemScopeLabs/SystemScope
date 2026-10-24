@@ -91,7 +91,7 @@
 //! - `m5-coverage bless | verify [campaign]`: the coverage reports in
 //!   `tests/verification/coverage` (`docs/m5-design.md` §17). Without `campaign`, the
 //!   architectural coverage of `m3-reference` and `m5-reference`, two runs; with it, the
-//!   `m5-reference` campaigns' schedule and perturbation coverage, about 500 runs, which
+//!   `m5-reference` campaigns' schedule and perturbation coverage, 480 runs, which
 //!   the weekly nightly verifies. `bless` writes, then verifies; `verify` requires this
 //!   build to reproduce the committed report byte for byte.
 //! - `m4-repro emit <dir>`: writes this machine's M4 reproducer bundles of

@@ -150,7 +150,7 @@ jobs:
           if-no-files-found: ignore
 
   # docs/m5-design.md §17: the m5-reference campaigns' schedule and perturbation
-  # coverage, about 500 runs, must reproduce the committed report byte for byte on both
+  # coverage, 480 runs, must reproduce the committed report byte for byte on both
   # operating systems. It depends only on the commit, so it runs with the weekly coverage.
   m5-campaign-coverage:
     name: M5 campaign coverage reproduces (${{ matrix.os }})
