@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.7a complete, M5.7b next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.7b complete, M5.8 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -367,7 +367,7 @@ M5.6c froze the seeds and ranges (O5), from the measured cost of about 1.5 s per
 - The ranges stay as M5.5 and M5.6a drew them: A's links `1..=16` cycles and slice 4000–10000, B's maximum 2, 4, 8, or 16, and C's seed any `u64`.
 - CI runs seeds 0–7 of the unpatched scenario per mechanism, about 12 s each, and the pinned first diverging seeds.
 - The coverage campaign (§17) runs seeds 0–31 of every mechanism and subject, 480 runs. It is too long for every pull request, so its report is verified weekly by the nightly, on Linux and Windows.
-- The nightly printed seed for M5 campaigns is M5.7's.
+- The nightly printed seed, as `M5_CAMPAIGN_SEED`, is one more seed of every mechanism: the unpatched scenario must agree under A, B, and C at it. Which races diverge at it is printed, not judged: a race need not diverge at every seed (M5.7b).
 
 ## 15. Schedule Evidence
 
@@ -421,11 +421,13 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 
 **Decided (M5.6b, O4): no bump.** The manifest's `entries` is a generic list of paths and hashes, so `{role}/perturbation.bin` needs no schema change. `Builder::perturbation` carries a side's canonical encoding: writing holds it, and replay refuses a case whose side perturbation differs from the bundle's, or a bundle that holds one the case does not. A listed jitter encodes as jitter tag 2: the setting, then the list.
 
+**Cross-OS (M5.7b).** The seven minimized perturbations' reproducers (`cargo xtask m5-repro emit | check | replay`, one `<race>-<a|b>.repro` each) are a pure function of the committed fixtures. Each operating system's bundles must equal the other's byte for byte and replay there to the result they hold, as M4's do.
+
 ## 19. Determinism and Compatibility
 
 - **Identity.** With the empty perturbation, every runtime path is the M0–M4 path. Every M0–M4 golden, expected stream, corpus entry, and reproducer is byte-identical, and CI keeps all their jobs.
 - **Cross-OS.** Perturbed runs, campaign results, minimized perturbations, and reproducers are byte-identical on Linux and Windows, as in M4.
-- **Snapshots.** A perturbed run restores at every event, with its jitter ordinals and tie state, like any other run. `m5-reference` gets the every-event resume check of M2 and M3. A session with a listed jitter writes snapshot format version 4: version 3's layout with the jitter's list after its setting (§27.9).
+- **Snapshots.** A perturbed run restores at every event, with its jitter ordinals and tie state, like any other run. `m5-reference` gets the every-event resume check of M2 and M3, on the frozen platform in CI and, weekly, on the platforms perturbed by each mechanism's seed 0 (`cargo xtask m5-golden every-event perturbed <a|b|c>`; M5.7b). A session with a listed jitter writes snapshot format version 4: version 3's layout with the jitter's list after its setting (§27.9).
 - **Observation.** Observing a perturbed run does not change it (m4-design §28.2 **Observation invariance**).
 
 ## 20. Failure Model
@@ -483,8 +485,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.6b** | complete | Perturbation minimization (A and B), the listed jitter, and `perturbation.bin` in reproducers | code, CI |
 | **M5.6c** | complete | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
 | **M5.7a** | complete | Source mutants of the M5 paths against committed expectations (§21) | code, CI |
-| **M5.7b** | next | Campaign hardening: reproducers cross-OS, nightly campaign seeds, perturbed every-event resume | CI |
-| **M5.8** | planned | Exit audit | docs |
+| **M5.7b** | complete | Campaign hardening: reproducers cross-OS, nightly campaign seeds, perturbed every-event resume | CI |
+| **M5.8** | next | Exit audit | docs |
 
 ## 26. M5 Exit Criteria
 
@@ -659,3 +661,14 @@ M5.7a implemented M5's source mutants (`tests/acceptance/src/m5/expected.rs`, th
 | §21 | C's rank is judged by the dispatch order under seed 0 | C changes no stream of any subject, so no stream digest can see its rank |
 | §21 | A's builder is not a target | A sets link latencies and the slice before the run; its mutants are configuration mutants, not M5 paths |
 | CI | `m5_reproducer` runs in CI | M5.6b pinned the minimized perturbations but left their test out of the workflow |
+
+### 27.12 M5.7b
+
+M5.7b hardened the campaigns (`tests/acceptance/src/m5/repro.rs`, `cargo xtask m5-repro` and `m5-golden every-event perturbed`, the nightly campaign seed and the weekly perturbed resume).
+
+| Section | Revision | Why |
+|---|---|---|
+| §18 | The minimized reproducers are emitted on both operating systems and checked across them | §19 requires reproducers to be byte-identical across Linux and Windows; M5.6b only replayed them on the machine that wrote them |
+| §14 | The nightly seed judges only the unpatched scenario; races are printed | the unpatched scenario must agree at every seed, while a race diverges only at some |
+| §19 | The perturbed every-event resume runs weekly, under each mechanism's seed 0 | each takes about a minute on a developer machine and depends only on the commit |
+| CI | The nightly random-seed step excludes `m5_minimize::search` | it is the offline search, ignored but not seeded, and ran for six hours until the job was cancelled |

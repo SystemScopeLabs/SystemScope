@@ -34,6 +34,10 @@
 //!   each checkpoint is restored into a freshly built platform, must snapshot back to
 //!   itself, then dispatch the uninterrupted run's next event and reach its next
 //!   checkpoint byte for byte. Uses every available core; a release build is much faster.
+//! - `m5-golden every-event perturbed <a|b|c> [shard <i> <n>]`: the same on the platform
+//!   perturbed by the mechanism's seed 0 (§19), which the weekly nightly runs for each mechanism.
+//! - `m5-repro emit <dir> | check <dir> | replay <dir>`: as `m4-repro`, for the reproducer
+//!   bundles of `m5-reference`'s seven minimized perturbations (`docs/m5-design.md` §18).
 //! - `rv32-fixtures build`: Linux only, with the pinned toolchain on `PATH`. Rebuilds the
 //!   40 `rv32ui` fixtures from the pinned `riscv-tests` with `tests/rv32/build-fixtures.sh`
 //!   (the only step that uses the network), `hello.elf` with
@@ -151,8 +155,11 @@ use systemscope_acceptance::m3::{
     Fixture as M3Fixture, checkpoint as m3c, expected as m4x, mutants as m4m, repro as m4r,
 };
 use systemscope_acceptance::m5 as m5g;
+use systemscope_acceptance::m5::campaign as m5c;
 use systemscope_acceptance::m5::coverage as m5cov;
 use systemscope_acceptance::m5::expected as m5x;
+use systemscope_acceptance::m5::repro as m5r;
+use systemscope_acceptance::m5::verify as m5v;
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
@@ -179,7 +186,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      | every-event [<from> <to> | shard <i> <n>]\n       \
                      cargo xtask m3-reference manifest | run | verify\n       \
                      cargo xtask m5-golden bless | verify | emit <dir> | check <dir> \
-                     | every-event [<from> <to> | shard <i> <n>]\n       \
+                     | every-event [<from> <to> | [perturbed <a|b|c>] [shard <i> <n>]]\n       \
                      cargo xtask m5-reference manifest | run | verify\n       \
                      cargo xtask corpus replay | check <dir>\n       \
                      cargo xtask m4-mutants run <target> <out> | summarize <out>\n       \
@@ -188,6 +195,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m5-expected bless | verify\n       \
                      cargo xtask m5-coverage bless | verify [campaign]\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
+                     cargo xtask m5-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
                      cargo xtask spike build | verify | diff | random | campaign [<dir>]\n       \
                      cargo xtask act4 build [<cache-dir>] | install <out-dir> | check <out-dir> \
@@ -253,16 +261,34 @@ fn main() -> ExitCode {
         ["m5-golden", "verify"] => m5_golden_verify(),
         ["m5-golden", "emit", dir] => m5_emit(Path::new(dir)),
         ["m5-golden", "check", dir] => m5_check(Path::new(dir)),
-        ["m5-golden", "every-event"] => m5_every_event(Checkpoints::All),
+        ["m5-golden", "every-event"] => m5_every_event(None, Checkpoints::All),
+        ["m5-golden", "every-event", "perturbed", m] => match mechanism(m) {
+            Some(m) => m5_every_event(Some(m), Checkpoints::All),
+            None => {
+                eprintln!("{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
+        ["m5-golden", "every-event", "perturbed", m, "shard", i, n] => {
+            match (mechanism(m), i.parse(), n.parse()) {
+                (Some(m), Ok(i), Ok(n)) if i < n => {
+                    m5_every_event(Some(m), Checkpoints::Shard(i, n))
+                }
+                _ => {
+                    eprintln!("{USAGE}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         ["m5-golden", "every-event", "shard", i, n] => match (i.parse(), n.parse()) {
-            (Ok(i), Ok(n)) if i < n => m5_every_event(Checkpoints::Shard(i, n)),
+            (Ok(i), Ok(n)) if i < n => m5_every_event(None, Checkpoints::Shard(i, n)),
             _ => {
                 eprintln!("{USAGE}");
                 ExitCode::FAILURE
             }
         },
         ["m5-golden", "every-event", from, to] => match (from.parse(), to.parse()) {
-            (Ok(from), Ok(to)) => m5_every_event(Checkpoints::Range(from..to)),
+            (Ok(from), Ok(to)) => m5_every_event(None, Checkpoints::Range(from..to)),
             _ => {
                 eprintln!("{USAGE}");
                 ExitCode::FAILURE
@@ -285,6 +311,9 @@ fn main() -> ExitCode {
         ["m4-repro", "emit", dir] => m4_emit(Path::new(dir)),
         ["m4-repro", "check", dir] => m4_check(Path::new(dir)),
         ["m4-repro", "replay", dir] => m4_replay(Path::new(dir)),
+        ["m5-repro", "emit", dir] => m5_repro_emit(Path::new(dir)),
+        ["m5-repro", "check", dir] => m5_repro_check(Path::new(dir)),
+        ["m5-repro", "replay", dir] => m5_repro_replay(Path::new(dir)),
         ["act4", "build"] => act4_build(&root().join(ACT4_CACHE)),
         ["act4", "build", cache] => act4_build(Path::new(cache)),
         ["act4", "install", out] => act4_install(Path::new(out)),
@@ -1042,6 +1071,34 @@ fn m4_replay(dir: &Path) -> ExitCode {
     }
 }
 
+fn m5_repro_emit(dir: &Path) -> ExitCode {
+    let result = m5g::Fixture::read(&root()).and_then(|f| m5r::emit(&f, dir));
+    report(
+        result.map_err(|e| vec![e]),
+        &format!("wrote this machine's M5 reproducers into {}", dir.display()),
+    )
+}
+
+fn m5_repro_check(dir: &Path) -> ExitCode {
+    let result = m5g::Fixture::read(&root())
+        .map_err(|e| vec![e])
+        .and_then(|f| m5r::check(&f, dir));
+    report(
+        result,
+        "the foreign M5 reproducers equal this machine's byte for byte and replay here",
+    )
+}
+
+fn m5_repro_replay(dir: &Path) -> ExitCode {
+    match m5g::Fixture::read(&root())
+        .map_err(|e| vec![e])
+        .and_then(|f| m5r::replay_all(&f, dir))
+    {
+        Ok(n) => report(Ok(()), &format!("{n} reproducers replay to their results")),
+        Err(errors) => report(Err(errors), ""),
+    }
+}
+
 /// The checkpoints `m3-golden every-event` resumes.
 enum Checkpoints {
     All,
@@ -1090,9 +1147,28 @@ fn m3_every_event(checkpoints: Checkpoints) -> ExitCode {
     )
 }
 
-fn m5_every_event(checkpoints: Checkpoints) -> ExitCode {
+/// The campaign mechanism a command-line letter names.
+fn mechanism(letter: &str) -> Option<m5c::Mechanism> {
+    match letter {
+        "a" => Some(m5c::Mechanism::A),
+        "b" => Some(m5c::Mechanism::B),
+        "c" => Some(m5c::Mechanism::C),
+        _ => None,
+    }
+}
+
+/// `m5-golden every-event`, on the frozen platform or, with `mechanism`, on the one
+/// perturbed by its seed 0.
+fn m5_every_event(mechanism: Option<m5c::Mechanism>, checkpoints: Checkpoints) -> ExitCode {
     let result = m5g::Fixture::read(&root()).and_then(|fixture| {
-        let events = m5g::reference_events(&fixture)?;
+        let config = match mechanism {
+            None => systemscope_rv32::m5ref::Config::frozen(),
+            Some(m) => m5v::defective_config(&m5c::perturbation(m, 0), None),
+        };
+        let events = match mechanism {
+            None => m5g::reference_events(&fixture)?,
+            Some(_) => m5g::events_under(&fixture, &config)?,
+        };
         let all = 0..events + 1;
         let range = match checkpoints {
             Checkpoints::All => all,
@@ -1104,7 +1180,7 @@ fn m5_every_event(checkpoints: Checkpoints) -> ExitCode {
             "resuming checkpoints {}..{} of {events} events on {threads} threads...",
             range.start, range.end
         );
-        let sweep = m5g::every_event(&fixture, range, threads);
+        let sweep = m5g::every_event_under(&fixture, &config, range, threads);
         println!(
             "{} checkpoints resumed, {} failed",
             sweep.checked,

@@ -6,7 +6,8 @@
 
 use systemscope_acceptance::m5::Fixture;
 use systemscope_acceptance::m5::campaign::{
-    CI_SEEDS, FIRST_DIVERGENCE, Judged, Mechanism, Subject, judge, perturbation, record, the_plan,
+    CI_SEEDS, FIRST_DIVERGENCE, Judged, Mechanism, SEED_VAR, Subject, judge, perturbation, record,
+    the_plan,
 };
 use systemscope_acceptance::m5::races::Race;
 use systemscope_rv32::perturb::Perturbation;
@@ -49,6 +50,39 @@ fn unpatched_agrees(mechanism: Mechanism) {
             Judged::Agree,
             "{mechanism:?} seed {seed}"
         );
+    }
+}
+
+/// The nightly seed, from [`SEED_VAR`]: the unpatched scenario agrees under A, B, and C at
+/// it (`M5_CAMPAIGN_SEED=<seed> cargo nextest run -p systemscope-acceptance --test
+/// m5_campaign --run-ignored only`). Which races diverge at it is printed, not judged.
+#[test]
+#[ignore = "nightly: needs M5_CAMPAIGN_SEED"]
+fn nightly_campaign_seed() {
+    let seed = std::env::var(SEED_VAR)
+        .ok()
+        .and_then(|text| systemscope_acceptance::parse_seed(&text))
+        .unwrap_or_else(|| panic!("set {SEED_VAR} to the seed to test, e.g. {SEED_VAR}=0x1234"));
+    println!("{SEED_VAR}={seed:#x}");
+    let f = fixture();
+    let plan = the_plan(&f);
+    let base = record(&f, Subject(None), &Perturbation::default());
+    assert_eq!(base.failure, None);
+    for mechanism in [Mechanism::A, Mechanism::B, Mechanism::C] {
+        let perturbed = record(&f, Subject(None), &perturbation(mechanism, seed));
+        assert_eq!(
+            judge(&plan, &base, &perturbed),
+            Judged::Agree,
+            "{SEED_VAR}={seed:#x}: the unpatched scenario under {mechanism:?}"
+        );
+    }
+    for race in Race::ALL {
+        let base = record(&f, Subject(Some(race)), &Perturbation::default());
+        for mechanism in [Mechanism::A, Mechanism::B] {
+            let perturbed = record(&f, Subject(Some(race)), &perturbation(mechanism, seed));
+            let judged = judge(&plan, &base, &perturbed);
+            println!("{} {mechanism:?}: {judged:?}", race.name());
+        }
     }
 }
 

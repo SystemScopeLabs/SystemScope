@@ -8,6 +8,8 @@ name: Nightly
 # --run-ignored only` on both operating systems, and `cargo xtask spike random` on Linux.
 # As M4_FAULT_SEED, it draws the night's register fault on m3-reference, which the M4
 # locator and the naive oracle must find alike (docs/m4-design.md §30.7).
+# As M5_CAMPAIGN_SEED, it is the night's perturbation seed, under which the unpatched
+# m5-reference scenario must agree for A, B, and C (docs/m5-design.md §14).
 on:
   schedule:
     # Sunday to Friday, and Saturday, which also runs coverage: the coverage report
@@ -49,6 +51,7 @@ jobs:
           echo "M0_SEED=$seed" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "M1_PROGEN_SEED=$seed" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "M4_FAULT_SEED=$seed" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "M5_CAMPAIGN_SEED=$seed" | tee -a "$GITHUB_STEP_SUMMARY"
 
   acceptance:
     name: AT-1..AT-3, random seed (${{ matrix.os }})
@@ -62,6 +65,7 @@ jobs:
       M0_SEED: ${{ needs.seed.outputs.seed }}
       M1_PROGEN_SEED: ${{ needs.seed.outputs.seed }}
       M4_FAULT_SEED: ${{ needs.seed.outputs.seed }}
+      M5_CAMPAIGN_SEED: ${{ needs.seed.outputs.seed }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -83,17 +87,18 @@ jobs:
           tool: cargo-nextest
       - name: Seed
         shell: bash
-        run: echo "M0_SEED=$M0_SEED M1_PROGEN_SEED=$M1_PROGEN_SEED M4_FAULT_SEED=$M4_FAULT_SEED"
-      # AT-1 step 1 (two processes), AT-2, and AT-3 for the random seed, and the M4 fault.
+        run: echo "M0_SEED=$M0_SEED M1_PROGEN_SEED=$M1_PROGEN_SEED M4_FAULT_SEED=$M4_FAULT_SEED M5_CAMPAIGN_SEED=$M5_CAMPAIGN_SEED"
+      # AT-1 step 1 (two processes), AT-2, and AT-3 for the random seed, the M4 fault, and
+      # the M5 campaign seed. The offline minimization search is not a seeded test.
       - name: Random-seed acceptance
-        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --run-ignored only
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --run-ignored only -E 'not (binary(m5_minimize) & test(=search))'
       # The generated program for the same seed passes, deterministically.
       - name: Random-seed generated program
         run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --run-ignored only
       - name: Report the failing seed
         if: failure()
         shell: bash
-        run: echo "::error::nightly acceptance failed for M0_SEED=$M0_SEED M1_PROGEN_SEED=$M1_PROGEN_SEED M4_FAULT_SEED=$M4_FAULT_SEED"
+        run: echo "::error::nightly acceptance failed for M0_SEED=$M0_SEED M1_PROGEN_SEED=$M1_PROGEN_SEED M4_FAULT_SEED=$M4_FAULT_SEED M5_CAMPAIGN_SEED=$M5_CAMPAIGN_SEED"
 
   # docs/m1-design.md §10.3, M1-A3: the night's generated program against the pinned
   # Spike, built and cached as in ci.yml's spike job and verified before use.
@@ -170,6 +175,33 @@ jobs:
         with:
           workspaces: systemscope
       - run: cargo xtask m5-coverage verify campaign
+
+  # docs/m5-design.md §19: every-event resume on m5-reference perturbed by each mechanism's
+  # seed 0, where the latencies, the jitter, and the tie state are part of each checkpoint.
+  # It depends only on the commit, so it runs weekly; each takes a few minutes.
+  m5-perturbed-every-event:
+    name: M5 every-event resume, perturbed (${{ matrix.mechanism }})
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 17 * * 6'
+    strategy:
+      fail-fast: false
+      matrix:
+        mechanism: [a, b, c]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+      - run: cargo run --release --locked -p xtask -- m5-golden every-event perturbed ${{ matrix.mechanism }}
 
   coverage:
     name: coverage (report only)

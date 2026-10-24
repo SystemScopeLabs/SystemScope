@@ -143,6 +143,8 @@ pub fn judge(plan: &Plan, unperturbed: &Recording, perturbed: &Recording) -> Jud
 
 /// The seeds CI runs the unpatched campaign over, for each mechanism.
 pub const CI_SEEDS: std::ops::Range<u64> = 0..8;
+/// Environment variable holding the nightly campaign seed, in decimal or `0x` hex.
+pub const SEED_VAR: &str = "M5_CAMPAIGN_SEED";
 
 /// Each planted race's first diverging seed under A and under B (§14): every earlier
 /// seed agrees.

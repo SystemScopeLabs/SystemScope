@@ -42,6 +42,7 @@ pub mod evidence;
 pub mod expected;
 pub mod minimize;
 pub mod races;
+pub mod repro;
 pub mod verify;
 
 /// The most runs [`parallel`] keeps in flight.
@@ -119,8 +120,13 @@ impl Fixture {
     ///
     /// If the frozen platform does not build, which M5.3b rules out.
     pub fn platform(&self) -> Runtime {
-        m5ref::build(&self.firmware, &self.disk, &Config::frozen())
+        self.platform_with(&Config::frozen())
             .expect("the frozen m5-reference builds")
+    }
+
+    /// `m5-reference` with this disk under `config`, elaborated.
+    pub fn platform_with(&self, config: &Config) -> Result<Runtime, String> {
+        m5ref::build(&self.firmware, &self.disk, config).map_err(|e| format!("{e:?}"))
     }
 
     /// Runs the workload from `start` to its end on a fresh frozen platform, under the
@@ -418,6 +424,24 @@ pub fn reference_events(fixture: &Fixture) -> Result<usize, String> {
     usize::try_from(run.finished.outcome.events).map_err(|e| e.to_string())
 }
 
+/// The events of an untraced run of the workload on the platform built under `config`,
+/// which must end without a fault within the event budget.
+pub fn events_under(fixture: &Fixture, config: &Config) -> Result<usize, String> {
+    let mut rt = fixture.platform_with(config)?;
+    rt.init().map_err(|e| e.to_string())?;
+    let mut events = 0usize;
+    while rt.step().map_err(|e| e.to_string())?.is_some() {
+        events += 1;
+        if events as u64 > EVENT_BUDGET {
+            return Err(format!("no end within the budget of {EVENT_BUDGET} events"));
+        }
+    }
+    match rt.fault() {
+        Some(e) => Err(format!("the run faulted: {e}")),
+        None => Ok(events),
+    }
+}
+
 /// The outcome of [`every_event`].
 #[derive(Clone, Debug, Default)]
 pub struct Sweep {
@@ -431,10 +455,16 @@ pub struct Sweep {
 /// the restore must snapshot back to the checkpoint, then dispatch the producer's next
 /// event and reach its next checkpoint byte for byte. The last checkpoint, after the last
 /// event, must dispatch nothing.
-fn sweep_range(fixture: &Fixture, range: std::ops::Range<usize>) -> Sweep {
+fn sweep_range(fixture: &Fixture, config: &Config, range: std::ops::Range<usize>) -> Sweep {
     let mut sweep = Sweep::default();
-    let mut producer = fixture.platform();
     let fail = |sweep: &mut Sweep, k, e: String| sweep.failures.push((k, e));
+    let mut producer = match fixture.platform_with(config) {
+        Ok(rt) => rt,
+        Err(e) => {
+            fail(&mut sweep, range.start, e);
+            return sweep;
+        }
+    };
     if let Err(e) = producer.init() {
         fail(&mut sweep, range.start, e.to_string());
         return sweep;
@@ -467,7 +497,7 @@ fn sweep_range(fixture: &Fixture, range: std::ops::Range<usize>) -> Sweep {
         sweep.checked += 1;
         let next = producer.snapshot().map_err(|e| e.to_string());
         let result = next.clone().and_then(|next| {
-            let mut rt = fixture.platform();
+            let mut rt = fixture.platform_with(config)?;
             rt.restore(&checkpoint)
                 .map_err(|e| format!("restore failed: {e}"))?;
             if rt.snapshot().map_err(|e| e.to_string())? != checkpoint {
@@ -513,11 +543,22 @@ pub fn split(range: std::ops::Range<usize>, parts: usize) -> Vec<std::ops::Range
 /// Every checkpoint `k` in `range` (at most 0 through the last event) resumed by
 /// [`sweep_range`], split across `threads` threads.
 pub fn every_event(fixture: &Fixture, range: std::ops::Range<usize>, threads: usize) -> Sweep {
+    every_event_under(fixture, &Config::frozen(), range, threads)
+}
+
+/// [`every_event`] on the platform built under `config`, a perturbed one among them
+/// (`docs/m5-design.md` §19).
+pub fn every_event_under(
+    fixture: &Fixture,
+    config: &Config,
+    range: std::ops::Range<usize>,
+    threads: usize,
+) -> Sweep {
     let mut sweep = Sweep::default();
     thread::scope(|s| {
         let handles: Vec<_> = split(range, threads)
             .into_iter()
-            .map(|part| s.spawn(move || sweep_range(fixture, part)))
+            .map(|part| s.spawn(move || sweep_range(fixture, config, part)))
             .collect();
         for h in handles {
             let part = h.join().expect("a checkpoint thread panicked");

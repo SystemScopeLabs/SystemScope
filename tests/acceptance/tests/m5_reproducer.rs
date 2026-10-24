@@ -9,6 +9,7 @@ use systemscope_acceptance::m5::minimize::{
     Finding, PINNED, Pinned, failure, listed, parts, replay, reproducer, without,
 };
 use systemscope_acceptance::m5::races::Race;
+use systemscope_acceptance::m5::repro;
 use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::workspace_root;
 use systemscope_verify::bundle::{MANIFEST, Manifest, RESULT};
@@ -116,4 +117,31 @@ fn kernel_wake_lost_under_a() {
 #[test]
 fn kernel_wake_lost_under_b() {
     check(pinned(Race::R5, Mechanism::B));
+}
+
+/// Each pinned reproducer has its own bundle name, the race's and the mechanism's.
+#[test]
+fn every_pinned_reproducer_has_its_own_bundle_name() {
+    let names: Vec<String> = PINNED.iter().map(repro::name).collect();
+    assert_eq!(names[0], "counter-unlocked-a");
+    assert_eq!(names[1], "counter-unlocked-b");
+    let distinct: std::collections::BTreeSet<_> = names.iter().collect();
+    assert_eq!(distinct.len(), PINNED.len());
+}
+
+/// Replay refuses an empty directory and a bundle named for no pinned perturbation.
+#[test]
+fn replay_refuses_an_empty_directory_and_an_unknown_name() {
+    let f = fixture();
+    let dir = std::env::temp_dir().join(format!("m5-repro-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("nobody-a.repro")).unwrap();
+    let errors = repro::replay_all(&f, &dir).unwrap_err();
+    assert!(
+        errors[0].contains("no pinned perturbation is named nobody-a"),
+        "{errors:?}"
+    );
+    std::fs::remove_dir_all(dir.join("nobody-a.repro")).unwrap();
+    let errors = repro::replay_all(&f, &dir).unwrap_err();
+    assert!(errors[0].starts_with("no .repro bundle"), "{errors:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }

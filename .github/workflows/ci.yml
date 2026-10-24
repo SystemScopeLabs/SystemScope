@@ -278,6 +278,17 @@ jobs:
           name: m4-repro-${{ matrix.os }}
           path: systemscope/target/m4-repro
           if-no-files-found: error
+      # This machine's own M5 reproducers, for the m5-cross-os job, which replays them.
+      - name: Emit this machine's M5 reproducers
+        shell: bash
+        run: |
+          rm -rf target/m5-repro
+          cargo xtask m5-repro emit target/m5-repro
+      - uses: actions/upload-artifact@v7
+        with:
+          name: m5-repro-${{ matrix.os }}
+          path: systemscope/target/m5-repro
+          if-no-files-found: error
 
   # docs/m1-design.md §10.1 M1-A6, M1-A8: each operating system restores the portable
   # snapshot the other one took, and checks the other one's golden result against the
@@ -430,6 +441,13 @@ jobs:
           path: systemscope/target/m5-foreign
       - name: Check the ${{ matrix.from }} result and resume its snapshot
         run: cargo xtask m5-golden check target/m5-foreign
+      # docs/m5-design.md §18: the minimized reproducers, as M4's.
+      - uses: actions/download-artifact@v8
+        with:
+          name: m5-repro-${{ matrix.from }}
+          path: systemscope/target/m5-repro-foreign
+      - name: Check the ${{ matrix.from }} M5 reproducers and replay them
+        run: cargo xtask m5-repro check target/m5-repro-foreign
 
   # docs/m4-design.md §16.2: each operating system's reproducer bundles equal the other
   # one's byte for byte and replay there.
