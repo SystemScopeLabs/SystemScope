@@ -1,6 +1,6 @@
 # M0 Design: Deterministic Simulation Kernel
 
-> Status: Draft · Parent: [plan.md](../plan.md)
+> Status: Complete (exit criteria met, §10), tagged `v0.1.0-m0` · Parent: [plan.md](../plan.md)
 
 M0 builds the skeleton that every later milestone plugs into:
 

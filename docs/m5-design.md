@@ -2,7 +2,7 @@
 
 > Status: Frozen at M5.0 · Implementation status: M5 complete, checked by the M5.8 exit audit ([releases/m5-exit-audit.md](releases/m5-exit-audit.md)) · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
-This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
+This document is the design of M5, frozen at M5.0. Every item once marked **(open)** was decided at the step §24 names; none of them changed a frozen decision.
 
 ---
 

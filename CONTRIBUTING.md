@@ -21,6 +21,8 @@ The nightly random-seed tests are ignored by default. To reproduce a nightly fai
 M0_SEED=0x1234 cargo nextest run -p systemscope-acceptance --run-ignored only
 ```
 
+The same night's seed is also `M1_PROGEN_SEED` (the generated RV32I program), `M4_FAULT_SEED` (the register fault the M4 locator and the naive oracle must find alike), and `M5_CAMPAIGN_SEED` (the perturbation seed under which the unpatched `m5-reference` scenario must agree). `.github/workflows/nightly.yml` prints all four. The offline minimization search, `m5_minimize`'s `search`, is ignored too but is not a seeded test; the nightly skips it.
+
 ## Golden Files
 
 `tests/golden/` holds the M0 golden digests for the fixed seeds and a portable mid-run snapshot. Tests only read these files.
@@ -58,6 +60,18 @@ M0_SEED=0x1234 cargo nextest run -p systemscope-acceptance --run-ignored only
 
 Never edit an entry by hand. When an intended change alters an entry's result, regenerate it, re-review it, and commit it on its own.
 
+## M5 Golden Files, Expectations, and Coverage
+
+`tests/golden/m5-reference.{json,mid.snap}` hold the M5 disk's result on `m5-reference` and the runtime snapshot with both readers blocked (`docs/m5-design.md` §12, §19). The rules of the M1 to M3 golden files apply, and the earlier golden files must stay byte-identical for an M5 change.
+
+- `cargo xtask m5-golden verify` reruns the scenario and resumes the snapshot to the golden end; `emit <dir>` and `check <dir>` compare two machines, and CI uses them between Linux and Windows.
+- `cargo xtask m5-golden every-event [shard <i> <n>]` resumes from every event of `m5-reference` (§19). `every-event perturbed <a|b|c>` does the same on the platform perturbed by that mechanism's seed 0; the weekly nightly runs all three.
+- `cargo xtask m5-reference manifest | run | verify` rewrites, runs, and checks the M5 disk `tests/rv32/m5/disk.img`, judged by `systemscope_rv32::m5::judge`. `rv32-fixtures build` rebuilds the M5 firmware and user programs with `tests/rv32/m5/build-m5.sh`.
+- `tests/verification/expected/m5-reference/` holds the unperturbed streams and the digests of the perturbed runs. `cargo xtask m5-expected verify` requires this build to reproduce them. `m5-expected bless` first checks that each planted race diverges, each minimized perturbation reproduces, the unpatched scenario agrees, and the tie seed reorders simultaneous events; bless only for an intended change, committed on its own.
+- `tests/verification/coverage/` holds the coverage reports (§17). `cargo xtask m5-coverage verify` checks the architectural coverage of `m3-reference` and `m5-reference`; `m5-coverage verify campaign` checks the campaigns' schedule and perturbation coverage, about 500 runs, which the weekly nightly runs on both operating systems. `bless` follows the same rules.
+- `cargo xtask m5-repro emit <dir> | check <dir> | replay <dir>` writes, compares, and replays the reproducer bundles of the seven minimized perturbations (§18). CI emits them on both operating systems and checks each against the other.
+- `cargo xtask m5-mutants run <target> <out> | summarize <out>` runs the M5 source mutants (§21). A surviving mutant is either detected by a new test or listed, with its reason, in `tests/verification/equivalent-mutants.txt`.
+
 ## rv32 Fixtures
 
 `tests/rv32/fixtures/` holds the 40 `rv32ui` ELFs built from the pinned `riscv-tests`, and `manifest.json`, which records their hashes and the pins (`docs/m1-design.md` §10.2, §10.6). Tests and CI only read them, so Linux and Windows run the same bytes.
@@ -71,10 +85,10 @@ Never edit an entry by hand. When an intended change alters an entry's result, r
 
 ## Spike Differential
 
-M1-A3 compares every selected `rv32ui` fixture, the generated programs for 64 fixed seeds, and 9 misaligned-access programs, retirement by retirement, with Spike at the commit pinned in `tests/rv32/build-spike.sh` (`docs/m1-design.md` §10.3). The same task then runs the directed M2 CSR programs with the M2 CPU profile (`docs/m2-design.md` §4), and the directed M3 privilege and Sv32 programs with the M3 CPU profile (`docs/m3-design.md` §5, [m3-2-spike-appendix.md](docs/m3-2-spike-appendix.md), [m3-3-spike-appendix.md](docs/m3-3-spike-appendix.md)). The known divergences from Spike are listed in appendix B.6 and are kept out of the comparison, never special-cased in it. Only these tasks need Spike; the normal test suite runs without it, on committed Spike logs in `tests/rv32/spike/`.
+M1-A3 compares every selected `rv32ui` fixture, the generated programs for 64 fixed seeds, and 9 misaligned-access programs, retirement by retirement, with Spike at the commit pinned in `tests/rv32/build-spike.sh` (`docs/m1-design.md` §10.3). The same task then runs the directed M2 CSR programs with the M2 CPU profile (`docs/m2-design.md` §4), the directed M3 privilege and Sv32 programs with the M3 CPU profile (`docs/m3-design.md` §5, [m3-2-spike-appendix.md](docs/m3-2-spike-appendix.md), [m3-3-spike-appendix.md](docs/m3-3-spike-appendix.md)), and the directed M5 SEI programs with the M5 CPU profile (`docs/m5-design.md`). The known divergences from Spike are listed in appendix B.6 and are kept out of the comparison, never special-cased in it. Only these tasks need Spike; the normal test suite runs without it, on committed Spike logs in `tests/rv32/spike/`.
 
 - `cargo xtask spike build [<dir>]` fetches and builds the pinned Spike into `<dir>` (default `target/spike`) on Linux, with git, a C++ compiler, make, and `dtc`, then verifies it.
-- `cargo xtask spike verify [<dir>]` checks the build's stamp, its clean checkout at the pin, and its version line, and requires it to write the committed `simple` and seed 0 logs again, and the committed start of the `lw-1` trap log. `cargo xtask spike diff [<dir>]` verifies, then runs all 40 fixtures, 64 generated programs, and 9 misaligned-access programs on both sides, then the M2 CSR, M3 privilege, and M3 Sv32 programs; all must match, and every misaligned access must trap on both. CI runs both in a Linux job.
+- `cargo xtask spike verify [<dir>]` checks the build's stamp, its clean checkout at the pin, and its version line, and requires it to write the committed `simple` and seed 0 logs again, and the committed start of the `lw-1` trap log. `cargo xtask spike diff [<dir>]` verifies, then runs all 40 fixtures, 64 generated programs, and 9 misaligned-access programs on both sides, then the M2 CSR, M3 privilege, M3 Sv32, and M5 SEI programs; all must match, and every misaligned access must trap on both. CI runs both in a Linux job.
 - `M1_PROGEN_SEED=<seed> cargo xtask spike random [<dir>]` verifies, then runs the generated program for one seed; the nightly job runs it with the night's seed, and `M1_PROGEN_SEED=<seed> cargo nextest run -p systemscope-rv32 --run-ignored only` runs that program on SystemScope alone.
 - The generator (`tests/rv32/src/progen.rs`) is pinned by a digest of the fixed seeds' programs. Changing what a seed produces needs a new generator context, and the committed seed 0 log comes again from the pinned Spike, never by hand.
 - `SPIKE`, if set, is the command the tasks run instead of `<dir>/bin/spike`: the same pinned build, reached another way.

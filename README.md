@@ -6,9 +6,8 @@ events, the same state, and the same trace, on every supported platform.
 
 ## Status
 
-**M5: Timing Exploration** is complete, checked by its exit audit
-([docs/releases/m5-exit-audit.md](docs/releases/m5-exit-audit.md)); it is not tagged yet.
-M4 is complete and tagged `v0.5.0-m4`. SystemScope is still an early system, not a usable
+**M5: Timing Exploration** is complete and tagged `v0.6.0-m5`; see
+[docs/releases/m5-exit-audit.md](docs/releases/m5-exit-audit.md). SystemScope is still an early system, not a usable
 simulator of real hardware.
 
 | Milestone | Status | Tag |
@@ -18,7 +17,7 @@ simulator of real hardware.
 | M2 | complete | `v0.3.0-m2` |
 | M3 | complete | `v0.4.0-m3` |
 | M4 | complete | `v0.5.0-m4` |
-| M5 | complete | none |
+| M5 | complete | `v0.6.0-m5` |
 
 On `m3-reference`, a bare-metal firmware boots a small modeled kernel. The kernel loads
 five user programs from a disk image through the DMA block controller. It runs them as
@@ -30,6 +29,11 @@ Executable → Storage → RAM → Process → CPU → Memory → Syscall → Ke
 ```
 
 The whole path runs through models, with page tables in simulated RAM.
+
+On `m5-reference`, the kernel also preempts its processes on a timer interrupt and
+completes their block reads by interrupt. Seeded campaigns perturb device latencies,
+message delivery, and the order of simultaneous events, and compare every run with the
+unperturbed one through the M4 engine.
 
 What each milestone provides:
 
@@ -66,6 +70,16 @@ What each milestone provides:
     minimization to the latest covering checkpoints;
   - the Spike differential, a regression corpus, and source-mutant, fault, and Spike
     campaigns, all run through the engine.
+- **M5** (`v0.6.0-m5`, [docs/releases/m5-exit-audit.md](docs/releases/m5-exit-audit.md)):
+  - the `M5` CPU profile, with supervisor external interrupts delegated through
+    `mideleg`, and `SimpleTimer`, a memory-mapped timer on the interrupt controller;
+  - a preemptive modeled kernel: timer preemption, a blocking `blk_read` completed by
+    interrupt, an idle loop, and a page shared by every process;
+  - the `m5-reference` platform and its workload, with four planted races;
+  - timing perturbations as recorded inputs: A, a latency and time-slice sweep; B, seeded
+    per-message jitter; C, a seeded order of simultaneous events;
+  - campaigns compared on timing-invariant streams, with schedule evidence, perturbation
+    minimization, coverage reports, and reproducers that replay on Linux and Windows.
 
 Every milestone keeps the M0 guarantees, checked against committed golden files: the
 same digests on Linux and Windows, snapshots that restore exactly and portably at every
@@ -75,7 +89,8 @@ The CPU's behavior is checked against independent sources:
 - its own unit and property tests;
 - 40 `riscv-tests` `rv32ui` tests;
 - Spike, retirement by retirement: rv32ui, generated and misaligned-access programs, and
-  the directed M2 CSR, M3 privilege, and M3 Sv32 programs;
+  the directed M2 CSR, M3 privilege, M3 Sv32, and M5 supervisor external interrupt
+  programs;
 - 39 ACT4 RV32I tests with expected values from the Sail reference model, on the M1, M2,
   and M3 CPU profiles.
 
@@ -84,7 +99,7 @@ not a certification.
 
 What SystemScope does not implement:
 - the M, A, F, D, and C extensions, and misaligned loads and stores (they trap);
-- timers, CLINT, PLIC, and preemption;
+- CLINT, PLIC, the machine timer interrupt, and `WFI`;
 - PMP, `MPRV`, ASIDs, a TLB, and hardware A/D updates;
 - a filesystem, `fork`/`exec`, and memory-management syscalls.
 
@@ -95,9 +110,11 @@ Privileged ACT tests are disabled.
 
 M0, the deterministic simulation kernel, is tagged `v0.1.0-m0`. More documents:
 - designs and exit criteria: [docs/m0-design.md](docs/m0-design.md),
-  [docs/m1-design.md](docs/m1-design.md), [docs/m2-design.md](docs/m2-design.md), and
-  [docs/m3-design.md](docs/m3-design.md);
-- the M4 design, frozen at M4.0: [docs/m4-design.md](docs/m4-design.md);
+  [docs/m1-design.md](docs/m1-design.md), [docs/m2-design.md](docs/m2-design.md),
+  [docs/m3-design.md](docs/m3-design.md), [docs/m4-design.md](docs/m4-design.md), and
+  [docs/m5-design.md](docs/m5-design.md);
+- exit audits: [M2](docs/releases/m2-exit-audit.md), [M3](docs/releases/m3-exit-audit.md),
+  [M4](docs/releases/m4-exit-audit.md), and [M5](docs/releases/m5-exit-audit.md);
 - M1 release notes: [docs/releases/v0.2.0-m1.md](docs/releases/v0.2.0-m1.md);
 - the overall plan: [plan.md](plan.md).
 
@@ -108,15 +125,16 @@ contracts   (SystemScopeLabs/contracts)   time, events, components, protocols (m
 systemscope (this repository)
 ├─ runtime/              scheduler, topology elaboration, lifecycle, snapshots, trace sinks
 ├─ components/toy/       M0: ToyCpu, ToyDma, ToyBus, ToyMemory
-├─ components/rv32i/     M1–M3: decode, execution, CSRs, privilege, Sv32, Rv32iCpu
-├─ components/platform/  M1–M2: AddressBus, Ram, SimpleUart, SimpleIrqController, DmaBlockController, SimpleBlockMedia
-├─ components/os/        M3: ModeledKernel (gate, boot, processes, syscalls)
+├─ components/rv32i/     M1–M5: decode, execution, CSRs, privilege, Sv32, supervisor external interrupts, Rv32iCpu
+├─ components/platform/  M1–M5: AddressBus, Ram, SimpleUart, SimpleIrqController, DmaBlockController, SimpleBlockMedia, SimpleTimer
+├─ components/os/        M3–M5: ModeledKernel (gate, boot, processes, syscalls, preemption, blocking reads)
 ├─ elf/                  M1: host-side ELF32 loader; M3: user-executable parser and executable table
 ├─ reference/            builds m0-reference
-├─ tests/acceptance/     M0 AT-1..AT-3, M1-A6..M1-A8, M2 and M3 snapshot/golden suites, golden files in tests/golden
-├─ tests/rv32/           m1/m2/m3-reference builders, rv32ui fixtures, hello.elf, block_irq.elf, M3 firmware and user programs, Spike differential
+├─ tests/acceptance/     M0 AT-1..AT-3, M1-A6..M1-A8, M2–M5 snapshot/golden suites, M4 verification, M5 campaigns; golden files in tests/golden
+├─ tests/rv32/           m1/m2/m3/m5-reference builders, rv32ui fixtures, hello.elf, block_irq.elf, M3 and M5 firmware and user programs, Spike differential
 ├─ tests/act4/           the committed ACT4 RV32I corpus and its manifest
-├─ xtask/                bless, m1/m2/m3-golden, m3-reference, rv32-fixtures, spike, act4
+├─ tests/verification/   M4 and M5 expected streams, the regression corpus, coverage reports, equivalent mutants
+├─ xtask/                bless, m1/m2/m3/m5-golden, m3/m5-reference, m4/m5-expected, m4/m5-mutants, m4/m5-repro, m5-coverage, corpus, rv32-fixtures, spike, act4
 ├─ verification/         systemscope-verify, the M4 verification & debugging engine
 └─ visualizer/           (planned, M7+) the Visualizer / Interactive Debugger
 ```
@@ -135,7 +153,7 @@ of it.
 | **M2** (`v0.3.0-m2`) | Interrupts, DMA, block storage (abstract SSD model) |
 | **M3** (`v0.4.0-m3`) | Modeled OS backend: processes, syscalls, Sv32 virtual memory |
 | **M4** (`v0.5.0-m4`) | Verification & Debugging Engine: compare executions at stable architectural boundaries, locate the first divergence, produce structured diagnostic evidence, and build portable reproducers |
-| **M5** | Timing Exploration: seeded timing-perturbation campaigns over CPU, interrupts, DMA, storage, and OS, compared through the M4 engine, with `arch` coverage and a wider reference workload |
+| **M5** (`v0.6.0-m5`) | Timing Exploration: seeded timing-perturbation campaigns over CPU, interrupts, DMA, storage, and OS, compared through the M4 engine, with `arch` coverage and a wider reference workload |
 | M6 (planned) | Native guest OS backend: a C/assembly tiny kernel |
 | M7 (planned) | SystemScope Visualizer / Interactive Debugger: topology, timeline, state, step, step back, seek, breakpoint, filter, plus views of M4 divergences and reproducers, built on time-travel queries and a CLI that come first |
 | M8 (planned) | SystemVerilog CPU backend via Verilator |
@@ -174,6 +192,12 @@ cargo xtask m1-golden verify
 cargo xtask m2-golden verify
 cargo xtask m3-golden verify
 cargo xtask m3-reference verify
+cargo xtask m5-golden verify
+cargo xtask m5-reference verify
+cargo xtask m4-expected verify
+cargo xtask m5-expected verify
+cargo xtask m5-coverage verify
+cargo xtask corpus replay
 cargo xtask act4 verify
 cargo xtask act4 run
 ```

@@ -1,8 +1,8 @@
 # M2 Design: Interrupts, DMA, and Block Storage
 
-> Status: Design frozen (M2.0) · Parent: [plan.md](../plan.md) · Builds on: [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Design frozen (M2.0) · Implementation status: M2 complete, checked by the M2 exit audit ([releases/m2-exit-audit.md](releases/m2-exit-audit.md)), tagged `v0.3.0-m2` · Parent: [plan.md](../plan.md) · Builds on: [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
-This document is the architecture contract for M2. It fixes every decision that the M2 implementation steps (§17) depend on. Nothing in it is implemented yet: M2.0 changes documentation only.
+This document is the architecture contract for M2. It fixes every decision that the M2 implementation steps (§17) depend on. M2 is implemented as frozen here; the exit audit checks each criterion of §18.
 
 ---
 
@@ -894,14 +894,16 @@ Each step follows the M1 discipline: a feature branch, the full local gate, one 
 
 ## 18. M2 Exit Criteria
 
-- [ ] `irq.v0` and `block.v0` are in `contracts`, with rustdoc, golden encoding vectors, and strict decoding; `mem.v0`, `mem.v1`, and `COMPATIBILITY_ID` are unchanged.
-- [ ] The `M2` CPU profile implements §4 and §5, checked by the Spike-directed tests, the pure oracle, and the re-entry and CSR-enable tests; the `M1` profile is unchanged.
-- [ ] `MultiMasterBus`, `SimpleIrqController`, `SimpleBlockMedia`, and `DmaBlockController` implement §7–§10 with the tests of §15.1.
-- [ ] `block_irq.elf` passes on `m2-reference` (§12.4) on Linux and Windows.
-- [ ] Snapshot/restore from every event, the §13.1 stress points, and the portable mid-DMA snapshot pass; observation invariance holds.
-- [ ] `tests/golden/m2-reference.json` is blessed once, and every M0 and M1 golden file is byte-identical to its release (§15.4).
-- [ ] Every fixture (the ELF and the disk image) is pinned by a manifest.
-- [ ] Contract changes discovered during M2 are reflected back into this document.
+All met; see [releases/m2-exit-audit.md](releases/m2-exit-audit.md).
+
+- [x] `irq.v0` and `block.v0` are in `contracts`, with rustdoc, golden encoding vectors, and strict decoding; `mem.v0`, `mem.v1`, and `COMPATIBILITY_ID` are unchanged.
+- [x] The `M2` CPU profile implements §4 and §5, checked by the Spike-directed tests, the pure oracle, and the re-entry and CSR-enable tests; the `M1` profile is unchanged.
+- [x] `MultiMasterBus`, `SimpleIrqController`, `SimpleBlockMedia`, and `DmaBlockController` implement §7–§10 with the tests of §15.1.
+- [x] `block_irq.elf` passes on `m2-reference` (§12.4) on Linux and Windows.
+- [x] Snapshot/restore from every event, the §13.1 stress points, and the portable mid-DMA snapshot pass; observation invariance holds.
+- [x] `tests/golden/m2-reference.json` is blessed once, and every M0 and M1 golden file is byte-identical to its release (§15.4).
+- [x] Every fixture (the ELF and the disk image) is pinned by a manifest.
+- [x] Contract changes discovered during M2 are reflected back into this document.
 
 ---
 

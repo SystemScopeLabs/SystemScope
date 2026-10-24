@@ -57,8 +57,8 @@ evidence, minimized to the perturbation it needs, and reproduced.
 | Step | Delivered | Tested | Documented |
 |---|---|---|---|
 | M5.1 | Perturbation core: A in the builders, B in the runtime (`runtime/src/jitter.rs`), identity, snapshot state | `tests/rv32/tests/perturbation.rs`, `runtime/tests/*` | §27.1 |
-| M5.2 | `M5` CPU profile (`rv32i/src/sei.rs`), `SimpleTimer` (`platform/src/timer.rs`), Spike-directed SEI tests | `rv32i/tests/{cpu_m5,cpu_timer_sei_runtime}.rs`, `platform/tests/timer.rs`, `tests/rv32/tests/spike_m5.rs`, the Linux `spike` job | §27.2 |
-| M5.3a | Kernel: interrupt traps, preemption, `blk_read`, idle, shared page, shutdown dump (`os/src/interrupts.rs`) | `os/tests/m5_kernel.rs` | §27.3 |
+| M5.2 | `M5` CPU profile (`components/rv32i/src/sei.rs`), `SimpleTimer` (`components/platform/src/timer.rs`), Spike-directed SEI tests | `components/rv32i/tests/{cpu_m5,cpu_timer_sei_runtime}.rs`, `components/platform/tests/timer.rs`, `tests/rv32/tests/spike_m5.rs`, the Linux `spike` job | §27.2 |
+| M5.3a | Kernel: interrupt traps, preemption, `blk_read`, idle, shared page, shutdown dump (`components/os/src/interrupts.rs`) | `components/os/tests/m5_kernel.rs` | §27.3 |
 | M5.3b | `m5-reference`, its firmware and six programs, golden files, `SLICE` | `tests/acceptance/tests/m5_golden.rs`, `cargo xtask m5-reference verify`, the M5 every-event and cross-OS jobs | §27.4 |
 | M5.4a | `outcome` and `schedule` streams, the `m5.*` profiles, projection state in checkpoints, a perturbed backend | `tests/acceptance/tests/m5_verify.rs` | §27.5 |
 | M5.4b | Schedule evidence, perturbation identity, the RAM state decoder | `tests/acceptance/tests/m5_evidence.rs` | §27.6 |
