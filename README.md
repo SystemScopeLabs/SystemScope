@@ -19,7 +19,7 @@ simulator of real hardware.
 | M2 | complete | `v0.3.0-m2` |
 | M3 | complete | `v0.4.0-m3` |
 | M4 | complete | `v0.5.0-m4` |
-| M5 | M5.6c complete; M5.7 next | none |
+| M5 | M5.7a complete; M5.7b next | none |
 
 On `m3-reference`, a bare-metal firmware boots a small modeled kernel. The kernel loads
 five user programs from a disk image through the DMA block controller. It runs them as

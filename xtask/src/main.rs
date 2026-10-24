@@ -77,6 +77,13 @@
 //!   `tests/verification/expected/m3-reference` (`docs/m4-design.md` §25.2), the expected
 //!   side of the source-mutant cases, then verifies.
 //! - `m4-expected verify`: requires this build to reproduce those streams byte for byte.
+//! - `m5-mutants run <target> <out> | summarize <out>`: the same for the M5 targets
+//!   (`docs/m5-design.md` §21), each mutant run against M5's source-mutant case.
+//! - `m5-expected bless | verify`: the same for `m5-reference`'s expectations in
+//!   `tests/verification/expected/m5-reference`: its unperturbed streams and the digests
+//!   of its perturbed runs. `bless` first checks that each race diverges, each minimized
+//!   perturbation reproduces, the unpatched scenario agrees, and the tie seed reorders
+//!   simultaneous events.
 //! - `m5-coverage bless | verify [campaign]`: the coverage reports in
 //!   `tests/verification/coverage` (`docs/m5-design.md` §17). Without `campaign`, the
 //!   architectural coverage of `m3-reference` and `m5-reference`, two runs; with it, the
@@ -145,6 +152,7 @@ use systemscope_acceptance::m3::{
 };
 use systemscope_acceptance::m5 as m5g;
 use systemscope_acceptance::m5::coverage as m5cov;
+use systemscope_acceptance::m5::expected as m5x;
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
@@ -176,6 +184,8 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask corpus replay | check <dir>\n       \
                      cargo xtask m4-mutants run <target> <out> | summarize <out>\n       \
                      cargo xtask m4-expected bless | verify\n       \
+                     cargo xtask m5-mutants run <target> <out> | summarize <out>\n       \
+                     cargo xtask m5-expected bless | verify\n       \
                      cargo xtask m5-coverage bless | verify [campaign]\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
@@ -260,10 +270,14 @@ fn main() -> ExitCode {
         },
         ["corpus", "replay"] => corpus_replay(),
         ["corpus", "check", dir] => corpus_check(Path::new(dir)),
-        ["m4-mutants", "run", target, out] => m4_mutants_run(target, out),
-        ["m4-mutants", "summarize", dir] => m4_mutants_summarize(Path::new(dir)),
+        ["m4-mutants", "run", target, out] => mutants_run(&m4m::TARGETS, target, out),
+        ["m4-mutants", "summarize", dir] => mutants_summarize(&m4m::TARGETS, Path::new(dir)),
         ["m4-expected", "bless"] => m4_expected_bless(),
         ["m4-expected", "verify"] => m4_expected_verify(),
+        ["m5-mutants", "run", target, out] => mutants_run(&m4m::M5_TARGETS, target, out),
+        ["m5-mutants", "summarize", dir] => mutants_summarize(&m4m::M5_TARGETS, Path::new(dir)),
+        ["m5-expected", "bless"] => m5_expected(true),
+        ["m5-expected", "verify"] => m5_expected(false),
         ["m5-coverage", "bless"] => m5_coverage(true, m5cov::Reports::Arch),
         ["m5-coverage", "verify"] => m5_coverage(false, m5cov::Reports::Arch),
         ["m5-coverage", "bless", "campaign"] => m5_coverage(true, m5cov::Reports::Campaign),
@@ -858,9 +872,9 @@ fn corpus_check(dir: &Path) -> ExitCode {
     }
 }
 
-fn m4_mutants_run(name: &str, out: &str) -> ExitCode {
-    let Some(target) = m4m::target(name) else {
-        let names: Vec<&str> = m4m::TARGETS.iter().map(|t| t.name).collect();
+fn mutants_run(targets: &'static [m4m::Target], name: &str, out: &str) -> ExitCode {
+    let Some(target) = targets.iter().find(|t| t.name == name) else {
+        let names: Vec<&str> = targets.iter().map(|t| t.name).collect();
         eprintln!(
             "no source-mutant target {name}: one of {}",
             names.join(", ")
@@ -870,7 +884,7 @@ fn m4_mutants_run(name: &str, out: &str) -> ExitCode {
     // The baseline cargo-mutants skips: the case agrees on the unmutated tree.
     let baseline = Command::new("cargo")
         .args(["nextest", "run", "-p", "systemscope-acceptance"])
-        .args(m4m::TEST)
+        .args(target.test)
         .current_dir(root())
         .status();
     if !baseline.is_ok_and(|s| s.success()) {
@@ -905,7 +919,7 @@ fn m4_mutants_run(name: &str, out: &str) -> ExitCode {
     }
 }
 
-fn m4_mutants_summarize(dir: &Path) -> ExitCode {
+fn mutants_summarize(targets: &'static [m4m::Target], dir: &Path) -> ExitCode {
     let root = root();
     let equivalents = fs::read_to_string(root.join(m4m::EQUIVALENTS))
         .map_err(|e| format!("{}: {e}", m4m::EQUIVALENTS))
@@ -918,7 +932,7 @@ fn m4_mutants_summarize(dir: &Path) -> ExitCode {
         }
     };
     let mut runs = Vec::new();
-    for t in &m4m::TARGETS {
+    for t in targets {
         let out = dir.join(t.name);
         if !out.join("mutants.out").exists() {
             println!("{}: not run", t.name);
@@ -960,6 +974,22 @@ fn m4_expected_verify() -> ExitCode {
     report(
         result,
         &format!("this build reproduces the expected streams in {}", m4x::DIR),
+    )
+}
+
+fn m5_expected(bless: bool) -> ExitCode {
+    let root = root();
+    let result = m5g::Fixture::read(&root)
+        .map_err(|e| vec![e])
+        .and_then(|f| {
+            if bless {
+                m5x::bless(&f, &root).map_err(|e| vec![e])?;
+            }
+            m5x::verify(&f, &root)
+        });
+    report(
+        result,
+        &format!("this build reproduces the expectations in {}", m5x::DIR),
     )
 }
 

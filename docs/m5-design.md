@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.6c complete, M5.7 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5.7a complete, M5.7b next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -438,7 +438,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 
 - **Spike.** Directed programs for the `M5` profile's CSRs and delivery. They make SEI pending with the M-writable `mip.SEIP`, so Spike and SystemScope take it at the same instruction without any device. They are compared through M4's stream compare. The timer and the interrupt controller are SystemScope devices that Spike does not model, so they are not compared with Spike.
 - **Unit and property tests.** Perturbation encoding round-trips. The empty perturbation is the identity. Jitter is FIFO per link. The tie permutation keeps runtime rules. Every perturbed run restores at every event.
-- **Mutation.** Source mutants of the perturbation layer, and of the M5 kernel paths (preemption, wake, block queue), are judged by the campaign. Each must be detected or listed as equivalent with its reason, as in M4.7.
+- **Mutation.** Source mutants of the perturbation layer, and of the M5 kernel paths (preemption, wake, block queue), are judged against `m5-reference`'s committed expectations (`tests/verification/expected/m5-reference`), as M4.7 judges against `m3-reference`'s expected streams, so the expected side never runs mutated code. The expectations are the unpatched, unperturbed run's streams (`arch` by its BLAKE3 alone: it is nine megabytes), the BLAKE3 of every stream of 44 campaign runs (the unpatched scenario and each race unperturbed, each race's first diverging seeds under A and B, the seven minimized perturbations, and the unpatched scenario at every CI seed of A, B, and C), and the BLAKE3 of the dispatch order under C's seed 0. C changes no stream (§17), so its rank is judged by that order, which must reorder simultaneous events. The case checks the unperturbed streams first and stops at the first detection. There are eight targets: B's draw and its application to a send, C's rank and the tied sequence, the kernel's preemption decision, its interrupt and timer path, its block requests, and blocking and waking. A reaches the platform through its builder, which is not a target. Each mutant must be detected or listed as equivalent with its reason, as in M4.7.
 - **Planted races.** §14: every planted race is found, and every correct counterpart agrees.
 
 ## 22. Contracts
@@ -482,7 +482,8 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.6a** | complete | Tie order (C): rank-major sequences, snapshot version 3, the property tests, C on every reference platform and in the campaigns | code, tests |
 | **M5.6b** | complete | Perturbation minimization (A and B), the listed jitter, and `perturbation.bin` in reproducers | code, CI |
 | **M5.6c** | complete | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
-| **M5.7** | next | Campaign hardening: source mutants of the M5 paths, cross-OS, nightly seeds | CI |
+| **M5.7a** | complete | Source mutants of the M5 paths against committed expectations (§21) | code, CI |
+| **M5.7b** | next | Campaign hardening: reproducers cross-OS, nightly campaign seeds, perturbed every-event resume | CI |
 | **M5.8** | planned | Exit audit | docs |
 
 ## 26. M5 Exit Criteria
@@ -645,3 +646,16 @@ M5.6c implemented the coverage reports (`tests/acceptance/src/coverage.rs`, `tes
 | §17 | The reports are committed files whose reproduction is checked, never their figures | a report is never a gate, and reproduction is what keeps it deterministic and the same on both operating systems |
 | §17 | Preemption points are reported per process, not per program | the `schedule` stream names processes, and each process runs one program |
 | §14, §24 | O5 decided: the M5.5 ranges, seeds 0–7 in CI and 0–31 in the coverage campaign, verified weekly | the coverage campaign takes 480 runs |
+
+### 27.11 M5.7a
+
+M5.7a implemented M5's source mutants (`tests/acceptance/src/m5/expected.rs`, the M5 targets in `tests/acceptance/src/m3/mutants.rs`, `cargo xtask m5-expected` and `m5-mutants`, the `m5-source-mutants` workflow).
+
+| Section | Revision | Why |
+|---|---|---|
+| §21 | Mutants are judged against committed expectations, not by rerunning the campaign | a campaign compares a build with itself, so a mutant that changes both sides alike would agree; the expected side must not run mutated code, as in M4.7 |
+| §21 | `arch` is committed by its BLAKE3, not as a stream | the stream is nine megabytes; a divergence in it is still found, without its ordinal |
+| §21 | Perturbed runs are committed by their streams' BLAKE3 | 44 runs of four streams each; a digest is enough to detect, and the unperturbed streams locate |
+| §21 | C's rank is judged by the dispatch order under seed 0 | C changes no stream of any subject, so no stream digest can see its rank |
+| §21 | A's builder is not a target | A sets link latencies and the slice before the run; its mutants are configuration mutants, not M5 paths |
+| CI | `m5_reproducer` runs in CI | M5.6b pinned the minimized perturbations but left their test out of the workflow |

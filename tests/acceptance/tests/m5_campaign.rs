@@ -6,16 +6,13 @@
 
 use systemscope_acceptance::m5::Fixture;
 use systemscope_acceptance::m5::campaign::{
-    Judged, Mechanism, Subject, judge, perturbation, record, the_plan,
+    CI_SEEDS, FIRST_DIVERGENCE, Judged, Mechanism, Subject, judge, perturbation, record, the_plan,
 };
 use systemscope_acceptance::m5::races::Race;
 use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::workspace_root;
 use systemscope_verify::case::InputVariant;
 use systemscope_verify::compare::{Verdict, compare_recordings};
-
-/// The seeds CI runs the unpatched campaign over, for each mechanism.
-const CI_SEEDS: std::ops::Range<u64> = 0..8;
 
 fn fixture() -> Fixture {
     Fixture::read(&workspace_root()).unwrap_or_else(|e| panic!("{e}"))
@@ -99,8 +96,12 @@ fn tie_order_changes_no_stream_of_any_subject() {
 }
 
 /// Runs `race`'s campaign under `mechanism` up to its first divergence, which must come
-/// at `first` with every earlier seed agreeing.
-fn diverges_first_at(race: Race, mechanism: Mechanism, first: u64) {
+/// at its [`FIRST_DIVERGENCE`] seed with every earlier seed agreeing.
+fn diverges_first(race: Race, mechanism: Mechanism) {
+    let (_, _, first) = FIRST_DIVERGENCE
+        .into_iter()
+        .find(|&(r, m, _)| (r, m) == (race, mechanism))
+        .expect("a pinned seed");
     let f = fixture();
     let plan = the_plan(&f);
     let subject = Subject(Some(race));
@@ -122,40 +123,40 @@ fn diverges_first_at(race: Race, mechanism: Mechanism, first: u64) {
 
 #[test]
 fn counter_unlocked_diverges_under_a() {
-    diverges_first_at(Race::R1, Mechanism::A, 0);
+    diverges_first(Race::R1, Mechanism::A);
 }
 
 #[test]
 fn counter_unlocked_diverges_under_b() {
-    diverges_first_at(Race::R1, Mechanism::B, 0);
+    diverges_first(Race::R1, Mechanism::B);
 }
 
 #[test]
 fn peterson_turn_diverges_under_a() {
-    diverges_first_at(Race::R2, Mechanism::A, 1);
+    diverges_first(Race::R2, Mechanism::A);
 }
 
 #[test]
 fn peterson_turn_diverges_under_b() {
-    diverges_first_at(Race::R2, Mechanism::B, 0);
+    diverges_first(Race::R2, Mechanism::B);
 }
 
 #[test]
 fn mailbox_data_first_diverges_under_a() {
-    diverges_first_at(Race::R3, Mechanism::A, 0);
+    diverges_first(Race::R3, Mechanism::A);
 }
 
 #[test]
 fn mailbox_data_first_diverges_under_b() {
-    diverges_first_at(Race::R3, Mechanism::B, 1);
+    diverges_first(Race::R3, Mechanism::B);
 }
 
 #[test]
 fn kernel_wake_lost_diverges_under_a() {
-    diverges_first_at(Race::R5, Mechanism::A, 1);
+    diverges_first(Race::R5, Mechanism::A);
 }
 
 #[test]
 fn kernel_wake_lost_diverges_under_b() {
-    diverges_first_at(Race::R5, Mechanism::B, 0);
+    diverges_first(Race::R5, Mechanism::B);
 }

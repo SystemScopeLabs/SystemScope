@@ -1,0 +1,110 @@
+name: M5 source mutants
+# docs/m5-design.md §21: every M5 source-mutation target, each generated mutant run by
+# cargo-mutants against M5's source-mutant case (m5-reference against its committed
+# expectations: the unperturbed streams, the perturbed runs' digests, and the tie order).
+# On demand, and on pull requests that change a target, the case, or the equivalent-mutant
+# list. The summary fails unless every mutant is detected or listed as equivalent.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - runtime/src/jitter.rs
+      - runtime/src/runtime.rs
+      - runtime/src/ties.rs
+      - runtime/src/scheduler.rs
+      - components/os/src/interrupts.rs
+      - components/os/src/process.rs
+      - tests/acceptance/src/m5/**
+      - tests/acceptance/src/m3/mutants.rs
+      - tests/verification/**
+      - .github/workflows/m5-source-mutants.yml
+permissions:
+  contents: read
+concurrency:
+  group: m5-source-mutants-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+jobs:
+  mutants:
+    name: Source mutants (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [jitter, send, ties, sequence, preempt, advance, request, block]
+    defaults:
+      run:
+        working-directory: systemscope
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: systemscope }
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+          save-if: ${{ strategy.job-index == 0 }}
+      - uses: taiki-e/install-action@v2
+        with: { tool: "cargo-mutants,cargo-nextest" }
+      # The unmutated build must reproduce the expectations the mutants are judged
+      # against.
+      - name: Expectations
+        run: cargo xtask m5-expected verify
+      - name: Run cargo-mutants on ${{ matrix.target }}
+        run: cargo xtask m5-mutants run ${{ matrix.target }} target/m5-mutants
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: m5-source-mutants-${{ matrix.target }}
+          path: systemscope/target/m5-mutants
+          if-no-files-found: ignore
+
+  summary:
+    needs: mutants
+    if: always()
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: systemscope
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: systemscope }
+      - uses: actions/checkout@v7
+        with:
+          repository: SystemScopeLabs/contracts
+          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+          path: contracts
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: systemscope
+          save-if: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: m5-source-mutants-*
+          path: systemscope/target/m5-mutants
+          merge-multiple: true
+      - name: Summarize
+        run: |
+          set -o pipefail
+          status=0
+          cargo xtask m5-mutants summarize target/m5-mutants | tee summary.md || status=$?
+          {
+            echo "## M5 source mutants at ${GITHUB_SHA:0:7}"
+            echo
+            cat summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Every target must have run.
+          if grep -q ": not run$" summary.md; then
+            echo "::error::a source-mutant target did not run"
+            status=1
+          fi
+          exit "$status"

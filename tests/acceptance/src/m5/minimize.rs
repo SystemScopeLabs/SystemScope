@@ -15,7 +15,7 @@ use std::sync::Arc;
 use systemscope_runtime::jitter::{Jitter, MessageId};
 use systemscope_rv32::m5;
 use systemscope_rv32::m5ref::SLICE;
-use systemscope_rv32::perturb::Perturbation;
+use systemscope_rv32::perturb::{Latencies, Perturbation};
 use systemscope_rv32::runner::Start;
 use systemscope_verify::bundle::{self, Bundle, Case, ReplayError};
 use systemscope_verify::case::InputVariant;
@@ -27,8 +27,9 @@ use systemscope_verify::report::{Builder, Make};
 use systemscope_verify::result::VerificationResult;
 
 use super::Fixture;
-use super::campaign::{Subject, record};
+use super::campaign::{self, Mechanism, Subject, record};
 use super::evidence::applied_jitter;
+use super::races::Race;
 use super::verify::{self, defective_config};
 
 /// The latency of every link on the frozen platform, in CPU cycles.
@@ -358,3 +359,68 @@ mod tests {
         assert!(without(&q, Part::Link(7)).is_empty());
     }
 }
+
+/// A minimized perturbation, pinned from the offline search: the campaign seed it was
+/// reduced from, and what is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pinned {
+    /// The race it reproduces.
+    pub race: Race,
+    /// The mechanism it was drawn from.
+    pub mechanism: Mechanism,
+    /// The campaign seed.
+    pub seed: u64,
+    /// A: the link overrides left, in CPU cycles.
+    pub links: &'static [(u32, u64)],
+    /// A: the slice left.
+    pub slice: Option<u32>,
+    /// B: the delayed messages left.
+    pub only: &'static [MessageId],
+}
+
+impl Pinned {
+    /// The minimized perturbation.
+    pub fn perturbation(&self) -> Perturbation {
+        match self.mechanism {
+            Mechanism::A => Perturbation {
+                latencies: Latencies {
+                    links: self.links.iter().copied().collect(),
+                    ..Latencies::default()
+                },
+                slice: self.slice,
+                ..Perturbation::default()
+            },
+            Mechanism::B => listed(&campaign::perturbation(Mechanism::B, self.seed), self.only),
+            Mechanism::C => unreachable!("C has no finding"),
+        }
+    }
+}
+
+/// Every pinned minimized perturbation (§16): one per race and mechanism, except R3 under
+/// B, whose search had not finished after eight hours (§27.9). Peterson's turn race needs
+/// many delays at once under B: 42 messages on four links.
+#[rustfmt::skip]
+pub const PINNED: [Pinned; 7] = [
+    Pinned { race: Race::R1, mechanism: Mechanism::A, seed: 0, links: &[(12, 2)], slice: Some(8002), only: &[] },
+    Pinned {
+        race: Race::R1, mechanism: Mechanism::B, seed: 0, links: &[], slice: None,
+        only: &[(3, 0, 22), (3, 0, 25), (3, 1, 14), (3, 1, 25), (3, 1, 26)],
+    },
+    Pinned { race: Race::R2, mechanism: Mechanism::A, seed: 1, links: &[(4, 4), (11, 10)], slice: Some(5250), only: &[] },
+    Pinned {
+        race: Race::R2, mechanism: Mechanism::B, seed: 0, links: &[], slice: None,
+        only: &[
+            (3, 0, 21), (3, 0, 22), (3, 0, 27), (3, 0, 28), (3, 0, 36), (3, 0, 37), (3, 0, 42),
+            (3, 1, 21), (3, 1, 22), (3, 1, 27), (3, 1, 28), (3, 1, 36), (3, 1, 41), (3, 1, 42),
+            (8, 0, 42), (8, 0, 52), (8, 0, 54),
+            (11, 0, 40), (11, 0, 42), (11, 0, 43), (11, 0, 51), (11, 0, 52), (11, 0, 53),
+            (11, 0, 54), (11, 0, 82), (11, 0, 85),
+            (11, 1, 40), (11, 1, 41), (11, 1, 42), (11, 1, 43), (11, 1, 51), (11, 1, 52),
+            (11, 1, 53), (11, 1, 70), (11, 1, 71), (11, 1, 78), (11, 1, 82),
+            (12, 0, 40), (12, 0, 50), (12, 0, 52), (12, 0, 70), (12, 0, 78),
+        ],
+    },
+    Pinned { race: Race::R3, mechanism: Mechanism::A, seed: 0, links: &[(11, 15)], slice: None, only: &[] },
+    Pinned { race: Race::R5, mechanism: Mechanism::A, seed: 1, links: &[], slice: Some(7995), only: &[] },
+    Pinned { race: Race::R5, mechanism: Mechanism::B, seed: 0, links: &[], slice: None, only: &[(3, 1, 21)] },
+];

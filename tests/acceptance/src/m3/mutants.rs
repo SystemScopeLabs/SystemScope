@@ -13,13 +13,17 @@ use std::path::Path;
 use serde_json::Value as Json;
 
 use super::expected::{DETECTED, ORACLE_MISMATCH};
+use crate::m5::expected::DETECTED as M5_DETECTED;
 
 /// The equivalent mutants: blocks of `#` comment lines, the reason, followed by the
 /// mutants' names exactly as cargo-mutants prints them.
 pub const EQUIVALENTS: &str = "tests/verification/equivalent-mutants.txt";
 
-/// The test cargo-mutants runs for every mutant: [`super::expected::judge`].
+/// The test cargo-mutants runs for every M4 mutant: [`super::expected::judge`].
 pub const TEST: [&str; 4] = ["--test", "m4_expected", "-E", "test(=source_mutant_case)"];
+
+/// The test cargo-mutants runs for every M5 mutant: [`crate::m5::expected::judge`].
+pub const M5_TEST: [&str; 4] = ["--test", "m5_expected", "-E", "test(=source_mutant_case)"];
 
 /// A frozen source-mutation class and its target functions (§25.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,6 +38,8 @@ pub struct Target {
     pub file: &'static str,
     /// The functions, as cargo-mutants names them.
     pub functions: &'static [&'static str],
+    /// The source-mutant case: [`TEST`] or [`M5_TEST`].
+    pub test: [&'static str; 4],
 }
 
 impl Target {
@@ -44,7 +50,7 @@ impl Target {
 
     /// cargo-mutants' arguments for this target, writing into `out`. The baseline is
     /// skipped: cargo-mutants would test only the mutated package there, so the caller
-    /// runs [`TEST`] unmutated first. The repository's mutants configuration is not read:
+    /// runs the case unmutated first. The repository's mutants configuration is not read:
     /// every operator applies.
     pub fn args(&self, out: &str) -> Vec<String> {
         let mut args: Vec<String> = [
@@ -67,7 +73,7 @@ impl Target {
         .into();
         args.push(self.re());
         args.extend(["-o".to_owned(), out.to_owned(), "--".to_owned()]);
-        args.extend(TEST.map(str::to_owned));
+        args.extend(self.test.map(str::to_owned));
         args
     }
 }
@@ -83,6 +89,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/execute.rs",
         functions: &["execute_alu", "op_imm", "shift", "op_reg"],
+        test: TEST,
     },
     Target {
         name: "control",
@@ -90,6 +97,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/execute.rs",
         functions: &["execute_control", "taken"],
+        test: TEST,
     },
     Target {
         name: "memory",
@@ -97,6 +105,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/memory.rs",
         functions: &["complete_memory", "complete_load", "complete_store"],
+        test: TEST,
     },
     Target {
         name: "commit",
@@ -104,6 +113,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/cpu.rs",
         functions: &["Rv32iCpu::commit_fields"],
+        test: TEST,
     },
     Target {
         name: "exception",
@@ -111,6 +121,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/privilege.rs",
         functions: &["M3State::take_exception"],
+        test: TEST,
     },
     Target {
         name: "sret",
@@ -118,6 +129,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/privilege.rs",
         functions: &["M3State::sret"],
+        test: TEST,
     },
     Target {
         name: "sv32",
@@ -125,6 +137,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-rv32i",
         file: "components/rv32i/src/sv32.rs",
         functions: &["step", "sv32_translate"],
+        test: TEST,
     },
     Target {
         name: "syscall",
@@ -132,6 +145,7 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-os",
         file: "components/os/src/procop.rs",
         functions: &["Model::syscall"],
+        test: TEST,
     },
     Target {
         name: "schedule",
@@ -139,12 +153,89 @@ pub const TARGETS: [Target; 9] = [
         package: "systemscope-os",
         file: "components/os/src/process.rs",
         functions: &["Processes::schedule_next", "Processes::yield_current"],
+        test: TEST,
     },
 ];
 
-/// The target named `name`.
+/// The M5 targets (`docs/m5-design.md` §21): perturbation B's draw and its application
+/// to a send, perturbation C's rank and the tied sequence, the kernel's preemption and
+/// timer path, its block requests, and blocking and waking. A's latency and slice reach
+/// the platform through its builder, which is not a target.
+pub const M5_TARGETS: [Target; 8] = [
+    Target {
+        name: "jitter",
+        class: "jitter draw",
+        package: "systemscope-runtime",
+        file: "runtime/src/jitter.rs",
+        functions: &["Jitter::draw"],
+        test: M5_TEST,
+    },
+    Target {
+        name: "send",
+        class: "jitter application",
+        package: "systemscope-runtime",
+        file: "runtime/src/runtime.rs",
+        functions: &["Ctx<'_>::try_send"],
+        test: M5_TEST,
+    },
+    Target {
+        name: "ties",
+        class: "tie rank",
+        package: "systemscope-runtime",
+        file: "runtime/src/ties.rs",
+        functions: &["Ties::rank"],
+        test: M5_TEST,
+    },
+    Target {
+        name: "sequence",
+        class: "tied sequence",
+        package: "systemscope-runtime",
+        file: "runtime/src/scheduler.rs",
+        functions: &["Scheduler<T>::schedule"],
+        test: M5_TEST,
+    },
+    Target {
+        name: "preempt",
+        class: "preemption decision",
+        package: "systemscope-os",
+        file: "components/os/src/interrupts.rs",
+        functions: &["Model::decide_m5", "Model::next_source", "Model::idle_op"],
+        test: M5_TEST,
+    },
+    Target {
+        name: "advance",
+        class: "interrupt handling and timer",
+        package: "systemscope-os",
+        file: "components/os/src/interrupts.rs",
+        functions: &["Model::advance_m5"],
+        test: M5_TEST,
+    },
+    Target {
+        name: "request",
+        class: "block requests",
+        package: "systemscope-os",
+        file: "components/os/src/interrupts.rs",
+        functions: &[
+            "Model::blk_read",
+            "Model::submit",
+            "Model::complete_request",
+            "Model::finish",
+        ],
+        test: M5_TEST,
+    },
+    Target {
+        name: "block",
+        class: "blocking and waking",
+        package: "systemscope-os",
+        file: "components/os/src/process.rs",
+        functions: &["Processes::block_current", "Processes::wake"],
+        test: M5_TEST,
+    },
+];
+
+/// The target named `name`, of M4 or M5.
 pub fn target(name: &str) -> Option<&'static Target> {
-    TARGETS.iter().find(|t| t.name == name)
+    TARGETS.iter().chain(&M5_TARGETS).find(|t| t.name == name)
 }
 
 /// What became of one mutant.
@@ -228,7 +319,7 @@ pub fn caught(log: &str) -> Fate {
     if let Some(why) = after(ORACLE_MISMATCH) {
         return Fate::OracleMismatch(why);
     }
-    match after(DETECTED) {
+    match after(DETECTED).or_else(|| after(M5_DETECTED)) {
         Some(what) => Fate::Detected(what),
         None => Fate::Crashed,
     }
@@ -316,24 +407,26 @@ pub fn violations(runs: &[(&Target, Vec<Mutant>)], equivalents: &[Equivalent]) -
     errors
 }
 
-/// The Markdown summary: per target, the counts, then every mutant and its fate.
+/// The Markdown summary: per target, the counts, then every mutant and its fate. An M5
+/// mutant detected only on a perturbed run or by the tie order counts as perturbed.
 pub fn render(runs: &[(&Target, Vec<Mutant>)]) -> String {
     let count = |ms: &[Mutant], f: fn(&Fate) -> bool| ms.iter().filter(|m| f(&m.fate)).count();
     let mut o = String::from(
-        "| Target | Class | Generated | Diverged | Auxiliary | Failed | Crashed | Hung | Unviable | Missed |\n\
-         |---|---|---|---|---|---|---|---|---|---|\n",
+        "| Target | Class | Generated | Diverged | Auxiliary | Failed | Perturbed | Crashed | Hung | Unviable | Missed |\n\
+         |---|---|---|---|---|---|---|---|---|---|---|\n",
     );
     for (t, ms) in runs {
         let starts = |m: &Mutant, p: &str| matches!(&m.fate, Fate::Detected(w) if w.starts_with(p));
         let by = |p: &str| ms.iter().filter(|m| starts(m, p)).count();
         o.push_str(&format!(
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             t.name,
             t.class,
             ms.len(),
             by("Diverged"),
             by("AuxiliaryDivergence"),
             by("BackendFailed"),
+            by("PerturbedDivergence") + by("TieOrder"),
             count(ms, |f| *f == Fate::Crashed),
             count(ms, |f| *f == Fate::Hung),
             count(ms, |f| *f == Fate::Unviable),

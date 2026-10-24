@@ -20,6 +20,8 @@
 //! resumes the mid snapshot to the end.
 
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 use serde_json::{Map, Value};
@@ -37,9 +39,37 @@ use crate::hex;
 pub mod campaign;
 pub mod coverage;
 pub mod evidence;
+pub mod expected;
 pub mod minimize;
 pub mod races;
 pub mod verify;
+
+/// The most runs [`parallel`] keeps in flight.
+const WORKERS: usize = 4;
+
+/// Runs `jobs` on up to [`WORKERS`] threads, in any order, keeping each result at its
+/// job's index.
+pub fn parallel<J: Sync, R: Send>(jobs: &[J], f: impl Fn(&J) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let out: Mutex<Vec<Option<R>>> = Mutex::new(jobs.iter().map(|_| None).collect());
+    thread::scope(|s| {
+        for _ in 0..WORKERS {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(job) = jobs.get(i) else { break };
+                    let r = f(job);
+                    out.lock().expect("unpoisoned")[i] = Some(r);
+                }
+            });
+        }
+    });
+    out.into_inner()
+        .expect("unpoisoned")
+        .into_iter()
+        .map(|r| r.expect("every job ran"))
+        .collect()
+}
 
 /// The scenario's name in the golden file.
 pub const SCENARIO: &str = "m5-reference";

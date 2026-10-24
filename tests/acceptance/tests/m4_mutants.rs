@@ -129,7 +129,7 @@ fn the_summary_refuses_gaps_stale_listings_and_mismatches() {
     assert_eq!(violations(&runs, &[]), Vec::<String>::new());
     let table = render(&runs);
     assert!(
-        table.contains("| sret | privilege return | 3 | 1 | 0 | 0 | 0 | 1 | 1 | 0 |"),
+        table.contains("| sret | privilege return | 3 | 1 | 0 | 0 | 0 | 0 | 1 | 1 | 0 |"),
         "{table}"
     );
     assert!(table.contains("with 0`: Diverged at arch[64]"), "{table}");

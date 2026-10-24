@@ -7,9 +7,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 
 use serde_json::{Value as Json, json};
 use systemscope_contracts::trace::Value;
@@ -21,10 +18,10 @@ use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::profile::Plan;
 use systemscope_verify::recorded::stream_bytes;
 
-use super::Fixture;
 use super::campaign::{Judged, Mechanism, Subject, judge, perturbation, record, the_plan};
 use super::races::Race;
 use super::verify::SCHEDULE;
+use super::{Fixture, parallel};
 use crate::coverage;
 use crate::m3::{self, expected};
 
@@ -41,9 +38,6 @@ pub const CAMPAIGN_FILE: &str = "m5-campaign.json";
 pub const SEEDS: std::ops::Range<u64> = 0..32;
 /// The mechanisms it runs.
 pub const MECHANISMS: [Mechanism; 3] = [Mechanism::A, Mechanism::B, Mechanism::C];
-/// The most runs it keeps in flight.
-const WORKERS: usize = 4;
-
 /// A report's text: pretty JSON with a final newline.
 fn text(report: &Json) -> String {
     let mut s = serde_json::to_string_pretty(report).expect("JSON");
@@ -127,30 +121,6 @@ fn schedule_of(plan: &Plan, r: &Recording) -> ([u8; 32], BTreeSet<(u64, u64)>) {
         .map(|o| (number(o, "pid"), number(o, "sepc")))
         .collect();
     (*blake3::hash(&stream_bytes(s)).as_bytes(), preempted)
-}
-
-/// Runs `jobs` on up to [`WORKERS`] threads, in any order, keeping each result at its
-/// job's index.
-fn parallel<J: Sync, R: Send>(jobs: &[J], f: impl Fn(&J) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let out: Mutex<Vec<Option<R>>> = Mutex::new(jobs.iter().map(|_| None).collect());
-    thread::scope(|s| {
-        for _ in 0..WORKERS {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(job) = jobs.get(i) else { break };
-                    let r = f(job);
-                    out.lock().expect("unpoisoned")[i] = Some(r);
-                }
-            });
-        }
-    });
-    out.into_inner()
-        .expect("unpoisoned")
-        .into_iter()
-        .map(|r| r.expect("every job ran"))
-        .collect()
 }
 
 /// Schedule and perturbation coverage of the campaigns: for each mechanism and subject,

@@ -140,3 +140,19 @@ pub fn judge(plan: &Plan, unperturbed: &Recording, perturbed: &Recording) -> Jud
         Err(e) => Judged::Failed(format!("{e}")),
     }
 }
+
+/// The seeds CI runs the unpatched campaign over, for each mechanism.
+pub const CI_SEEDS: std::ops::Range<u64> = 0..8;
+
+/// Each planted race's first diverging seed under A and under B (§14): every earlier
+/// seed agrees.
+pub const FIRST_DIVERGENCE: [(Race, Mechanism, u64); 8] = [
+    (Race::R1, Mechanism::A, 0),
+    (Race::R1, Mechanism::B, 0),
+    (Race::R2, Mechanism::A, 1),
+    (Race::R2, Mechanism::B, 0),
+    (Race::R3, Mechanism::A, 0),
+    (Race::R3, Mechanism::B, 1),
+    (Race::R5, Mechanism::A, 1),
+    (Race::R5, Mechanism::B, 0),
+];
