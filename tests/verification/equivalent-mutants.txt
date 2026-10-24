@@ -121,3 +121,36 @@ components/rv32i/src/sv32.rs:171:17: replace || with && in step
 # (components/os/tests/m5_kernel.rs) cover both arms.
 components/os/src/procop.rs:861:33: replace match guard self.m5.is_some() with true in Model::syscall
 components/os/src/procop.rs:861:33: replace match guard self.m5.is_some() with false in Model::syscall
+
+# M5 (docs/m5-design.md §21): source mutants that m5-reference cannot observe.
+
+# Equivalent for any input: the rank is shifted above the counter's COUNTER_BITS, and the
+# counter is below 2^COUNTER_BITS, so `|` and `^` are the same.
+runtime/src/scheduler.rs:226:56: replace | with ^ in Scheduler<T>::schedule
+
+# m5-reference schedules no event into the (tick, phase) being dispatched under tie order,
+# so every rank's floor is 0. With floor 0, `- floor` and `+ floor` draw the same rank,
+# and `word + 2^RANK_BITS` keeps the same low RANK_BITS bits as `word % 2^RANK_BITS`, the
+# only ones the sequence keeps. The floor itself is covered by the scheduler's property
+# tests (runtime/tests/scheduler_props.rs).
+runtime/src/ties.rs:48:22: replace % with + in Ties::rank
+runtime/src/ties.rs:48:42: replace - with + in Ties::rank
+runtime/src/scheduler.rs:221:35: replace match guard last.tick == tick && last.phase == phase with false in Scheduler<T>::schedule
+
+# m5-reference idles in S-mode and takes only interrupts there: no trap while idle is an
+# exception or comes from U-mode, so `&&` and `||` agree.
+components/os/src/interrupts.rs:705:42: replace && with || in Model::decide_m5
+
+# m5-reference's interrupt controller reports the timer only while it has expired, and the
+# block controller only on the completion of a request in flight: the status checks always
+# pass when their source is pending.
+components/os/src/interrupts.rs:768:34: replace & with | in Model::advance_m5
+components/os/src/interrupts.rs:781:27: replace & with | in Model::advance_m5
+components/os/src/interrupts.rs:781:46: replace || with && in Model::advance_m5
+
+# m5-reference's block source is 0 (BLK_SOURCE), and `1 >> 0` is `1 << 0`.
+components/os/src/interrupts.rs:778:33: replace << with >> in Model::advance_m5
+
+# m5-reference's disk never fails a request: the status's error field is 0, and both
+# shifts of a status with only low bits set leave the byte 0.
+components/os/src/interrupts.rs:786:36: replace >> with << in Model::advance_m5
