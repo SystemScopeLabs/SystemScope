@@ -26,7 +26,9 @@ use systemscope_verify::runtime::{Projected, Projection};
 use systemscope_verify::state::{Source, StateField};
 
 use super::Fixture;
-use super::verify::{M5Projection, SCHEDULE, outcome_profile, platform_config};
+use super::campaign::Subject;
+use super::verify::{M5Projection, SCHEDULE, defective_config, outcome_profile};
+use systemscope_verify::case::InputVariant;
 
 /// A page's bytes.
 const PAGE: u64 = 4096;
@@ -337,10 +339,27 @@ pub fn decode_state(bytes: &[u8]) -> Result<Vec<StateField>, String> {
 /// Runs the workload traced on `m5-reference` under `perturbation`: its trace and its
 /// final snapshot.
 pub fn traced(fixture: &Fixture, perturbation: &Perturbation) -> Result<(Trace, Vec<u8>), String> {
+    traced_subject(fixture, Subject(None), perturbation)
+}
+
+/// [`traced`] for `subject`: a planted race's media patch is applied to the disk and its
+/// kernel defect planted.
+pub fn traced_subject(
+    fixture: &Fixture,
+    subject: Subject,
+    perturbation: &Perturbation,
+) -> Result<(Trace, Vec<u8>), String> {
+    let mut disk = fixture.disk.clone();
+    if let Some(race) = subject.0
+        && let InputVariant::Media(p) = race.variant(&fixture.disk)?
+    {
+        p.apply(&mut disk)?;
+    }
+    let defect = subject.0.and_then(|r| r.defect());
     let run = m5::run_with(
         &fixture.firmware,
-        &fixture.disk,
-        &platform_config(perturbation),
+        &disk,
+        &defective_config(perturbation, defect),
         systemscope_rv32::runner::Start::Init { traced: true },
         Vec::new(),
     );

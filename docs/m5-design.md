@@ -1,6 +1,6 @@
 # M5 Design: Timing Exploration
 
-> Status: Frozen at M5.0 · Implementation status: M5.7b complete, M5.8 next · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
+> Status: Frozen at M5.0 · Implementation status: M5 complete, checked by the M5.8 exit audit ([releases/m5-exit-audit.md](releases/m5-exit-audit.md)) · Parent: [plan.md](../plan.md) · Builds on: [m4-design.md](m4-design.md), [m3-design.md](m3-design.md), [m2-design.md](m2-design.md), [m1-design.md](m1-design.md), [m0-design.md](m0-design.md)
 
 This document is the design of M5, frozen at M5.0. The items still marked **(open)** are decided at the step §24 names; none of them changes a frozen decision.
 
@@ -230,7 +230,7 @@ The kernel's execution model is unchanged (m3-design §6.3). It still runs one o
 
 ### 11.3 Blocking Block Read
 
-A new syscall (the number is chosen in M5.3 from the Linux-numbered range; **(open)**): `blk_read(lba, buf)`.
+A new syscall, number 244 from the Linux-numbered range (decided in M5.3a, §27.3): `blk_read(lba, buf)`.
 - It validates `buf` as `write` does, for one 512-byte block with `W`. Then it starts a DMA read into staging with `IRQ_ENABLE = 1`, marks the caller `Blocked { lba }`, and dispatches the next process.
 - **On completion** (the interrupt), the kernel copies the block from staging to the caller's buffer with its own accesses, sets `a0 = 0`, and appends the caller to the run queue.
 - **Errors** are as in M3's load path: a controller error gives `-EIO`.
@@ -462,7 +462,7 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | # | Question | Answer |
 |---|---|---|
 | O1 | Tie-order mechanism | **Decided (D10):** a rank-major `sequence` (§7.3) |
-| O2 | `blk_read` syscall number | from the Linux-numbered range, chosen at M5.3 |
+| O2 | `blk_read` syscall number | **Decided (M5.3a):** 244, the first of the generic Linux table's architecture-specific numbers (§27.3) |
 | O3 | Idle when every process is blocked | **Decided (D10):** a spin loop in the trampoline. `WFI` would need a new CPU wait state and snapshot field, and Spike can be compared on it only with an interrupt already pending |
 | O4 | Reproducer bundle version bump | **Decided (M5.6b):** none. `perturbation.bin` is one more manifest entry (§18) |
 | O5 | Seed counts and ranges per mechanism | **Decided (M5.6c):** the M5.5 ranges; seeds 0–7 in CI, 0–31 in the weekly coverage campaign (§14) |
@@ -486,19 +486,21 @@ M4's bundle (m4-design §16) gains one entry, `perturbation.bin`, per side. It i
 | **M5.6c** | complete | Coverage reports; seed counts and ranges frozen (O5) | code, CI |
 | **M5.7a** | complete | Source mutants of the M5 paths against committed expectations (§21) | code, CI |
 | **M5.7b** | complete | Campaign hardening: reproducers cross-OS, nightly campaign seeds, perturbed every-event resume | CI |
-| **M5.8** | next | Exit audit | docs |
+| **M5.8** | complete | Exit audit | docs |
 
 ## 26. M5 Exit Criteria
 
-- [ ] **Identity.** With the empty perturbation, every M0–M4 golden, expected stream, corpus entry, and reproducer is byte-identical, and every M0–M4 CI job passes.
-- [ ] **Determinism.** Every perturbed run, campaign result, minimized perturbation, and reproducer is byte-identical on Linux and Windows, and restores at every event.
-- [ ] **Detection.** Each planted race R1–R3 and R5 is found by the CI campaign, by at least one mechanism, and located by M4 at a divergence in `outcome`.
-- [ ] **No false positives.** The unpatched `m5-reference` agrees on `m5.outcome` for every CI seed of every mechanism.
-- [ ] **Evidence.** Each finding reports the first differing schedule decision and the perturbation elements before it.
-- [ ] **Minimization.** Each finding's perturbation is minimized to a 1-minimal set that reproduces the same failure signature, and its reproducer replays byte for byte.
-- [ ] **Coverage.** Architectural, schedule, and perturbation coverage are reported for `m5-reference` and `m3-reference`.
-- [ ] **Spike.** The `M5` profile's directed SEI tests agree with the pinned Spike.
-- [ ] **Mutation.** Every source mutant of the M5 paths is detected by a campaign, or listed as equivalent with its reason.
+Checked by the M5.8 exit audit, [releases/m5-exit-audit.md](releases/m5-exit-audit.md) §14.
+
+- [x] **Identity.** With the empty perturbation, every M0–M4 golden, expected stream, corpus entry, and reproducer is byte-identical, and every M0–M4 CI job passes.
+- [x] **Determinism.** Every perturbed run, campaign result, minimized perturbation, and reproducer is byte-identical on Linux and Windows, and restores at every event.
+- [x] **Detection.** Each planted race R1–R3 and R5 is found by the CI campaign, by at least one mechanism, and located by M4 at a divergence in `outcome`.
+- [x] **No false positives.** The unpatched `m5-reference` agrees on `m5.outcome` for every CI seed of every mechanism.
+- [x] **Evidence.** Each finding reports the first differing schedule decision and the perturbation elements before it.
+- [x] **Minimization.** Each finding's perturbation is minimized to a 1-minimal set that reproduces the same failure signature, and its reproducer replays byte for byte.
+- [x] **Coverage.** Architectural, schedule, and perturbation coverage are reported for `m5-reference` and `m3-reference`.
+- [x] **Spike.** The `M5` profile's directed SEI tests agree with the pinned Spike.
+- [x] **Mutation.** Every source mutant of the M5 paths is detected by a campaign, or listed as equivalent with its reason.
 
 ## 27. Revisions
 
@@ -672,3 +674,13 @@ M5.7b hardened the campaigns (`tests/acceptance/src/m5/repro.rs`, `cargo xtask m
 | §14 | The nightly seed judges only the unpatched scenario; races are printed | the unpatched scenario must agree at every seed, while a race diverges only at some |
 | §19 | The perturbed every-event resume runs weekly, under each mechanism's seed 0 | each takes about a minute on a developer machine and depends only on the commit |
 | CI | The nightly random-seed step excludes `m5_minimize::search` | it is the offline search, ignored but not seeded, and ran for six hours until the job was cancelled |
+
+### 27.13 M5.8
+
+M5.8 audited M5 against §26: [releases/m5-exit-audit.md](releases/m5-exit-audit.md), 9 of 9 criteria pass. It added one test and corrected the design's record.
+
+| Section | Revision | Why |
+|---|---|---|
+| §15, §26 | `every_finding_reports_its_first_differing_decision`: each of the eight CI findings reports its first differing schedule decision, at the engine's `schedule` divergence, and the perturbation elements before it | §26 requires the evidence of each finding; M5.4b's test covered one perturbed run of the unpatched scenario |
+| §11.3, §24 | O2 decided: `blk_read` is syscall 244 | M5.3a chose it (§27.3), but the design still marked it open |
+| — | Two doc comments in `tests/acceptance/src/m5/mod.rs` no longer link to private items | `cargo doc` with `-D warnings` failed on them; CI does not run it |

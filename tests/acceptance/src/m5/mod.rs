@@ -48,7 +48,7 @@ pub mod verify;
 /// The most runs [`parallel`] keeps in flight.
 const WORKERS: usize = 4;
 
-/// Runs `jobs` on up to [`WORKERS`] threads, in any order, keeping each result at its
+/// Runs `jobs` on up to four threads, in any order, keeping each result at its
 /// job's index.
 pub fn parallel<J: Sync, R: Send>(jobs: &[J], f: impl Fn(&J) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
@@ -540,8 +540,8 @@ pub fn split(range: std::ops::Range<usize>, parts: usize) -> Vec<std::ops::Range
         .collect()
 }
 
-/// Every checkpoint `k` in `range` (at most 0 through the last event) resumed by
-/// [`sweep_range`], split across `threads` threads.
+/// Every checkpoint `k` in `range` (at most 0 through the last event) restored into a
+/// fresh platform and run to checkpoint `k + 1`, split across `threads` threads.
 pub fn every_event(fixture: &Fixture, range: std::ops::Range<usize>, threads: usize) -> Sweep {
     every_event_under(fixture, &Config::frozen(), range, threads)
 }

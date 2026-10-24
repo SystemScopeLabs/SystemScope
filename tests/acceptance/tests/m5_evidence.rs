@@ -5,9 +5,13 @@
 //! shutdown's words from RAM.
 
 use systemscope_acceptance::m5::Fixture;
-use systemscope_acceptance::m5::evidence::{
-    applied_jitter, decode_state, schedule_evidence, shared_reads, traced,
+use systemscope_acceptance::m5::campaign::{
+    FIRST_DIVERGENCE, Mechanism, Subject, perturbation, record, the_plan,
 };
+use systemscope_acceptance::m5::evidence::{
+    applied_jitter, decode_state, schedule_evidence, shared_reads, traced, traced_subject,
+};
+use systemscope_acceptance::m5::parallel;
 use systemscope_acceptance::m5::verify::{self, JITTER_LINKS, OUTCOME, outcome_profile};
 use systemscope_contracts::canonical::Decoder;
 use systemscope_contracts::trace::Value;
@@ -19,7 +23,7 @@ use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::workspace_root;
 use systemscope_verify::backend::{Backend, Side, run};
 use systemscope_verify::case::InputVariant;
-use systemscope_verify::compare::{StreamResult, Verdict, compare};
+use systemscope_verify::compare::{StreamResult, Verdict, compare, compare_recordings};
 use systemscope_verify::profile::plan;
 use systemscope_verify::state::Source;
 
@@ -152,6 +156,57 @@ fn the_evidence_names_the_engines_schedule_divergence() {
     }
     assert!(reads.is_sorted_by_key(|r| r.event));
     assert!(shared_reads(&t0, 3, x.event.unwrap()).is_err());
+}
+
+/// Every finding of the CI campaign, each race at its first diverging seed under A and B,
+/// reports the first differing schedule decision and the perturbation elements applied
+/// before it (§15): the engine's `schedule` divergence, A's overrides, or B's jittered
+/// deliveries up to that decision.
+#[test]
+fn every_finding_reports_its_first_differing_decision() {
+    let f = fixture();
+    let plan = the_plan(&f);
+    let failures = parallel(&FIRST_DIVERGENCE, |&(race, mechanism, seed)| {
+        let name = format!("{} {mechanism:?} seed {seed}", race.name());
+        let subject = Subject(Some(race));
+        let (none, p) = (Perturbation::default(), perturbation(mechanism, seed));
+        let Verdict::Compared(c) =
+            compare_recordings(&plan, &record(&f, subject, &none), &record(&f, subject, &p))
+                .unwrap()
+        else {
+            return Some(format!("{name}: not compared"));
+        };
+        if !matches!(c.primary, StreamResult::Diverged { .. }) {
+            return Some(format!("{name}: outcome {:?}", c.primary));
+        }
+        let (t0, _) = traced_subject(&f, subject, &none).unwrap();
+        let (t1, _) = traced_subject(&f, subject, &p).unwrap();
+        let Some(e) = schedule_evidence([(&none, &t0), (&p, &t1)], 2).unwrap() else {
+            return Some(format!("{name}: the schedules agree"));
+        };
+        match c.auxiliary.get(2) {
+            Some(StreamResult::Diverged { ordinal, .. }) if e.ordinal as u64 == *ordinal => {}
+            other => {
+                return Some(format!(
+                    "{name}: evidence at {}, schedule {other:?}",
+                    e.ordinal
+                ));
+            }
+        }
+        let y = &e.sides[1];
+        let elements = match mechanism {
+            Mechanism::A => y.latencies != Perturbation::default().latencies,
+            _ => {
+                !y.jitter.is_empty()
+                    && y.jitter
+                        .iter()
+                        .all(|a| y.event.is_none_or(|e| a.event <= e))
+            }
+        };
+        (!elements || y.identity != p.identity()).then(|| format!("{name}: {y:?}"))
+    });
+    let failures: Vec<_> = failures.into_iter().flatten().collect();
+    assert!(failures.is_empty(), "{failures:#?}");
 }
 
 #[test]
