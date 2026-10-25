@@ -111,8 +111,8 @@ Privileged ACT tests are disabled.
 M0, the deterministic simulation kernel, is tagged `v0.1.0-m0`. More documents:
 - designs and exit criteria: [docs/m0-design.md](docs/m0-design.md),
   [docs/m1-design.md](docs/m1-design.md), [docs/m2-design.md](docs/m2-design.md),
-  [docs/m3-design.md](docs/m3-design.md), [docs/m4-design.md](docs/m4-design.md), and
-  [docs/m5-design.md](docs/m5-design.md);
+  [docs/m3-design.md](docs/m3-design.md), [docs/m4-design.md](docs/m4-design.md),
+  [docs/m5-design.md](docs/m5-design.md), and the M6 draft [docs/m6-design.md](docs/m6-design.md);
 - exit audits: [M2](docs/releases/m2-exit-audit.md), [M3](docs/releases/m3-exit-audit.md),
   [M4](docs/releases/m4-exit-audit.md), and [M5](docs/releases/m5-exit-audit.md);
 - M1 release notes: [docs/releases/v0.2.0-m1.md](docs/releases/v0.2.0-m1.md);
