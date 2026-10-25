@@ -87,8 +87,8 @@ impl Perturbation {
     /// index order, the response overrides in path order, then the slice, the jitter
     /// setting, and the tie setting, each after a tag. A jitter setting with a list of
     /// messages has tag 2 and the list after the setting. A script takes both places
-    /// (`docs/m6-design.md` §7.4): its delays after jitter tag 3, its group orders after
-    /// tie tag 2.
+    /// (`docs/m6-design.md` §7.4): its delays and shifts after jitter tag 3, its group
+    /// orders after tie tag 2.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.len(self.latencies.links.len());
@@ -285,7 +285,8 @@ mod tests {
         let mut empty = Perturbation::default().to_bytes();
         empty[9] = 3;
         empty[10] = 2;
-        empty.splice(10..10, [0; 4]);
+        // No delays and no shifts, then no groups.
+        empty.splice(10..10, [0; 8]);
         empty.extend([0; 4]);
         assert_eq!(
             Perturbation::from_bytes(&empty),
@@ -297,6 +298,9 @@ mod tests {
         let mut delay = scripted();
         delay.script.as_mut().unwrap().delays[1].1 = 2;
         assert_ne!(delay.identity(), scripted().identity());
+        let mut shift = scripted();
+        shift.script.as_mut().unwrap().shifts[0].1 = 7;
+        assert_ne!(shift.identity(), scripted().identity());
     }
 
     #[test]
@@ -307,7 +311,7 @@ mod tests {
         });
         let mut lone = Perturbation::default().to_bytes();
         lone[9] = 3;
-        lone.splice(10..10, [0; 4]);
+        lone.splice(10..10, [0; 8]);
         assert_eq!(Perturbation::from_bytes(&lone), script);
         let mut ties = sample();
         ties.jitter = None;
@@ -318,6 +322,9 @@ mod tests {
         assert_eq!(Perturbation::from_bytes(&bytes), script);
         let mut zero = scripted();
         zero.script.as_mut().unwrap().delays[0].1 = 0;
+        assert_eq!(Perturbation::from_bytes(&zero.to_bytes()), script);
+        let mut zero = scripted();
+        zero.script.as_mut().unwrap().shifts[0].1 = 0;
         assert_eq!(Perturbation::from_bytes(&zero.to_bytes()), script);
     }
 
