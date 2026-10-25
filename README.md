@@ -178,7 +178,15 @@ git -C contracts checkout "$(sed -n 's/^ *ref: //p' systemscope/.github/actions/
 cd systemscope
 ```
 
-The toolchain is pinned in `rust-toolchain.toml`. Then run:
+The toolchain is pinned in `rust-toolchain.toml`. The tests run under
+[cargo-nextest](https://nexte.st), and the checks in [CONTRIBUTING.md](CONTRIBUTING.md)
+also use cargo-machete and cargo-deny:
+
+```sh
+cargo install --locked cargo-nextest cargo-machete cargo-deny
+```
+
+Then run:
 
 ```sh
 cargo fmt --all -- --check
