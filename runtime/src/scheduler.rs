@@ -308,6 +308,13 @@ impl<T> Scheduler<T> {
             None => sequence,
             Some(_) => ties::counter(sequence),
         };
+        // The last dispatched event's sequence was assigned before `next_sequence`, or
+        // the next event scheduled at the cursor would sort before it.
+        if let Some(last) = last_dispatched
+            && counter(last.sequence) >= next_sequence
+        {
+            return Err(SchedulerRestoreError::SequenceNotYetAssigned(last.sequence));
+        }
         queue.sort_by_key(|e| counter(e.key.sequence));
         for pair in queue.windows(2) {
             if counter(pair[0].key.sequence) == counter(pair[1].key.sequence) {
@@ -577,6 +584,34 @@ mod tests {
         assert_eq!(
             restore(fresh),
             Err(SchedulerRestoreError::InvalidPhaseCount(1))
+        );
+
+        // A cursor whose sequence was never assigned, even with nothing queued: the next
+        // event at the cursor would sort before it.
+        let cursor = |sequence, next_sequence| SchedulerSnapshot::<u32> {
+            last_dispatched: Some(key(7, Phase::Request, sequence)),
+            dispatched_in_phase: 1,
+            next_sequence,
+            queue: Vec::new(),
+        };
+        assert_eq!(restore(cursor(99, 100)), Ok(()));
+        assert_eq!(
+            restore(cursor(100, 0)),
+            Err(SchedulerRestoreError::SequenceNotYetAssigned(100))
+        );
+        // Tied, only the counter bits count, not the rank above them.
+        let tied = |s: SchedulerSnapshot<u32>| {
+            let config = SchedulerConfig {
+                ties: Some(Ties { seed: 1 }),
+                ..SchedulerConfig::default()
+            };
+            Scheduler::restore(config, s).map(|_| ())
+        };
+        let ranked = 3 << COUNTER_BITS | 100;
+        assert_eq!(tied(cursor(ranked, 101)), Ok(()));
+        assert_eq!(
+            tied(cursor(ranked, 100)),
+            Err(SchedulerRestoreError::SequenceNotYetAssigned(ranked))
         );
     }
 }
