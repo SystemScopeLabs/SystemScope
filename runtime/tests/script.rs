@@ -172,8 +172,8 @@ fn wake(ordinal: u64) -> EventId {
 
 fn grouped(group: Vec<EventId>) -> Option<Script> {
     Some(Script {
-        delays: Vec::new(),
         groups: vec![group],
+        ..Script::default()
     })
 }
 
@@ -248,7 +248,7 @@ fn a_delay_moves_its_message_and_the_lane_stays_fifo() {
     let delayed = |delays| {
         order(&run(Some(Script {
             delays,
-            groups: Vec::new(),
+            ..Script::default()
         })))
     };
     // Read 0 two cycles later: reads 1 and 2 follow it on the lane.
@@ -354,7 +354,7 @@ fn a_fork_resumes_a_parent_as_the_child_runs_from_init() {
     // empty script up to that event.
     let child = Script {
         delays: vec![((0, 0, 3), 1)],
-        groups: Vec::new(),
+        ..Script::default()
     };
     let reference = run(Some(child.clone()));
     let parent_run = run(Some(Script::default()));
@@ -408,7 +408,7 @@ fn elaboration_refuses_a_script_it_cannot_honor() {
     };
     let delay = |id, cycles| Script {
         delays: vec![(id, cycles)],
-        groups: Vec::new(),
+        ..Script::default()
     };
     let jitter = Jitter {
         seed: 1,
@@ -475,7 +475,7 @@ fn record(script: Option<Script>) -> Recording {
 #[test]
 fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
     let rec = record(Some(Script::default()));
-    let points = choice_points(&rec, LinkSet::of(&[0]), None).unwrap();
+    let points = choice_points(&rec, LinkSet::of(&[0]), &[], None).unwrap();
     let branches: Vec<BranchPoint> = points.iter().map(|c| c.branch).collect();
     let at = |at, kind, id| BranchPoint { at, kind, id };
     // Reads 0-2 and wakes 1 and 2 come from init; wake 3 from wake 2, the fourth event;
@@ -499,10 +499,10 @@ fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
     assert_eq!(group.count(), Some(30));
     assert_eq!(group.orders().count(), 29);
     // Only what branches after a point is offered.
-    let later = choice_points(&rec, LinkSet::of(&[0]), Some(branches[3])).unwrap();
+    let later = choice_points(&rec, LinkSet::of(&[0]), &[], Some(branches[3])).unwrap();
     assert_eq!(later, points[4..]);
     assert_eq!(
-        choice_points(&rec, LinkSet::default(), None).unwrap(),
+        choice_points(&rec, LinkSet::default(), &[], None).unwrap(),
         points[3..4]
     );
     let mut plain = platform(None);
@@ -510,7 +510,7 @@ fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
     let mut unscripted = Recording::after_init(&plain);
     while unscripted.step(&mut plain).unwrap().is_some() {}
     assert_eq!(
-        choice_points(&unscripted, LinkSet::of(&[0]), None),
+        choice_points(&unscripted, LinkSet::of(&[0]), &[], None),
         Err(ChoiceError::Unscripted)
     );
 }
@@ -518,7 +518,7 @@ fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
 #[test]
 fn every_admissible_order_dispatches_as_its_script_asks() {
     let rec = record(Some(Script::default()));
-    let points: Vec<ChoicePoint> = choice_points(&rec, LinkSet::default(), None).unwrap();
+    let points: Vec<ChoicePoint> = choice_points(&rec, LinkSet::default(), &[], None).unwrap();
     let [
         ChoicePoint {
             choice: Choice::Group(group),
@@ -552,4 +552,206 @@ fn every_admissible_order_dispatches_as_its_script_asks() {
     // another, a duplicate (§9.2).
     assert_eq!(seen.len(), 15);
     assert!(!seen.contains(&group.events));
+}
+
+/// A periodic timer in miniature: its first wake at cycle 4, in `COMPLETE`, then one every
+/// 4 cycles from each wake, in `REQUEST`, five in all; the `k`-th carries token `k`.
+#[derive(Default)]
+struct Ticker {
+    count: u64,
+}
+
+const PERIOD: ScheduleWhen = ScheduleWhen::Cycles {
+    domain: ClockDomainId(0),
+    k: 4,
+};
+
+impl Component for Ticker {
+    fn type_name(&self) -> &'static str {
+        "test.ticker"
+    }
+    fn ports(&self) -> Vec<PortSpec> {
+        Vec::new()
+    }
+    fn init(&mut self, ctx: &mut dyn InitContext) -> Result<(), SimError> {
+        ctx.wake_self(PERIOD, Phase::Complete, 0)
+    }
+    fn handle_event(&mut self, _: &Delivered, ctx: &mut dyn SimContext) -> Result<(), SimError> {
+        self.count += 1;
+        if self.count < 5 {
+            ctx.wake_self(PERIOD, Phase::Request, self.count)?;
+        }
+        Ok(())
+    }
+    fn snapshot_schema_version(&self) -> u32 {
+        0
+    }
+    fn snapshot(&self, w: &mut SnapshotWriter) {
+        w.u64(self.count);
+    }
+    fn restore(&mut self, r: &mut SnapshotReader<'_>, _: u32) -> Result<(), RestoreError> {
+        self.count = r.u64()?;
+        Ok(())
+    }
+}
+
+/// The sender and sink with a ticker as component 2.
+fn ticking(script: Option<Script>) -> Runtime {
+    let mut t = TopologyBuilder::new(SimulationClock::default());
+    t.add_clock(
+        Frequency::from_hz(1_000_000_000).unwrap(),
+        Tick::ZERO,
+        Rounding::Floor,
+    )
+    .unwrap();
+    let s = t.add_component("soc.sender", Box::<Sender>::default());
+    let r = t.add_component("soc.sink", Box::new(Sink));
+    t.add_component("soc.ticker", Box::<Ticker>::default());
+    t.connect((s, "mem"), (r, "mem"), Some(TWO_CYCLES));
+    t.elaborate(SessionConfig {
+        script,
+        ..SessionConfig::default()
+    })
+    .unwrap()
+}
+
+fn shifted(shifts: Vec<((u32, u64), i64)>) -> Option<Script> {
+    Some(Script {
+        shifts,
+        ..Script::default()
+    })
+}
+
+/// The ticks of the ticker's wakes.
+fn ticks(script: Option<Script>) -> Result<Vec<u64>, RuntimeError> {
+    let mut rt = ticking(script);
+    rt.init()?;
+    let mut out = Vec::new();
+    while let Some(d) = rt.step()? {
+        if d.target.0 == 2 {
+            out.push(d.key.tick.0);
+        }
+    }
+    Ok(out)
+}
+
+#[test]
+fn a_shift_moves_its_wake_and_a_periodic_timer_follows() {
+    let c = |cycles: u64| cycles * CYCLE;
+    assert_eq!(ticks(None).unwrap(), [c(4), c(8), c(12), c(16), c(20)]);
+    assert_eq!(
+        ticks(Some(Script::default())).unwrap(),
+        ticks(None).unwrap()
+    );
+    // Wake 1 two cycles later: every later wake re-arms from it.
+    assert_eq!(
+        ticks(shifted(vec![((2, 1), 2)])).unwrap(),
+        [c(4), c(10), c(14), c(18), c(22)]
+    );
+    // Wake 2 three cycles earlier, and wake 4 one later.
+    assert_eq!(
+        ticks(shifted(vec![((2, 2), -3), ((2, 4), 1)])).unwrap(),
+        [c(4), c(8), c(9), c(13), c(18)]
+    );
+    // Wake 0, scheduled by init, ten cycles earlier: it goes no earlier than cycle 0.
+    assert_eq!(
+        ticks(shifted(vec![((2, 0), -10)])).unwrap(),
+        [0, c(4), c(8), c(12), c(16)]
+    );
+    // Wake 1, in REQUEST, scheduled while wake 0 is dispatched in COMPLETE: four cycles
+    // earlier would be now in an earlier phase, so it goes to the next tick, and wake 2
+    // to four cycles after the next edge.
+    assert_eq!(
+        ticks(shifted(vec![((2, 1), -4)])).unwrap(),
+        [c(4), c(4) + 1, c(9), c(13), c(17)]
+    );
+}
+
+#[test]
+fn a_shifted_wake_must_be_scheduled_in_cycles() {
+    // The sender's wakes are scheduled after a duration.
+    assert_eq!(
+        ticks(shifted(vec![((0, 0), 1)])),
+        Err(RuntimeError::Faulted(SimError::ComponentFault(
+            "script: a shifted wake is not scheduled in cycles"
+        )))
+    );
+    let refused = ticking_refusal(shifted(vec![((3, 0), 1)]));
+    assert_eq!(refused, "a shifted wake is of no declared component");
+}
+
+fn ticking_refusal(script: Option<Script>) -> &'static str {
+    let mut t = TopologyBuilder::new(SimulationClock::default());
+    t.add_clock(
+        Frequency::from_hz(1_000_000_000).unwrap(),
+        Tick::ZERO,
+        Rounding::Floor,
+    )
+    .unwrap();
+    t.add_component("soc.ticker", Box::<Ticker>::default());
+    t.add_component("soc.other", Box::<Ticker>::default());
+    t.add_component("soc.third", Box::<Ticker>::default());
+    match t.elaborate(SessionConfig {
+        script,
+        ..SessionConfig::default()
+    }) {
+        Err(ElaborationError::InvalidScript(why)) => why,
+        other => panic!("{:?}", other.map(|_| ())),
+    }
+}
+
+#[test]
+fn a_shifted_run_restores_at_every_event_and_yields_its_shift_points() {
+    let script = shifted(vec![((2, 1), -3)]);
+    let mut rt = ticking(script.clone());
+    rt.init().unwrap();
+    let mut rec = Recording::after_init(&rt);
+    let mut snapshots = vec![rt.snapshot().unwrap()];
+    while rec.step(&mut rt).unwrap().is_some() {
+        snapshots.push(rt.snapshot().unwrap());
+    }
+    for (k, snapshot) in snapshots.iter().enumerate() {
+        let mut restored = ticking(script.clone());
+        restored.restore(snapshot).unwrap();
+        let rest: Vec<Dispatched> = std::iter::from_fn(|| restored.step().unwrap()).collect();
+        let reference: Vec<Dispatched> = rec.steps[k..].iter().map(|s| s.event.clone()).collect();
+        assert_eq!(rest, reference, "{k}");
+    }
+    // Each ticker wake is a shift point, branching where it was scheduled: wake 0 by
+    // init, and each later one by the ticker's previous wake.
+    let points = choice_points(&rec, LinkSet::default(), &[2], None).unwrap();
+    let shifts: Vec<(u64, Choice)> = points
+        .iter()
+        .filter(|p| matches!(p.choice, Choice::Shift(_)))
+        .map(|p| (p.branch.at, p.choice.clone()))
+        .collect();
+    let at = |ordinal: u64| {
+        if ordinal == 0 {
+            0
+        } else {
+            let i = rec
+                .steps
+                .iter()
+                .position(|s| {
+                    s.event.id
+                        == Some(EventId::Wake {
+                            component: 2,
+                            ordinal: ordinal - 1,
+                        })
+                })
+                .unwrap();
+            i as u64 + 1
+        }
+    };
+    assert_eq!(
+        shifts,
+        (0..5)
+            .map(|o| (at(o), Choice::Shift((2, o))))
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        points
+            .iter()
+            .all(|p| p.branch.kind == 0 || matches!(p.choice, Choice::Group(_)))
+    );
 }

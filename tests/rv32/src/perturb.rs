@@ -253,6 +253,7 @@ mod tests {
             ties: None,
             script: Some(Script {
                 delays: vec![((2, 0, 1), 3), ((4, 1, 0), 1)],
+                shifts: vec![((5, 2), -7)],
                 groups: vec![vec![
                     EventId::Wake {
                         component: 3,

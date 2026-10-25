@@ -1,7 +1,7 @@
 //! Scripted schedules (`docs/m6-design.md` §7).
 //!
-//! A script lists deviations from the reference ordering: delays of single messages, and
-//! orders of tie groups. It names events by [`EventId`], what scheduled them, never by
+//! A script lists deviations from the reference ordering: delays of single messages,
+//! shifts of single wakes, and orders of tie groups. It names events by [`EventId`], what scheduled them, never by
 //! `sequence`, which a deviation changes for every later event. A scripted session counts
 //! every directed link's messages and every component's wakes to give each event its
 //! identity.
@@ -81,6 +81,9 @@ impl EventId {
     }
 }
 
+/// A wake's identity as a shift names it: `(component, ordinal)`.
+pub type WakeId = (u32, u64);
+
 /// A script: part of the session configuration. The empty script still makes a scripted
 /// session, which counts identities and writes the scripted snapshot format.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -88,6 +91,10 @@ pub struct Script {
     /// `(message, cycles)`: the message is delivered `cycles` later, at least 1, on a
     /// `Cycles` link. Ascending by message.
     pub delays: Vec<(MessageId, u64)>,
+    /// `(wake, cycles)`: the wake is dispatched `|cycles|` cycles earlier if negative,
+    /// later if positive, in the clock domain it names (`docs/m6-design.md` §7.6).
+    /// Ascending by wake, never 0.
+    pub shifts: Vec<(WakeId, i64)>,
     /// Group orders, each its events in the order chosen, at least two. An event's rank
     /// is its position. Ascending by each group's least identity; no identity twice.
     pub groups: Vec<Vec<EventId>>,
@@ -99,7 +106,8 @@ fn invalid(what: &'static str) -> DecodeError {
 }
 
 impl Script {
-    /// Appends the delays: their count, then each message and its cycles.
+    /// Appends the delays: their count, then each message and its cycles; then the
+    /// shifts: their count, then each wake and its cycles.
     pub fn encode_delays(&self, e: &mut Encoder) {
         e.len(self.delays.len());
         for &((link, dir, ordinal), cycles) in &self.delays {
@@ -107,6 +115,12 @@ impl Script {
             e.u8(dir);
             e.u64(ordinal);
             e.u64(cycles);
+        }
+        e.len(self.shifts.len());
+        for &((component, ordinal), cycles) in &self.shifts {
+            e.u32(component);
+            e.u64(ordinal);
+            e.i64(cycles);
         }
     }
 
@@ -121,12 +135,17 @@ impl Script {
         }
     }
 
-    /// Reads delays into `self`.
+    /// Reads delays and shifts into `self`.
     pub fn decode_delays(&mut self, d: &mut Decoder<'_>) -> Result<(), DecodeError> {
         self.delays.clear();
         for _ in 0..d.len()? {
             let id = (d.u32()?, d.u8()?, d.u64()?);
             self.delays.push((id, d.u64()?));
+        }
+        self.shifts.clear();
+        for _ in 0..d.len()? {
+            let id = (d.u32()?, d.u64()?);
+            self.shifts.push((id, d.i64()?));
         }
         Ok(())
     }
@@ -144,7 +163,7 @@ impl Script {
         Ok(())
     }
 
-    /// Appends the canonical encoding: the delays, then the group orders.
+    /// Appends the canonical encoding: the delays and shifts, then the group orders.
     pub fn encode(&self, e: &mut Encoder) {
         self.encode_delays(e);
         self.encode_groups(e);
@@ -160,7 +179,7 @@ impl Script {
     }
 
     /// Checks what a script means without a topology: delays ascending and at least 1,
-    /// groups of two or more, ascending by least identity, no identity twice, and every
+    /// shifts ascending and neither 0 nor `i64::MIN`, groups of two or more, ascending by least identity, no identity twice, and every
     /// rank below `2^RANK_BITS`.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.delays.windows(2).any(|w| w[0].0 >= w[1].0) {
@@ -168,6 +187,15 @@ impl Script {
         }
         if self.delays.iter().any(|&(_, cycles)| cycles == 0) {
             return Err("a delay is 0 cycles");
+        }
+        if self.shifts.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return Err("the shifts are not ascending");
+        }
+        if self.shifts.iter().any(|&(_, cycles)| cycles == 0) {
+            return Err("a shift is 0 cycles");
+        }
+        if self.shifts.iter().any(|&(_, cycles)| cycles == i64::MIN) {
+            return Err("a shift has no magnitude");
         }
         let mut seen = std::collections::BTreeSet::new();
         let mut least = None;
@@ -229,6 +257,7 @@ pub struct ScriptState {
     /// The script.
     pub script: Script,
     delays: BTreeMap<MessageId, u64>,
+    shifts: BTreeMap<WakeId, i64>,
     ranks: BTreeMap<EventId, u64>,
     /// Two lanes per link, by declaration index, `a` to `b` first.
     pub lanes: Vec<[Lane; 2]>,
@@ -251,6 +280,7 @@ impl ScriptState {
     pub fn with_counts(script: Script, lanes: Vec<[Lane; 2]>, wakes: Vec<u64>) -> ScriptState {
         ScriptState {
             delays: script.delays.iter().copied().collect(),
+            shifts: script.shifts.iter().copied().collect(),
             ranks: script.ranks(),
             script,
             lanes,
@@ -261,6 +291,11 @@ impl ScriptState {
     /// The extra cycles of `message`, or 0.
     pub fn delay(&self, message: MessageId) -> u64 {
         self.delays.get(&message).copied().unwrap_or(0)
+    }
+
+    /// The cycles `wake` is shifted by, or 0.
+    pub fn shift(&self, wake: WakeId) -> i64 {
+        self.shifts.get(&wake).copied().unwrap_or(0)
     }
 
     /// The script rank of `id`, or 0 if no group order lists it.
@@ -291,8 +326,14 @@ impl ScriptState {
             .delays
             .iter()
             .map(|&((link, dir, ordinal), _)| EventId::Msg { link, dir, ordinal });
+        let shifts = self
+            .script
+            .shifts
+            .iter()
+            .map(|&((component, ordinal), _)| EventId::Wake { component, ordinal });
         let ranked = self.script.groups.iter().flatten().copied();
         let mut out: Vec<EventId> = delays
+            .chain(shifts)
             .chain(ranked)
             .filter(|&id| !self.scheduled(id))
             .collect();
@@ -354,19 +395,31 @@ impl ScriptState {
     pub fn admits_fork(&self, child: &Script) -> bool {
         let parent = &self.script;
         let delays_kept = parent.delays.iter().all(|d| child.delays.contains(d));
+        let shifts_kept = parent.shifts.iter().all(|s| child.shifts.contains(s));
         let groups_kept = parent.groups.iter().all(|g| child.groups.contains(g));
         let new_delays = child
             .delays
             .iter()
             .filter(|d| !parent.delays.contains(d))
             .map(|&((link, dir, ordinal), _)| EventId::Msg { link, dir, ordinal });
+        let new_shifts = child
+            .shifts
+            .iter()
+            .filter(|s| !parent.shifts.contains(s))
+            .map(|&((component, ordinal), _)| EventId::Wake { component, ordinal });
         let new_ranked = child
             .groups
             .iter()
             .filter(|g| !parent.groups.contains(g))
             .flatten()
             .copied();
-        delays_kept && groups_kept && !new_delays.chain(new_ranked).any(|id| self.scheduled(id))
+        delays_kept
+            && shifts_kept
+            && groups_kept
+            && !new_delays
+                .chain(new_shifts)
+                .chain(new_ranked)
+                .any(|id| self.scheduled(id))
     }
 }
 
@@ -385,6 +438,7 @@ mod tests {
     fn sample() -> Script {
         Script {
             delays: vec![((1, 0, 3), 2), ((4, 1, 0), 7)],
+            shifts: vec![((1, 2), -40), ((2, 0), 3)],
             groups: vec![
                 vec![wake(2, 5), msg(0, 1, 9)],
                 vec![msg(3, 0, 1), wake(0, 0), msg(3, 0, 0)],
@@ -408,6 +462,8 @@ mod tests {
         assert_eq!(state.rank(msg(9, 0, 0)), 0);
         assert_eq!(state.delay((4, 1, 0)), 7);
         assert_eq!(state.delay((4, 1, 1)), 0);
+        assert_eq!(state.shift((1, 2)), -40);
+        assert_eq!(state.shift((2, 1)), 0);
     }
 
     #[test]
@@ -423,6 +479,18 @@ mod tests {
         assert_eq!(
             refused(sample(), |s| s.delays[0].1 = 0),
             "a delay is 0 cycles"
+        );
+        assert_eq!(
+            refused(sample(), |s| s.shifts.swap(0, 1)),
+            "the shifts are not ascending"
+        );
+        assert_eq!(
+            refused(sample(), |s| s.shifts[1].1 = 0),
+            "a shift is 0 cycles"
+        );
+        assert_eq!(
+            refused(sample(), |s| s.shifts[0].1 = i64::MIN),
+            "a shift has no magnitude"
         );
         assert_eq!(
             refused(sample(), |s| s.groups[0].truncate(1)),
@@ -452,8 +520,14 @@ mod tests {
         assert!(!state.admits_fork(&sample()));
         let later = Script {
             delays: vec![((1, 0, 4), 1)],
+            shifts: vec![((2, 7), -1)],
             groups: vec![vec![wake(2, 6), msg(1, 1, 0)]],
         };
+        // A shift of wake (2, 5), already scheduled, is refused as the delay is.
+        assert!(!state.admits_fork(&Script {
+            shifts: vec![((2, 5), 1)],
+            ..Script::default()
+        }));
         assert!(state.admits_fork(&later));
         let forked =
             ScriptState::with_counts(later.clone(), state.lanes.clone(), state.wakes.clone());
@@ -461,7 +535,7 @@ mod tests {
         assert!(!forked.admits_fork(&Script::default()));
         assert_eq!(
             forked.unscheduled(),
-            vec![msg(1, 0, 4), msg(1, 1, 0), wake(2, 6)]
+            vec![msg(1, 0, 4), msg(1, 1, 0), wake(2, 6), wake(2, 7)]
         );
     }
 }

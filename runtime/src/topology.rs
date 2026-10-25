@@ -331,6 +331,15 @@ fn check_script(
             ));
         }
     }
+    if !script
+        .shifts
+        .iter()
+        .all(|&((component, ordinal), _)| named(EventId::Wake { component, ordinal }))
+    {
+        return Err(ElaborationError::InvalidScript(
+            "a shifted wake is of no declared component",
+        ));
+    }
     if !script.groups.iter().flatten().all(|&id| named(id)) {
         return Err(ElaborationError::InvalidScript(
             "a group order names an undeclared link end or component",

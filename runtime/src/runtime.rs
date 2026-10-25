@@ -758,7 +758,7 @@ impl Ctx<'_> {
     }
 
     fn try_wake(&mut self, when: ScheduleWhen, phase: Phase, token: u64) -> Result<(), SimError> {
-        let tick = resolve(when, self.scheduler.now(), self.clock, self.domains)?;
+        let mut tick = resolve(when, self.scheduler.now(), self.clock, self.domains)?;
         let mut pending = Pending {
             source: self.me,
             target: self.me,
@@ -774,12 +774,50 @@ impl Ctx<'_> {
             ordinal: count,
         };
         let next = count.checked_add(1).ok_or(SimError::SequenceOverflow)?;
+        let shift = script.shift((self.me.0, count));
+        if shift != 0 {
+            tick = shifted(when, shift, phase, self.scheduler, self.clock, self.domains)?;
+        }
         pending.id = Some(id);
         self.scheduler
             .schedule_ranked(tick, phase, script.rank(id), pending)?;
         script.wakes[self.me.0 as usize] = next;
         Ok(())
     }
+}
+
+/// The tick of a wake for `when` shifted by `shift` cycles of the domain it names
+/// (`docs/m6-design.md` §7.6). An earlier wake goes no earlier than 0 cycles, the
+/// domain's next edge, and to the next tick if that edge is now and `phase` is past.
+fn shifted(
+    when: ScheduleWhen,
+    shift: i64,
+    phase: Phase,
+    scheduler: &Scheduler<Pending>,
+    clock: &SimulationClock,
+    domains: &[ClockDomain],
+) -> Result<Tick, SimError> {
+    let ScheduleWhen::Cycles { domain, k } = when else {
+        return Err(SimError::ComponentFault(
+            "script: a shifted wake is not scheduled in cycles",
+        ));
+    };
+    let k = if shift > 0 {
+        k.checked_add(shift.unsigned_abs())
+            .ok_or(SimError::Time(TimeError::TimeOverflow))?
+    } else {
+        k.saturating_sub(shift.unsigned_abs())
+    };
+    let now = scheduler.now();
+    let tick = resolve(ScheduleWhen::Cycles { domain, k }, now, clock, domains)?;
+    if tick == now && phase < scheduler.phase() {
+        return Ok(Tick(
+            now.0
+                .checked_add(1)
+                .ok_or(SimError::Time(TimeError::TimeOverflow))?,
+        ));
+    }
+    Ok(tick)
 }
 
 /// A message send, resolved up to its link latency.

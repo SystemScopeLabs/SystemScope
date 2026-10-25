@@ -1,6 +1,6 @@
 //! A scripted run's choice points (`docs/m6-design.md` §8): its tie groups with more
-//! than one admissible order, and its messages on scoped links, each with its branch
-//! point.
+//! than one admissible order, its messages on scoped links, and the wakes of its
+//! asynchronous components, each with its branch point.
 //!
 //! A [`Recording`] is a run as the choice points need it: every dispatched event, with
 //! the counters of the events scheduled while it was dispatched. Which event scheduled
@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use crate::jitter::{LinkSet, MessageId};
 use crate::runtime::{Dispatched, Runtime, RuntimeError};
-use crate::script::EventId;
+use crate::script::{EventId, WakeId};
 use crate::ties;
 
 /// The largest group whose admissible orders [`Group::count`] counts: its table has
@@ -74,14 +74,14 @@ impl Recording {
 }
 
 /// Where a deviation first changes its run (`docs/m6-design.md` §8.4), in their total
-/// order: by position, then a delay before a group, then by identity.
+/// order: by position, then a delay or a shift before a group, then by identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BranchPoint {
     /// The scheduling's branch position, as [`Recording::scheduled_at`] gives it.
     pub at: u64,
-    /// 0 for a delay, 1 for a group order.
+    /// 0 for a delay or a shift, 1 for a group order.
     pub kind: u8,
-    /// The delayed message, or the group's least identity.
+    /// The delayed message, the shifted wake, or the group's least identity.
     pub id: EventId,
 }
 
@@ -104,6 +104,8 @@ pub enum Choice {
     Group(Group),
     /// A message on a scoped link, to be delayed `1..=D` cycles.
     Delay(MessageId),
+    /// A wake of an asynchronous component, to be shifted `±1..=E` cycles.
+    Shift(WakeId),
 }
 
 /// A choice point and its branch point.
@@ -208,10 +210,12 @@ impl Iterator for Orders<'_> {
 
 /// The recording's choice points (`docs/m6-design.md` §8.1) whose branch points are
 /// after `after`, in branch-point order: its tie groups with more than one admissible
-/// order, and its messages on the links of `scope`.
+/// order, its messages on the links of `scope`, and the wakes of the components in
+/// `asynchronous`.
 pub fn choice_points(
     rec: &Recording,
     scope: LinkSet,
+    asynchronous: &[u32],
     after: Option<BranchPoint>,
 ) -> Result<Vec<ChoicePoint>, ChoiceError> {
     let steps = &rec.steps;
@@ -229,18 +233,24 @@ pub fn choice_points(
                 .take_while(|s| s.event.key.tick == key.tick && s.event.key.phase == key.phase)
                 .count();
         for (i, step) in steps.iter().enumerate().take(end).skip(start) {
-            if let Some(id @ EventId::Msg { link, dir, ordinal }) = step.event.id
-                && scope.contains(link)
-            {
-                out.push(ChoicePoint {
-                    branch: BranchPoint {
-                        at: at(i),
-                        kind: 0,
-                        id,
-                    },
-                    choice: Choice::Delay((link, dir, ordinal)),
-                });
-            }
+            let Some(id) = step.event.id else { continue };
+            let choice = match id {
+                EventId::Msg { link, dir, ordinal } if scope.contains(link) => {
+                    Choice::Delay((link, dir, ordinal))
+                }
+                EventId::Wake { component, ordinal } if asynchronous.contains(&component) => {
+                    Choice::Shift((component, ordinal))
+                }
+                _ => continue,
+            };
+            out.push(ChoicePoint {
+                branch: BranchPoint {
+                    at: at(i),
+                    kind: 0,
+                    id,
+                },
+                choice,
+            });
         }
         if end - start > 1 {
             let group = group(rec, start..end)?;
