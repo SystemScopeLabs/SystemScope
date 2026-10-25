@@ -1,13 +1,14 @@
-//! The planted races of `m5-reference` (`docs/m5-design.md` §12.3). R1–R3 each patch one
-//! program on the disk, as an M4 media patch: two instructions, or an instruction and a
-//! group of three, trade places. R5 plants a defect in the kernel. There is no R4
-//! (§27.7).
+//! The planted races of `m5-reference` (`docs/m5-design.md` §12.3, `docs/m6-design.md`
+//! §10). R1–R3, R6, and R7 each patch one program on the disk, as an M4 media patch: two
+//! instructions, or an instruction and a group of three, trade places. R5 plants a defect
+//! in the kernel. There is no R4 (m5-design §27.7).
 //!
 //! Every patch is found by its instructions, not by a fixed offset, inside the program's
 //! extent as the disk's table lists it, so a rebuilt workload moves it with the code.
 
 use systemscope_elf::{BLOCK_SIZE, parse_exec_table};
 use systemscope_os::Defect;
+use systemscope_runtime::script::Script;
 use systemscope_rv32::m3ref::{DISK_BLOCKS, STAGING_SIZE};
 use systemscope_verify::case::{InputVariant, MediaPatch};
 
@@ -24,6 +25,13 @@ pub enum Race {
     R3,
     /// `kernel-wake-lost`: [`Defect::IdleTickDropsWake`].
     R5,
+    /// `handoff-flag-first`: `handoff` sets the mailbox's flag before it stores the data,
+    /// a window of one instruction (m6-design §10).
+    R6,
+    /// `peterson-order`: entry 0 stores `turn` before its own `flag`, a window of one
+    /// instruction (m6-design §10). The other instance is correct: the race needs only
+    /// the patched one preempted in its window.
+    R7,
 }
 
 /// The general registers the patches name.
@@ -31,7 +39,10 @@ const ZERO: u32 = 0;
 const T0: u32 = 5;
 const S0: u32 = 8;
 const T1: u32 = 6;
+const S1: u32 = 9;
+const S2: u32 = 18;
 const S3: u32 = 19;
+const S6: u32 = 22;
 
 fn i_type(op: u32, funct3: u32, rd: u32, rs1: u32, imm: i32) -> u32 {
     (imm as u32 & 0xfff) << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | op
@@ -123,8 +134,11 @@ fn patch(disk: &[u8], at: usize, new: &[u8]) -> MediaPatch {
 }
 
 impl Race {
-    /// Every planted race.
+    /// Every race M5 planted.
     pub const ALL: [Race; 4] = [Race::R1, Race::R2, Race::R3, Race::R5];
+
+    /// The races M6 plants, with windows M5's seeds never hit.
+    pub const NARROW: [Race; 2] = [Race::R6, Race::R7];
 
     /// The name §12.3 gives it.
     pub fn name(self) -> &'static str {
@@ -133,6 +147,8 @@ impl Race {
             Race::R2 => "peterson-turn",
             Race::R3 => "mailbox-data-first",
             Race::R5 => "kernel-wake-lost",
+            Race::R6 => "handoff-flag-first",
+            Race::R7 => "peterson-order",
         }
     }
 
@@ -141,7 +157,25 @@ impl Race {
         (self == Race::R5).then_some(Defect::IdleTickDropsWake)
     }
 
-    /// The input variant that patches `disk`: a media patch for R1–R3, none for R5.
+    /// Its witness (m6-design §10): a script under which it diverges, and the `outcome`
+    /// ordinal of the divergence. Every shift moves an expiry of the timer, component 8,
+    /// earlier into the race's window at the default slice (§23.4). R7's needs both.
+    pub fn witness(self) -> Option<(Script, u64)> {
+        const TIMER: u32 = 8;
+        let (shifts, ordinal) = match self {
+            Race::R6 => (vec![((TIMER, 3), -5020)], 15),
+            Race::R7 => (vec![((TIMER, 0), -5308), ((TIMER, 1), -4311)], 19),
+            _ => return None,
+        };
+        let script = Script {
+            shifts,
+            ..Script::default()
+        };
+        Some((script, ordinal))
+    }
+
+    /// The input variant that patches `disk`: a media patch for R1–R3, R6, and R7, none
+    /// for R5.
     pub fn variant(self, disk: &[u8]) -> Result<InputVariant, String> {
         // counter's shared words (`counter.S`) and handoff's mailbox (`handoff.S`).
         const COUNTER: i32 = 0x0;
@@ -194,6 +228,18 @@ impl Race {
                 )
             }
             Race::R5 => return Ok(InputVariant::None),
+            Race::R6 => {
+                // `sw s1, DATA(s0)` then `sw s3, FULL(s0)`: the flag goes first.
+                let (data, flag) = (sw(S1, DATA, S0), sw(S3, FULL, S0));
+                let at = find(disk, 5, &bytes(&[data, flag]))?;
+                patch(disk, at, &bytes(&[flag, data]))
+            }
+            Race::R7 => {
+                // `sw s6, FLAG(s3)` then `sw s2, TURN(s0)`: turn goes first.
+                let (flag, turn) = (sw(S6, FLAG, S3), sw(S2, TURN, S0));
+                let at = find(disk, 0, &bytes(&[flag, turn]))?;
+                patch(disk, at, &bytes(&[turn, flag]))
+            }
         };
         Ok(InputVariant::Media(p))
     }
