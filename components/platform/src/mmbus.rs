@@ -75,6 +75,20 @@ pub const SNAPSHOT_SCHEMA: u32 = 1;
 /// The token of the arbitration wake, the only wake the bus schedules.
 const ARBITRATE: u64 = 0;
 
+/// Marks a planted defect at the end of the snapshot; absent without one.
+const DEFECT_MARKER: u8 = 0xD8;
+
+/// A defect planted in the bus for M6's search to find (`docs/m6-design.md` §10). Only
+/// tests set one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BusDefect {
+    /// R8 `tie-defect`: a write that arrives while a later master has a request queued
+    /// is queued with its first byte inverted. Whether it fires depends on the order of
+    /// two masters' requests within one `Request` phase, which the correct bus never
+    /// depends on.
+    WriteBehindLaterMaster,
+}
+
 /// The configuration of a [`MultiMasterBus`]. Its order is its identity: the masters fix
 /// the master indices and, with the regions, the port numbering.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,6 +193,8 @@ pub struct MultiMasterBus {
     regions: Vec<RegionState>,
     /// The next downstream `TxnId` to allocate. Every active `downstream_txn` is below it.
     next_downstream: u64,
+    /// A planted defect, `None` in every bus but a test's.
+    defect: Option<BusDefect>,
 }
 
 /// The `TxnId` of a request and whether it is a write, or `None` for a response.
@@ -257,7 +273,16 @@ impl MultiMasterBus {
             config,
             regions,
             next_downstream: 0,
+            defect: None,
         })
+    }
+
+    /// This bus with `defect` planted. Its snapshot ends with the defect's marker.
+    pub fn with_defect(self, defect: BusDefect) -> MultiMasterBus {
+        MultiMasterBus {
+            defect: Some(defect),
+            ..self
+        }
     }
 
     /// The configuration.
@@ -362,8 +387,21 @@ impl MultiMasterBus {
         match routed {
             Some((region, first)) => {
                 let offset = first - self.config.regions[usize::from(region)].base;
-                self.regions[usize::from(region)].queues[usize::from(master)]
-                    .push_back(at_offset(msg, offset));
+                let mut queued = at_offset(msg, offset);
+                let later_queued = self.regions.iter().any(|r| {
+                    r.queues[usize::from(master) + 1..]
+                        .iter()
+                        .any(|q| !q.is_empty())
+                });
+                if self.defect == Some(BusDefect::WriteBehindLaterMaster)
+                    && later_queued
+                    && let MemMsg::WriteReq { data, .. } = &mut queued
+                    && let Some(first) = data.first_mut()
+                {
+                    *first = !*first;
+                }
+
+                self.regions[usize::from(region)].queues[usize::from(master)].push_back(queued);
                 ctx.wake_self(ScheduleWhen::Now, Phase::Transfer, ARBITRATE)
             }
             None => self.fault(master, msg, ctx),
@@ -745,6 +783,13 @@ impl Component for MultiMasterBus {
                 }
             }
         }
+        match self.defect {
+            None => {}
+            Some(BusDefect::WriteBehindLaterMaster) => {
+                w.u8(DEFECT_MARKER);
+                w.u8(1);
+            }
+        }
     }
 
     fn restore(&mut self, r: &mut SnapshotReader<'_>, _: u32) -> Result<(), RestoreError> {
@@ -777,6 +822,9 @@ impl Component for MultiMasterBus {
                     }
                 }
             }
+        }
+        if self.defect.is_some() && (r.u8()? != DEFECT_MARKER || r.u8()? != 1) {
+            return Err(invalid("multi-master bus: snapshot has another defect"));
         }
         self.regions = regions;
         self.next_downstream = next_downstream;

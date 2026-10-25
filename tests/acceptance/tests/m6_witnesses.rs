@@ -1,11 +1,13 @@
 //! M6.2's witnesses on `m5-reference` (`docs/m6-design.md` §10): R6 and R7 each patch one
 //! range of a program, and each diverges under its hand-authored script of timer shifts at
-//! its pinned `outcome` ordinal. The unpatched scenario agrees under every witness, and
-//! R7's diverges only with both of its shifts.
+//! its pinned `outcome` ordinal; R8 plants a bus defect that only its pick fires. The
+//! unpatched scenario agrees under every witness, and R7's diverges only with both of its
+//! shifts.
 
 use systemscope_acceptance::m5::Fixture;
 use systemscope_acceptance::m5::campaign::{Judged, Subject, judge, record, the_plan};
-use systemscope_acceptance::m5::races::Race;
+use systemscope_acceptance::m5::races::{Plant, Race};
+use systemscope_platform::BusDefect;
 use systemscope_runtime::script::Script;
 use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::workspace_root;
@@ -94,4 +96,25 @@ fn peterson_order_needs_both_shifts_of_its_witness() {
         let judged = judge(&plan, &base, &record(&f, subject, &scripted(alone)));
         assert_eq!(judged, Judged::Agree, "{shift:?} alone");
     }
+}
+
+#[test]
+fn tie_defect_plants_a_bus_defect_and_agrees_unperturbed() {
+    let f = fixture();
+    assert_eq!(Race::R8.variant(&f.disk), Ok(InputVariant::None));
+    assert_eq!(
+        Race::R8.defect(),
+        Some(Plant::Bus(BusDefect::WriteBehindLaterMaster))
+    );
+    let plan = the_plan(&f);
+    let plain = record(&f, Subject(None), &Perturbation::default());
+    let planted = record(&f, Subject(Some(Race::R8)), &Perturbation::default());
+    assert_eq!(judge(&plan, &plain, &planted), Judged::Agree);
+}
+
+#[test]
+fn tie_defect_diverges_under_its_witness() {
+    let (script, _) = Race::R8.witness().expect("a witness");
+    assert_eq!((script.delays.len(), script.shifts.len()), (0, 0));
+    diverges_under_its_witness(Race::R8);
 }

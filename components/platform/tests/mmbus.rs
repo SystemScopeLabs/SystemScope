@@ -30,8 +30,8 @@ use systemscope_contracts::trace::{TraceAt, TraceOrigin, Value};
 use systemscope_platform::bus::FAULT_KIND;
 use systemscope_platform::mmbus::{GRANT_KIND, SNAPSHOT_SCHEMA};
 use systemscope_platform::{
-    AddressBus, MultiMasterBus, MultiMasterBusConfig, MultiMasterBusConfigError, Ram, RamConfig,
-    RamImage, Region,
+    AddressBus, BusDefect, MultiMasterBus, MultiMasterBusConfig, MultiMasterBusConfigError, Ram,
+    RamConfig, RamImage, Region,
 };
 use systemscope_runtime::runtime::{Dispatched, Runtime, SessionConfig};
 use systemscope_runtime::topology::TopologyBuilder;
@@ -572,6 +572,42 @@ fn a_busy_region_grants_nothing_and_keeps_its_cursor() {
     complete(&mut bus, RAM, &first.sent[0].msg);
     let ctx = arbitrate(&mut bus);
     assert_eq!(grants_of(&bus, &ctx), [(RAM, DMA, 1, 1)]);
+}
+
+/// The data of the write `bus` grants to RAM after `dma1` queues a UART read and `dma0` a
+/// RAM write, `dma1` first if `dma1_first`.
+fn written(mut bus: MultiMasterBus, dma1_first: bool) -> Vec<u8> {
+    let (uart, ram) = (read(1, UART_BASE, 1), write(2, RAM_BASE + 8, &[0x0f, 7]));
+    if dma1_first {
+        enqueue(&mut bus, 2, uart);
+        enqueue(&mut bus, DMA, ram);
+    } else {
+        enqueue(&mut bus, DMA, ram);
+        enqueue(&mut bus, 2, uart);
+    }
+    let ctx = arbitrate(&mut bus);
+    assert_eq!(grants_of(&bus, &ctx), [(RAM, DMA, 2, 0), (UART, 2, 1, 1)]);
+    let MemMsg::WriteReq { data, .. } = &ctx.sent[0].msg else {
+        panic!("{:?}", ctx.sent[0]);
+    };
+    data.clone()
+}
+
+#[test]
+fn a_planted_defect_inverts_a_write_queued_behind_a_later_master() {
+    let defective = || bus_of(3).with_defect(BusDefect::WriteBehindLaterMaster);
+    assert_eq!(written(defective(), true), [0xf0, 7]);
+    assert_eq!(written(defective(), false), [0x0f, 7]);
+    // The correct bus does not depend on the order.
+    assert_eq!(written(bus_of(3), true), [0x0f, 7]);
+    assert_eq!(written(bus_of(3), false), [0x0f, 7]);
+    // Only a planted bus's snapshot carries the marker, and neither restores into the
+    // other.
+    let (plain, planted) = (snapshot_of(&bus_of(3)), snapshot_of(&defective()));
+    assert_eq!(planted, [&plain[..], &[0xD8, 1]].concat());
+    assert!(restore_into(&mut bus_of(3), &planted).is_err());
+    assert!(restore_into(&mut defective(), &plain).is_err());
+    restore_into(&mut defective(), &planted).unwrap();
 }
 
 #[test]

@@ -49,7 +49,7 @@ use systemscope_contracts::topology::LinkLatency;
 use systemscope_elf::{BLOCK_SIZE, LoadImage, parse_exec_table};
 use systemscope_os::{KernelConfig, M5Config, ModeledKernel, Window};
 use systemscope_platform::{
-    BlockMediaConfig, DmaBlockController, DmaBlockControllerConfig, IrqControllerConfig,
+    BlockMediaConfig, BusDefect, DmaBlockController, DmaBlockControllerConfig, IrqControllerConfig,
     MultiMasterBus, MultiMasterBusConfig, Ram, RamConfig, Region, SimpleBlockMedia,
     SimpleIrqController, SimpleTimer, SimpleUart, TimerConfig, UartConfig, dma, irqc, timer, uart,
 };
@@ -141,6 +141,8 @@ pub struct Config {
     pub compare_reset: NonZeroU32,
     /// The CPU's instruction limit: a run that never shuts down stops at it.
     pub max_instructions: NonZeroU64,
+    /// A defect planted in the bus, `None` but in R8 (`docs/m6-design.md` §10).
+    pub bus_defect: Option<BusDefect>,
 }
 
 impl Config {
@@ -151,6 +153,7 @@ impl Config {
             m5: m5_config(),
             compare_reset: NonZeroU32::new(COMPARE_RESET).expect("nonzero"),
             max_instructions: NonZeroU64::new(MAX_INSTRUCTIONS).expect("nonzero"),
+            bus_defect: None,
         }
     }
 }
@@ -319,6 +322,10 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
         clock: cpu_clock,
     })
     .map_err(m3ref::BuildError::Bus)?;
+    let bus = match config.bus_defect {
+        Some(defect) => bus.with_defect(defect),
+        None => bus,
+    };
     let ram = Ram::new(
         RamConfig {
             size: u64::from(RAM_SIZE),

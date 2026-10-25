@@ -1,14 +1,15 @@
 //! The planted races of `m5-reference` (`docs/m5-design.md` §12.3, `docs/m6-design.md`
 //! §10). R1–R3, R6, and R7 each patch one program on the disk, as an M4 media patch: two
 //! instructions, or an instruction and a group of three, trade places. R5 plants a defect
-//! in the kernel. There is no R4 (m5-design §27.7).
+//! in the kernel, and R8 one in the bus. There is no R4 (m5-design §27.7).
 //!
 //! Every patch is found by its instructions, not by a fixed offset, inside the program's
 //! extent as the disk's table lists it, so a rebuilt workload moves it with the code.
 
 use systemscope_elf::{BLOCK_SIZE, parse_exec_table};
 use systemscope_os::Defect;
-use systemscope_runtime::script::Script;
+use systemscope_platform::BusDefect;
+use systemscope_runtime::script::{EventId, Script};
 use systemscope_rv32::m3ref::{DISK_BLOCKS, STAGING_SIZE};
 use systemscope_verify::case::{InputVariant, MediaPatch};
 
@@ -32,6 +33,17 @@ pub enum Race {
     /// instruction (m6-design §10). The other instance is correct: the race needs only
     /// the patched one preempted in its window.
     R7,
+    /// `tie-defect`: [`BusDefect::WriteBehindLaterMaster`] (m6-design §10).
+    R8,
+}
+
+/// A defect a race plants in the platform.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Plant {
+    /// In the kernel: R5.
+    Kernel(Defect),
+    /// In the bus: R8.
+    Bus(BusDefect),
 }
 
 /// The general registers the patches name.
@@ -149,29 +161,47 @@ impl Race {
             Race::R5 => "kernel-wake-lost",
             Race::R6 => "handoff-flag-first",
             Race::R7 => "peterson-order",
+            Race::R8 => "tie-defect",
         }
     }
 
-    /// The kernel defect it plants, if any.
-    pub fn defect(self) -> Option<Defect> {
-        (self == Race::R5).then_some(Defect::IdleTickDropsWake)
+    /// The defect it plants, if any.
+    pub fn defect(self) -> Option<Plant> {
+        match self {
+            Race::R5 => Some(Plant::Kernel(Defect::IdleTickDropsWake)),
+            Race::R8 => Some(Plant::Bus(BusDefect::WriteBehindLaterMaster)),
+            _ => None,
+        }
     }
 
     /// Its witness (m6-design §10): a script under which it diverges, and the `outcome`
     /// ordinal of the divergence. Every shift moves an expiry of the timer, component 8,
-    /// earlier into the race's window at the default slice (§23.4). R7's needs both.
+    /// earlier into the race's window at the default slice (§23.4). R7's needs both. R8's
+    /// pick dispatches the kernel's request (link 10) to the bus ahead of the DMA's write
+    /// (link 5) in one `Request` phase.
     pub fn witness(self) -> Option<(Script, u64)> {
         const TIMER: u32 = 8;
-        let (shifts, ordinal) = match self {
-            Race::R6 => (vec![((TIMER, 3), -5020)], 15),
-            Race::R7 => (vec![((TIMER, 0), -5308), ((TIMER, 1), -4311)], 19),
-            _ => return None,
+        let msg = |link, ordinal| EventId::Msg {
+            link,
+            dir: 0,
+            ordinal,
         };
-        let script = Script {
+        let shifted = |shifts| Script {
             shifts,
             ..Script::default()
         };
-        Some((script, ordinal))
+        match self {
+            Race::R6 => Some((shifted(vec![((TIMER, 3), -5020)]), 15)),
+            Race::R7 => Some((shifted(vec![((TIMER, 0), -5308), ((TIMER, 1), -4311)]), 19)),
+            Race::R8 => {
+                let script = Script {
+                    picks: vec![(msg(5, 288), vec![msg(10, 6335)])],
+                    ..Script::default()
+                };
+                Some((script, 0))
+            }
+            _ => None,
+        }
     }
 
     /// The input variant that patches `disk`: a media patch for R1–R3, R6, and R7, none
@@ -227,7 +257,7 @@ impl Race {
                     &bytes(&[data, lw(T1, FULL, S0), beq(T1, ZERO, target)]),
                 )
             }
-            Race::R5 => return Ok(InputVariant::None),
+            Race::R5 | Race::R8 => return Ok(InputVariant::None),
             Race::R6 => {
                 // `sw s1, DATA(s0)` then `sw s3, FULL(s0)`: the flag goes first.
                 let (data, flag) = (sw(S1, DATA, S0), sw(S3, FULL, S0));

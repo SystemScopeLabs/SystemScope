@@ -13,7 +13,6 @@ use std::num::NonZeroU64;
 
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_contracts::trace::{TraceRecord, Value};
-use systemscope_os::Defect;
 use systemscope_os::interrupts::{
     BLOCK_KIND, FINAL_KIND, INTERRUPT_KIND as OS_INTERRUPT_KIND, PREEMPT_KIND, WAKE_KIND,
 };
@@ -35,6 +34,7 @@ use systemscope_verify::profile::{
 };
 use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
 
+use super::races::Plant;
 use super::{Fixture, SCENARIO};
 use crate::hex;
 
@@ -649,9 +649,9 @@ pub fn platform_config(perturbation: &Perturbation) -> Config {
     defective_config(perturbation, None)
 }
 
-/// The frozen `m5-reference` configuration under `perturbation`, its kernel with
-/// `defect` planted (§12.3).
-pub fn defective_config(perturbation: &Perturbation, defect: Option<Defect>) -> Config {
+/// The frozen `m5-reference` configuration under `perturbation`, with `defect` planted
+/// (§12.3).
+pub fn defective_config(perturbation: &Perturbation, defect: Option<Plant>) -> Config {
     let mut c = Config::frozen();
     c.m3.latencies = perturbation.latencies.clone();
     c.m3.jitter = perturbation.jitter.clone();
@@ -660,9 +660,13 @@ pub fn defective_config(perturbation: &Perturbation, defect: Option<Defect>) -> 
     if let Some(slice) = perturbation.slice {
         c.m5.slice = slice;
     }
-    c.m5.defect = defect;
-    if defect.is_some() {
-        c.max_instructions = DEFECT_MAX_INSTRUCTIONS;
+    match defect {
+        Some(Plant::Kernel(d)) => {
+            c.m5.defect = Some(d);
+            c.max_instructions = DEFECT_MAX_INSTRUCTIONS;
+        }
+        Some(Plant::Bus(d)) => c.bus_defect = Some(d),
+        None => {}
     }
     c
 }
@@ -674,10 +678,12 @@ pub const DEFECT_MAX_INSTRUCTIONS: NonZeroU64 = NonZeroU64::new(60_000).expect("
 
 /// The backend build that names `perturbation` and `defect`: the scenario's name, the
 /// planted defect if any, and the perturbation's identity when it is not empty.
-pub fn build_name(perturbation: &Perturbation, defect: Option<Defect>) -> String {
+pub fn build_name(perturbation: &Perturbation, defect: Option<Plant>) -> String {
     let mut name = SCENARIO.to_owned();
-    if let Some(d) = defect {
-        name += &format!(" defect {d:?}");
+    match defect {
+        Some(Plant::Kernel(d)) => name += &format!(" defect {d:?}"),
+        Some(Plant::Bus(d)) => name += &format!(" defect {d:?}"),
+        None => {}
     }
     if !perturbation.is_empty() {
         name += &format!(" perturbed {}", hex(&perturbation.identity()));
@@ -714,7 +720,7 @@ pub fn backend(fixture: &Fixture, perturbation: &Perturbation) -> RuntimeBackend
 pub fn defective_backend(
     fixture: &Fixture,
     perturbation: &Perturbation,
-    defect: Option<Defect>,
+    defect: Option<Plant>,
 ) -> RuntimeBackend {
     let fixture = fixture.clone();
     let config = defective_config(perturbation, defect);

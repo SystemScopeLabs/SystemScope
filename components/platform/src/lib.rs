@@ -32,7 +32,7 @@ pub use bus::{AddressBus, BusConfigError, Region};
 pub use dma::{DmaBlockController, DmaBlockControllerConfig, DmaBlockControllerConfigError};
 pub use irqc::{IrqControllerConfig, IrqControllerConfigError, SimpleIrqController};
 pub use media::{BlockMediaConfig, BlockMediaConfigError, MediaImage, SimpleBlockMedia};
-pub use mmbus::{MultiMasterBus, MultiMasterBusConfig, MultiMasterBusConfigError};
+pub use mmbus::{BusDefect, MultiMasterBus, MultiMasterBusConfig, MultiMasterBusConfigError};
 pub use ram::{Ram, RamConfig, RamConfigError, RamImage, Segment};
 pub use timer::{SimpleTimer, TimerConfig};
 pub use uart::{SimpleUart, UartConfig};
