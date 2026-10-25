@@ -420,6 +420,30 @@ fn snapshots_round_trip_and_reject_bad_state() {
     ));
 }
 
+#[test]
+fn an_exhausted_generation_faults_instead_of_wrapping() {
+    let mut t = timer();
+    let mut bytes = snapshot_of(&t);
+    let n = bytes.len();
+    bytes[n - 8..].copy_from_slice(&u64::MAX.to_le_bytes());
+    for (setup, control) in [(0, ENABLE), (ENABLE, 0)] {
+        restore_into(&mut t, &bytes).unwrap();
+        if setup == ENABLE {
+            // Enabling at the last generation already faults, so the snapshot sets it.
+            let mut s = snapshot_of(&t);
+            s[n - 13] |= 1;
+            restore_into(&mut t, &s).unwrap();
+        }
+        let mut ctx = MockCtx::new(Phase::Request);
+        let e = ctx.deliver(&mut t, MEM_PORT, write(2, CONTROL, &word(control)));
+        assert!(
+            matches!(e, Err(SimError::ComponentFault(_))),
+            "{setup} -> {control}: {e:?}"
+        );
+        assert!(ctx.wakes.is_empty());
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // In a runtime.
 

@@ -160,9 +160,19 @@ impl SimpleTimer {
         self.generation
     }
 
+    /// Advances the generation. A restored snapshot may carry any generation, so the
+    /// last one faults instead of wrapping onto a stale wake's token.
+    fn advance(&mut self) -> Result<(), SimError> {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(SimError::ComponentFault("timer: generation exhausted"))?;
+        Ok(())
+    }
+
     /// Advances the generation and schedules its wake `COMPARE` cycles from now.
     fn arm(&mut self, ctx: &mut dyn SimContext) -> Result<(), SimError> {
-        self.generation += 1;
+        self.advance()?;
         ctx.trace(
             ARM_KIND,
             vec![
@@ -219,10 +229,7 @@ impl SimpleTimer {
         self.control = value & (ENABLE | PERIODIC);
         match (was, self.control & ENABLE != 0) {
             (false, true) => self.arm(ctx),
-            (true, false) => {
-                self.generation += 1;
-                Ok(())
-            }
+            (true, false) => self.advance(),
             _ => Ok(()),
         }
     }
