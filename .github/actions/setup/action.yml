@@ -18,7 +18,7 @@ runs:
     - uses: actions/checkout@v7
       with:
         repository: SystemScopeLabs/SystemsScope-contracts
-        ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+        ref: 8964da7ffa8b910a2a31d620897341fde3148b7b
         path: contracts
     - name: Install pinned toolchain
       shell: bash

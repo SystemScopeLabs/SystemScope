@@ -27,10 +27,3 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-
-# The pinned contracts revision predates its license field; the contracts are MIT, like
-# this repository.
-[[licenses.clarify]]
-crate = "systemscope-contracts"
-expression = "MIT"
-license-files = []
