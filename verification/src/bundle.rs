@@ -867,8 +867,21 @@ pub fn replay(bundle: &Bundle, case: Case<'_>) -> Result<VerificationResult, Rep
     Ok(result)
 }
 
-/// Writes `bundle` into a new directory `dir`.
+/// Whether `path` names a file inside a bundle directory: `/`-separated, relative, with
+/// no empty, `.`, or `..` component, and nothing a platform reads as a root or a drive.
+fn is_inside(path: &str) -> bool {
+    !path.contains(['\\', ':']) && path.split('/').all(|part| !matches!(part, "" | "." | ".."))
+}
+
+/// Writes `bundle` into a new directory `dir`. Every entry path must stay inside `dir`;
+/// otherwise nothing is written.
 pub fn write_dir(bundle: &Bundle, dir: &Path) -> io::Result<()> {
+    if let Some(path) = bundle.entries.keys().find(|p| !is_inside(p)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{path:?} is not a path inside the bundle"),
+        ));
+    }
     if let Some(parent) = dir.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -883,7 +896,8 @@ pub fn write_dir(bundle: &Bundle, dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Reads every file under `dir` into a bundle, by its `/`-separated path.
+/// Reads every file under `dir` into a bundle, by its `/`-separated path. A symbolic
+/// link is refused rather than followed.
 pub fn read_dir(dir: &Path) -> io::Result<Bundle> {
     let mut bundle = Bundle::default();
     let mut pending = vec![(dir.to_path_buf(), String::new())];
@@ -894,7 +908,14 @@ pub fn read_dir(dir: &Path) -> io::Result<Bundle> {
                 io::Error::new(io::ErrorKind::InvalidData, format!("{n:?} is not UTF-8"))
             })?;
             let path = format!("{prefix}{name}");
-            if entry.file_type()?.is_dir() {
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{path} is a symbolic link"),
+                ));
+            }
+            if kind.is_dir() {
                 pending.push((entry.path(), format!("{path}/")));
             } else {
                 bundle.entries.insert(path, std::fs::read(entry.path())?);

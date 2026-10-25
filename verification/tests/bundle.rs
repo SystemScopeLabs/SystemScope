@@ -287,6 +287,48 @@ fn a_bundle_survives_a_directory() {
     assert_eq!(read.unwrap(), b);
 }
 
+#[test]
+fn a_bundle_writes_only_inside_its_directory() {
+    let base = std::env::temp_dir().join(format!("ss-bundle-paths-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    for path in [
+        "../escape",
+        "a/../../escape",
+        "/abs",
+        "a//b",
+        "./a",
+        "a/",
+        "",
+        "C:/x",
+        "a\\b",
+    ] {
+        let mut b = Bundle::default();
+        b.entries.insert("ok".into(), vec![1]);
+        b.entries.insert(path.into(), vec![2]);
+        let dir = base.join("out");
+        let w = write_dir(&b, &dir);
+        assert!(
+            matches!(&w, Err(e) if e.kind() == std::io::ErrorKind::InvalidInput),
+            "{path:?}: {w:?}"
+        );
+        assert!(!dir.exists(), "{path:?}: nothing is written");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[cfg(unix)]
+#[test]
+fn reading_a_bundle_refuses_symbolic_links() {
+    let dir = std::env::temp_dir().join(format!("ss-bundle-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("real"), b"x").unwrap();
+    std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+    let read = read_dir(&dir);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(read.is_err(), "{read:?}");
+}
+
 fn a_bundle() -> Bundle {
     let inputs = diverging();
     let ks = checkpoints(&inputs);
