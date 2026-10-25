@@ -12,6 +12,7 @@ use systemscope_acceptance::m5::{
     Fixture, GOLDEN_PATH, Golden, MID_SNAPSHOT_PATH, events_under, every_event, every_event_under,
     reference_events,
 };
+use systemscope_acceptance::sweep::threads;
 use systemscope_rv32::m5ref::Config;
 use systemscope_rv32::workspace_root;
 
@@ -57,7 +58,7 @@ fn checkpoints_around_the_mid_snapshot_and_the_end_resume_exactly() {
     let (json, _) = committed();
     let golden: serde_json::Value = serde_json::from_str(&json).unwrap();
     let mid = usize::try_from(golden["mid_event"].as_u64().unwrap()).unwrap();
-    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = threads();
     for range in [mid - 500..mid + 500, events - 500..events + 1] {
         let sweep = every_event(&fixture, range.clone(), threads);
         assert_eq!(sweep.checked, range.len());
@@ -80,7 +81,7 @@ fn stepping_the_frozen_platform_counts_the_reference_events() {
 #[test]
 fn perturbed_checkpoints_resume_exactly() {
     let fixture = Fixture::read(&workspace_root()).unwrap();
-    let threads = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = threads();
     for mechanism in [Mechanism::A, Mechanism::B] {
         let config = defective_config(&perturbation(mechanism, 0), None);
         let events = events_under(&fixture, &config).unwrap();

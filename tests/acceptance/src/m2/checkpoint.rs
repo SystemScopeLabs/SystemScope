@@ -10,7 +10,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
-use std::thread;
 
 use systemscope_contracts::canonical::CanonicalEvent;
 use systemscope_contracts::component::Delivered;
@@ -33,6 +32,8 @@ use systemscope_rv32::runner::Start;
 use systemscope_rv32i::cpu::{COMMIT_KIND, INTERRUPT_KIND};
 
 use super::{Boundary, BoundaryWatch, Fixture, MEI_CAUSE, MIP_MEIP, MSTATUS_MIE, Work, pending};
+
+use crate::sweep::{on_threads, split};
 
 /// The `MRET` instruction word.
 pub const MRET: u64 = 0x3020_0073;
@@ -672,22 +673,11 @@ fn check_range(
 /// across `threads` threads. Each thread builds its own platforms; only the fixture and
 /// the reference are shared.
 pub fn every_event(fixture: &Fixture, reference: &Reference, threads: usize) -> Coverage {
-    let total = reference.events() + 1;
-    let threads = threads.clamp(1, total);
-    let bounds: Vec<usize> = (0..=threads).map(|t| t * total / threads).collect();
+    let parts = split(0..reference.events() + 1, threads);
     let mut coverage = Coverage::default();
-    thread::scope(|s| {
-        let handles: Vec<_> = bounds
-            .windows(2)
-            .map(|w| {
-                let range = w[0]..w[1];
-                s.spawn(move || check_range(fixture, reference, range))
-            })
-            .collect();
-        for h in handles {
-            coverage.merge(h.join().expect("a checkpoint thread panicked"));
-        }
-    });
+    for part in on_threads(parts, |range| check_range(fixture, reference, range)) {
+        coverage.merge(part);
+    }
     coverage.failures.sort_by_key(|f| f.0);
     coverage
 }

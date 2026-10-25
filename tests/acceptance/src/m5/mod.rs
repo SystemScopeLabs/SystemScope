@@ -20,9 +20,6 @@
 //! resumes the mid snapshot to the end.
 
 use std::path::Path;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 
 use serde_json::{Map, Value};
 use systemscope_contracts::COMPATIBILITY_ID;
@@ -45,32 +42,7 @@ pub mod races;
 pub mod repro;
 pub mod verify;
 
-/// The most runs [`parallel`] keeps in flight.
-const WORKERS: usize = 4;
-
-/// Runs `jobs` on up to four threads, in any order, keeping each result at its
-/// job's index.
-pub fn parallel<J: Sync, R: Send>(jobs: &[J], f: impl Fn(&J) -> R + Sync) -> Vec<R> {
-    let next = AtomicUsize::new(0);
-    let out: Mutex<Vec<Option<R>>> = Mutex::new(jobs.iter().map(|_| None).collect());
-    thread::scope(|s| {
-        for _ in 0..WORKERS {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(job) = jobs.get(i) else { break };
-                    let r = f(job);
-                    out.lock().expect("unpoisoned")[i] = Some(r);
-                }
-            });
-        }
-    });
-    out.into_inner()
-        .expect("unpoisoned")
-        .into_iter()
-        .map(|r| r.expect("every job ran"))
-        .collect()
-}
+pub use crate::sweep::{Sweep, parallel, split};
 
 /// The scenario's name in the golden file.
 pub const SCENARIO: &str = "m5-reference";
@@ -442,15 +414,6 @@ pub fn events_under(fixture: &Fixture, config: &Config) -> Result<usize, String>
     }
 }
 
-/// The outcome of [`every_event`].
-#[derive(Clone, Debug, Default)]
-pub struct Sweep {
-    /// Checkpoints resumed.
-    pub checked: usize,
-    /// Every failure, as `(k, why)`.
-    pub failures: Vec<(usize, String)>,
-}
-
 /// Resumes checkpoints `range` of a producer run, each into a freshly built platform:
 /// the restore must snapshot back to the checkpoint, then dispatch the producer's next
 /// event and reach its next checkpoint byte for byte. The last checkpoint, after the last
@@ -523,23 +486,6 @@ fn sweep_range(fixture: &Fixture, config: &Config, range: std::ops::Range<usize>
     sweep
 }
 
-/// Checkpoints `range` split into at most `parts` contiguous, non-empty ranges of equal
-/// length, each checkpoint costing the same.
-pub fn split(range: std::ops::Range<usize>, parts: usize) -> Vec<std::ops::Range<usize>> {
-    let parts = parts.clamp(1, range.len().max(1));
-    let (len, extra) = (range.len() / parts, range.len() % parts);
-    let mut start = range.start;
-    (0..parts)
-        .map(|i| {
-            let end = start + len + usize::from(i < extra);
-            let part = start..end;
-            start = end;
-            part
-        })
-        .filter(|p| !p.is_empty())
-        .collect()
-}
-
 /// Every checkpoint `k` in `range` (at most 0 through the last event) restored into a
 /// fresh platform and run to checkpoint `k + 1`, split across `threads` threads.
 pub fn every_event(fixture: &Fixture, range: std::ops::Range<usize>, threads: usize) -> Sweep {
@@ -554,32 +500,14 @@ pub fn every_event_under(
     range: std::ops::Range<usize>,
     threads: usize,
 ) -> Sweep {
-    let mut sweep = Sweep::default();
-    thread::scope(|s| {
-        let handles: Vec<_> = split(range, threads)
-            .into_iter()
-            .map(|part| s.spawn(move || sweep_range(fixture, config, part)))
-            .collect();
-        for h in handles {
-            let part = h.join().expect("a checkpoint thread panicked");
-            sweep.checked += part.checked;
-            sweep.failures.extend(part.failures);
-        }
-    });
-    sweep.failures.sort_by_key(|f| f.0);
-    sweep
+    Sweep::merged(crate::sweep::on_threads(split(range, threads), |part| {
+        sweep_range(fixture, config, part)
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn split_covers_the_range_in_order() {
-        assert_eq!(split(0..10, 3), vec![0..4, 4..7, 7..10]);
-        assert_eq!(split(5..7, 4), vec![5..6, 6..7]);
-        assert_eq!(split(3..3, 2), Vec::<std::ops::Range<usize>>::new());
-    }
 
     #[test]
     fn rendering_parses_back_and_changes_are_described() {

@@ -16,7 +16,6 @@
 //!   by §12.3 and compared in full, at every §9.2 stress point.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::thread;
 
 use systemscope_contracts::component::Delivered;
 use systemscope_contracts::protocol::Message;
@@ -33,6 +32,8 @@ use super::Fixture;
 use super::portable::{
     self, Accounting, At, CpuState, Engine, MASTERS, Place, Platform, Purpose, Stage, TARGETS,
 };
+
+use crate::sweep::on_threads;
 
 /// The uninterrupted, traced run the checkpoints are compared against.
 #[derive(Debug)]
@@ -710,14 +711,7 @@ pub fn resume_untraced(
     Ok(())
 }
 
-/// The outcome of [`every_event`].
-#[derive(Clone, Debug, Default)]
-pub struct Sweep {
-    /// Checkpoints resumed.
-    pub checked: usize,
-    /// Every failure, as `(k, why)`.
-    pub failures: Vec<(usize, String)>,
-}
+pub use crate::sweep::Sweep;
 
 fn sweep_range(fixture: &Fixture, reference: &Reference, range: std::ops::Range<usize>) -> Sweep {
     let mut sweep = Sweep::default();
@@ -800,18 +794,7 @@ pub fn every_event(
     threads: usize,
 ) -> Sweep {
     let parts = balanced(range, reference.events(), threads);
-    let mut sweep = Sweep::default();
-    thread::scope(|s| {
-        let handles: Vec<_> = parts
-            .into_iter()
-            .map(|part| s.spawn(move || sweep_range(fixture, reference, part)))
-            .collect();
-        for h in handles {
-            let part = h.join().expect("a checkpoint thread panicked");
-            sweep.checked += part.checked;
-            sweep.failures.extend(part.failures);
-        }
-    });
-    sweep.failures.sort_by_key(|f| f.0);
-    sweep
+    Sweep::merged(on_threads(parts, |part| {
+        sweep_range(fixture, reference, part)
+    }))
 }

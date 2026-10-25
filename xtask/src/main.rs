@@ -163,6 +163,7 @@ use systemscope_acceptance::m5::coverage as m5cov;
 use systemscope_acceptance::m5::expected as m5x;
 use systemscope_acceptance::m5::repro as m5r;
 use systemscope_acceptance::m5::verify as m5v;
+use systemscope_acceptance::sweep;
 use systemscope_rv32::act4::{self, ACT4_MANIFEST, ACT4_SCRIPT};
 use systemscope_rv32::block_irq::{
     self, BLOCK_IRQ_DIR, BLOCK_IRQ_MANIFEST, BLOCK_IRQ_SCRIPT, BlockIrqManifest,
@@ -1201,7 +1202,7 @@ fn m3_every_event(checkpoints: Checkpoints) -> ExitCode {
                 .cloned()
                 .unwrap_or(0..0),
         };
-        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        let threads = sweep::threads();
         eprintln!(
             "resuming checkpoints {}..{} of {} events on {threads} threads...",
             range.start,
@@ -1254,9 +1255,9 @@ fn m5_every_event(mechanism: Option<m5c::Mechanism>, checkpoints: Checkpoints) -
         let range = match checkpoints {
             Checkpoints::All => all,
             Checkpoints::Range(range) => range.start..range.end.min(events + 1),
-            Checkpoints::Shard(i, n) => m5g::split(all, n).get(i).cloned().unwrap_or(0..0),
+            Checkpoints::Shard(i, n) => sweep::split(all, n).get(i).cloned().unwrap_or(0..0),
         };
-        let threads = std::thread::available_parallelism().map_or(1, usize::from);
+        let threads = sweep::threads();
         eprintln!(
             "resuming checkpoints {}..{} of {events} events on {threads} threads...",
             range.start, range.end

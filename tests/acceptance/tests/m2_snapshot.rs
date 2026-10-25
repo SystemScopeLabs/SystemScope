@@ -58,7 +58,7 @@ fn every_event_resumes_to_the_same_end() {
     let fixture = fixture();
     let reference = reference_of(&fixture);
     let n = reference.events();
-    let threads = std::thread::available_parallelism().map_or(1, |t| t.get());
+    let threads = systemscope_acceptance::sweep::threads();
     let coverage = every_event(&fixture, &reference, threads);
     println!(
         "{} checkpoints (0..={n}) on {threads} threads",

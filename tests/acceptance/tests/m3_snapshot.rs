@@ -24,6 +24,8 @@ use systemscope_runtime::runtime::{Lifecycle, RuntimeError};
 use systemscope_rv32::m3::Scenario;
 use systemscope_rv32::workspace_root;
 
+use systemscope_acceptance::sweep::threads;
+
 /// `tests/golden/m3-reference.mid.snap`, byte for byte.
 const MID_SNAPSHOT: &[u8] = include_bytes!("../../golden/m3-reference.mid.snap");
 const GOLDEN_JSON: &str = include_str!("../../golden/m3-reference.json");
@@ -45,10 +47,6 @@ fn reference_of(fixture: &Fixture) -> Reference {
 
 fn survey_of(fixture: &Fixture) -> Coverage {
     checkpoint::survey(fixture).unwrap_or_else(|e| panic!("{e}"))
-}
-
-fn threads() -> usize {
-    std::thread::available_parallelism().map_or(1, usize::from)
 }
 
 // ---------------------------------------------------------------------------------------

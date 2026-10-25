@@ -33,6 +33,7 @@ pub mod m4;
 pub mod m5;
 pub mod observation;
 pub mod process;
+pub mod sweep;
 
 /// Seeds with golden digests, run on every CI run (§9.1).
 pub const FIXED_SEEDS: [u64; 3] = [0, 1, 0xDEAD_BEEF];
