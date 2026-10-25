@@ -154,15 +154,16 @@ pinned in `.github/actions/setup/action.yml`.
 | **M3** (`v0.4.0-m3`) | Modeled OS backend: processes, syscalls, Sv32 virtual memory |
 | **M4** (`v0.5.0-m4`) | Verification & Debugging Engine: compare executions at stable architectural boundaries, locate the first divergence, produce structured diagnostic evidence, and build portable reproducers |
 | **M5** (`v0.6.0-m5`) | Timing Exploration: seeded timing-perturbation campaigns over CPU, interrupts, DMA, storage, and OS, compared through the M4 engine, with `arch` coverage and a wider reference workload |
-| M6 (planned) | Native guest OS backend: a C/assembly tiny kernel |
-| M7 (planned) | SystemScope Visualizer / Interactive Debugger: topology, timeline, state, step, step back, seek, breakpoint, filter, plus views of M4 divergences and reproducers, built on time-travel queries and a CLI that come first |
-| M8 (planned) | SystemVerilog CPU backend via Verilator |
+| M6 (planned) | Systematic Schedule Exploration: a bounded search over the event orderings the model admits, with schedule coverage and minimized, reproducible failing schedules |
+| M7 (planned) | SystemScope Visualizer / Interactive Debugger: topology, timeline, state, step, step back, seek, breakpoint, filter, plus views of M4 divergences, reproducers, and M6 schedules, built on time-travel queries, a CLI, and Perfetto export that come first |
+| M8 (planned) | Native guest OS backend: a C/assembly tiny kernel |
+| M9 (planned) | SystemVerilog CPU backend via Verilator |
 
 M0–M5 are complete ([M4 exit audit](docs/releases/m4-exit-audit.md),
-[M5 exit audit](docs/releases/m5-exit-audit.md)). M6–M8 are not implemented. They are described in [plan.md](plan.md) §11, M4 in the design
-[docs/m4-design.md](docs/m4-design.md), and M5 in [docs/m5-design.md](docs/m5-design.md). The SystemVerilog backend was planned as M5 and moved
-to M8 after M4. The Visualizer was first
-planned as M4 and moved to M7, with its scope unchanged.
+[M5 exit audit](docs/releases/m5-exit-audit.md)). M6–M9 are not implemented. They are described in [plan.md](plan.md) §11, M4 in the design
+[docs/m4-design.md](docs/m4-design.md), and M5 in [docs/m5-design.md](docs/m5-design.md). The SystemVerilog backend was planned as M5, moved
+to M8 after M4, and to M9 after M5, when Schedule Exploration became M6 and the native kernel
+moved to M8. The Visualizer was first planned as M4 and moved to M7, with its scope unchanged.
 
 ## Build and test
 
