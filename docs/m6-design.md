@@ -2,7 +2,7 @@
 
 > Status: Draft for the M6.0 freeze · Parent: [plan.md](../plan.md) · Builds on: [m5-design.md](m5-design.md), [m4-design.md](m4-design.md), [m0-design.md](m0-design.md)
 
-This document is the design of M6. Items marked **(open)** are decided at the step §21 names, without changing a frozen decision. Revision 2 of the draft answers the M6.0 design audit (§23).
+This document is the design of M6. Items marked **(open)** are decided at the step §21 names, without changing a frozen decision. Revisions 2 and 3 of the draft answer the M6.0 design audit and its review (§23).
 
 ---
 
@@ -67,9 +67,9 @@ M6 has four parts:
 | # | Decision | Section |
 |---|---|---|
 | D1 | A schedule is a perturbation: a script of deviations from the reference ordering, encoded in `perturbation.bin` and replayed like any other perturbation | §7 |
-| D2 | Two kinds of deviation only: a **group order** (an admissible permutation of one tie group, other than the reference's) and a **delay** (one message delivered `1..=D` cycles later). Each counts as one deviation | §7.2, §7.3 |
-| D3 | Deviations name events by tagged identities: `Msg(link, dir, ordinal)` and `Wake(component, ordinal)`. An identity means "the `n`-th such event in this run", whatever its payload | §7.1 |
-| D4 | The domain is exact: every admissible group order and every delay of `1..=D` cycles of a scoped message. Admissible means causal and FIFO per directed lane. Nothing is pruned | §8 |
+| D2 | Two kinds of deviation only: a **group order** (ranks for the events of one tie group, in an admissible order other than the parent's) and a **delay** (one message delivered `1..=D` cycles later). Each counts as one deviation | §7.2, §7.3 |
+| D3 | Deviations name events by tagged identities: `Msg(link, dir, ordinal)` and `Wake(component, ordinal)`. An identity means "the `n`-th such event in this run", whatever its payload. An entry whose identity does not occur is vacuous, and the run is still compared | §7.1, §9.2 |
+| D4 | The domain is exact: every admissible group order and every delay of `1..=D` cycles of a scoped message. Admissible means causal and FIFO per directed lane, and a scripted session enforces both on every event it dispatches. Nothing is pruned | §8 |
 | D5 | Every deviation has a branch point: the earliest scheduling it changes. A child is forked from a checkpoint of its parent strictly before that point | §8.4, §9.3 |
 | D6 | The search enumerates every script within `k` deviations exactly once: a script's parent is the script without its deviation of latest branch point | §9.2 |
 | D7 | The search is a pure function of the scenario, the bounds, the budget, and the batch size `B`. It advances in rounds of `B` runs, so its result is the same for every thread count and on every host, and its state can be saved and resumed | §9.6 |
@@ -102,7 +102,9 @@ M6 has four parts:
 | **Fork** | Restoring a parent's checkpoint before a branch point and attaching a child's script (§9.3) |
 | **Bounds** | `k`, `D`, and the delay scope (§9.1) |
 | **Budget** | A count of runs, and an event limit per run (§9.6) |
-| **Exhausted** | Every script within the bounds was run, or classified unreached or no-op (§9.2) |
+| **Exhausted** | Every script within the bounds was run and compared, or classified a duplicate of one that was (§9.2) |
+| **Vacuous entry** | A script entry whose identity does not occur in the run; the run is still compared (§7.1) |
+| **Effective rank** | The rank a scripted session dispatches an event with, after the causal and FIFO raises (§7.2) |
 | **Witness** | A hand-authored script that makes a planted bug fail (§10) |
 
 ## 6. Comparison Model
@@ -122,7 +124,7 @@ Each explored script is compared with the reference on `m5.outcome`, as an M5 pe
 
 The two namespaces are tagged, so no message and wake share an identity. A counter advances only when a scheduling is accepted. A failed scheduling faults the session, so its count is never observed.
 
-An identity means "the `n`-th such event in this run", whatever its payload. A deviation applies to whichever event holds its identity in the child run. After an earlier deviation changes a sender's behavior, the same identity may name a different payload; the deviation still applies to it, and that is deterministic. A deviation whose identity the run never produces is **unreached** (§9.2).
+An identity means "the `n`-th such event in this run", whatever its payload. A deviation applies to whichever event holds its identity in the child run. After an earlier deviation changes a sender's behavior, the same identity may name a different payload; the deviation still applies to it, and that is deterministic. An entry whose identity the run never produces is **vacuous**: it changes nothing, and the run is still compared (§9.2).
 
 A scripted session keeps every directed link's count, every component's wake count, and every queued event's identity as runtime state, stored in its snapshot (§15). A session without a script keeps none of it.
 
@@ -130,13 +132,20 @@ A scripted session keeps every directed link's count, every component's wake cou
 
 A group order replaces the reference order of one tie group by another admissible order (§8.2). It is carried by C's mechanism: the script assigns ranks to identities, and the runtime uses them, instead of drawn ranks, when it schedules those events. An event the script does not name takes its floor, the current event's rank if it is scheduled into the `(tick, phase)` being dispatched and 0 otherwise. So the empty script dispatches every group in ascending counter order, as M0–M4 do.
 
-A group order lists every event of its group, with dense ranks `0..n` in the order it chooses. That makes its encoding unique: one order, one list. An order is admissible only if each event scheduled during the group is placed after the event that scheduled it, so the floor rule always holds.
+A group order lists every event of its group in the parent run, with dense ranks `0..n` in the order it chooses. That makes its encoding unique: one order, one list.
+
+Reordering a group can change the group itself. A handler that runs earlier or later can schedule an event into the group that the parent did not have, or not schedule one the parent had. For example, at one component, A sets a flag and B schedules a wake W into the group only if the flag is set. The parent order is A, B, W. The order B, A leaves W out: the entry naming W is vacuous. A scripted session gives every event of a group its **effective rank**:
+
+- a named event takes its script rank, an unnamed one its floor;
+- then the rank is raised, if needed, to its floor (causal), and to the rank of the previous message of its lane already queued in the same `(tick, phase)` (FIFO).
+
+So every dispatched order is admissible, whatever events a reordering adds or removes, and a script never fails because its group changed. A run whose effective ranks were raised, or whose script holds a vacuous entry, records it, and the evidence shows it (§12). It is still run to its stop rule and compared, since the difference it makes is exactly what the search looks for.
 
 ### 7.3 Delays
 
 A delay delivers one message `d` cycles later than its parent run, `1 ≤ d ≤ D`. It is carried by jitter's mechanism: the script lists `(identity, d)`, and the runtime adds `d` cycles in `Ctx::try_send`, as it adds a drawn jitter. The lane stays FIFO: the delivery tick is `max(tick + d, the lane's latest tick)`, as in M5.
 
-`D` bounds the requested cycles, not the effective displacement. When the lane's clamp makes two delays of one message deliver at the same tick, the later one is a **no-op** (§9.2). Delays apply only to `Cycles` links in the scope, as jitter does.
+`D` bounds the requested cycles, not the effective displacement. When the lane's clamp makes two delays of one message deliver at the same tick, the later one is a **duplicate** (§9.2). Delays apply only to `Cycles` links in the scope, as jitter does.
 
 ### 7.4 Encoding and Identity (D1)
 
@@ -167,7 +176,7 @@ An order of a tie group is admissible when it keeps two kinds of edge:
 - **causal:** an event scheduled during the group comes after the event that scheduled it;
 - **FIFO:** two messages of one directed lane come in the order they were sent. `mem.v1` and `irq.v0` assume in-order delivery (m5-design §7.2).
 
-Self-wakes have no FIFO edge to each other or to messages. Each admissible order other than the reference's is one deviation, so a group of `n` unconstrained events offers `n! - 1`. M6.2 measures the admissible orders per group on the reference platforms before any bound is frozen (§9.1).
+Self-wakes have no FIFO edge to each other or to messages. The search offers, at each group of a run, the admissible orders of that group's events other than the run's own, each one deviation, so a group of `n` unconstrained events offers `n! - 1`. In the child, effective ranks keep both edges for events the reordering adds (§7.2). M6.2 measures the admissible orders per group on the reference platforms before any bound is frozen (§9.1).
 
 The legacy C mechanism is unchanged: a session with a tie seed keeps M5's behavior, which does not keep these edges.
 
@@ -198,7 +207,7 @@ Branch points are totally ordered by event index, then kind (delay before group)
 | `D` | the most cycles per delay |
 | scope | the links whose messages may be delayed, as jitter's scope: device, DMA, and interrupt links by default |
 
-A search **exhausts** its bounds when every script within them has been run, or classified unreached or no-op. That claim covers this domain and nothing else: no other delay, no address-level ordering, and no ordering the model does not admit. A budget-limited search reports the frontier it left instead.
+A search **exhausts** its bounds when every script within them has been run and compared, or classified a duplicate. That claim covers this domain and nothing else: no other delay, no address-level ordering, and no ordering the model does not admit. A budget-limited search reports the frontier it left instead.
 
 The numerical bounds are frozen after the witnesses (§10) and the measured costs (§9.7) are known. Full exhaustion of `m5-reference` is required only where it is measured to fit. Exhaustion is always required on the small synthetic topologies (§17).
 
@@ -206,10 +215,12 @@ The numerical bounds are frozen after the witnesses (§10) and the measured cost
 
 The search explores scripts by deviation count, from 0 to `k`. From a parent run, it extends the parent's script by one deviation at a choice point whose branch point is after the parent's last one. So a script's parent is the script without its deviation of latest branch point, and each script is enumerated once.
 
-A child is classified before it counts as a finding:
+Every child is run to its stop rule and compared, with one exception: a **duplicate**, whose effective schedule is identical to its parent's or an earlier sibling's, and so whose run is identical too. Its result is that run's, so no comparison is lost. Duplicates are:
 
-- **unreached:** an identity in it does not occur in its run. It is reported, not compared, and it has no children.
-- **no-op:** a delay whose effective delivery tick equals a sibling's with a smaller `d`, or its parent's. It is reported and not extended, since its run is its sibling's.
+- a delay whose effective delivery tick equals its parent's or a sibling's with a smaller `d`, as the lane's clamp can make it;
+- a group order whose effective dispatch order of the group equals its parent's or an earlier sibling's.
+
+A duplicate is reported and not extended. A vacuous entry (§7.1) never stops a run or its comparison: it is counted, and the run's other deviations take effect as usual.
 
 ### 9.3 Fork (D5)
 
@@ -254,9 +265,11 @@ M5's races have wide windows: each diverged for 14 to 32 of 32 seeds under A or 
 |---|---|---|
 | R6 `handoff-flag-first` | `handoff` sets the mailbox's flag before it stores the data | a preemption in the one instruction between the two stores, while `spinner` then polls the mailbox before `handoff` runs again. M5's seeds never hit it (m5-design §27.7) |
 | R7 `peterson-order` | `counter`'s entry stores `turn` before its own `flag`, the textbook ordering bug; both instances run the patched program | one instance preempted between its `turn` and `flag` stores; the other enters the critical section and is preempted between its counter load and store; the first resumes, enters too, and increments; the second stores a stale count. M5's seeds never hit it |
-| R8 `tie-defect` | a test-only defect flag in one device, whose result depends on the order of a self-wake and a message in one `(tick, phase)` | a group order. A self-wake is never delayed and the message's link is outside the delay scope, so no delay within the bounds reorders them |
+| R8 `tie-defect` | a test-only defect flag in one device, whose result depends on the order of a self-wake and a message in one `(tick, phase)` | a group order. Neither event is delayed directly: a self-wake is never delayed, and the message's link is outside the delay scope |
 
 R6 replaces the first draft's DMA race, which cannot occur: the kernel commands only the head of its request queue and issues the next command after completing the current one, so two completions are never outstanding (`components/os/src/interrupts.rs`). R8 is a defect flag, appended to its configuration's encoding only when set, so every golden is unchanged. Its device and transition are frozen at M6.2 (O4).
+
+That R8's two events are not delayed directly does not mean no delay can reorder them: a delay of another message can move when either is scheduled. So "only a group order finds R8" is a measured claim, not a construction. M6.2 runs every delay-only script within the CI bounds on R8 and requires none to fail. If the delay-only domain within the CI bounds does not fit, the claim is stated for the delay-only scripts that ran, with the budget, and not beyond.
 
 Before the bounds are frozen, each race has a **witness**: a hand-authored script, pinned with its fixtures, that fails with a stated `outcome` divergence, using the identities of §7.1. The witness shows the race is reachable in the domain, and the bounds are then chosen to include it. A race whose witness needs a reference with A overrides (§7.5) states them.
 
@@ -275,7 +288,7 @@ Coverage is a reviewed JSON file, blessed and verified byte for byte as M5's rep
 - **Choice points:** tie groups by size and admissible orders, and scoped messages, by target component.
 - **Conflicting pairs:** for each component, each pair of incoming sources (a directed link or the component's own wakes) that ever share a tie group or come within `D` cycles of each other, and whether each order of the pair was explored.
 - **Preemption points:** per process (PID), as in M5, the distinct `sepc` of its `preempt` decisions across every explored script.
-- **Scripts:** run, unreached, no-op, agreed, diverged, truncated, and failed; the distinct `schedule` streams by BLAKE3; and whether the bounds were exhausted, or the frontier left.
+- **Scripts:** run, duplicate, agreed, diverged, truncated, and failed, and those with vacuous entries or raised ranks; the distinct `schedule` streams by BLAKE3; and whether the bounds were exhausted, or the frontier left.
 
 ### 11.2 Coverage-Guided Order
 
@@ -283,7 +296,7 @@ Within a deviation count, the search ranks choice points by a score, then by bra
 
 ## 12. Evidence
 
-A finding gets M5's evidence (m5-design §15): the outcome divergence, the first differing schedule decision, the per-process trace, and the shared-page reads. It also names each deviation of its script: the identity, the kind, the branch point, and, for a group order, the reference and explored orders.
+A finding gets M5's evidence (m5-design §15): the outcome divergence, the first differing schedule decision, the per-process trace, and the shared-page reads. It also names each deviation of its script: the identity, the kind, the branch point, and, for a group order, the parent's and the effective orders, with any vacuous entry and raised rank.
 
 ## 13. Minimization (D10)
 
@@ -292,7 +305,7 @@ A failing script has at most `k` deviations. Minimization repeats, in a fixed ca
 2. shorten each delay, trying every smaller `d`;
 3. move each group order one inversion toward the reference, trying every such move.
 
-A candidate is kept if it fails with M4's failure signature (m4-design §17.2). Unreached and no-op deviations are dropped after each candidate. Each candidate is a full deterministic run, forked when a parent checkpoint precedes its branch point.
+A candidate is kept if it fails with M4's failure signature (m4-design §17.2). Vacuous entries are dropped after each candidate. Each candidate is a full deterministic run, forked when a parent checkpoint precedes its branch point.
 
 The result is 1-minimal under those three operations: a final check confirms that every removal, every shorter delay, and every one-inversion move loses the failure. It is not claimed to be globally smallest.
 
@@ -309,18 +322,18 @@ The minimized script is the side's `perturbation.bin` (§7.4), so the M4 bundle 
 
 ## 16. Failure Model
 
-- An invalid script fails construction: an undeclared link or component, a delay out of scope, on a non-`Cycles` link, or out of `1..=D`, a duplicate identity, a group order that lists events of more than one group, or a script combined with B or C. The search never produces one.
-- A group order that is not admissible in its run fails at its group with a script error. The search never produces one, and a reproducer never holds one.
+- An invalid script fails construction: an undeclared link or component, a delay out of scope, on a non-`Cycles` link, or out of `1..=D`, a duplicate identity, ranks that are not dense within a group order, or a script combined with B or C. The search never produces one.
+- A group order whose group changed in the child never fails: effective ranks keep it admissible, and its vacuous entries change nothing (§7.2).
 - A scripted run that faults the session is a `BackendFailed` finding with its script, as in M5. It is a diagnostic, not a detection: a planted bug passes the detection criterion only through its pinned `outcome` divergence, including a `limit` outcome where its run never shuts down (m5-design §20).
 
 ## 17. Validation
 
-- **Oracle.** On small synthetic topologies, including the generated-event diamond of §8.3 (two events at different components whose zero-latency sends reach a third in the current phase), an independent enumerator built on the scheduler's naive reference model (`runtime/tests/scheduler_props.rs`) lists every admissible ordering within small bounds. The search's scripts must cover exactly those orderings, each once. The enumerator shares no code with the choice-point finder.
-- **Scripts.** Encoding round-trips. A scripted session with the empty script produces the unscripted run's trace and streams. Group orders keep causal and FIFO edges, on one lane, on two lanes, at equal ticks, and with the floor clamped. A delay is FIFO per lane, and its no-op classification is exact.
+- **Oracle.** On small synthetic topologies, including the generated-event diamond of §8.3 (two events at different components whose zero-latency sends reach a third in the current phase) and the conditional wake of §7.2 (a reordering that removes or adds an event of its group), an independent enumerator built on the scheduler's naive reference model (`runtime/tests/scheduler_props.rs`) lists every admissible ordering within small bounds. The search's scripts must cover exactly those orderings, each once. The enumerator shares no code with the choice-point finder.
+- **Scripts.** Encoding round-trips. A scripted session with the empty script produces the unscripted run's trace and streams. Effective ranks keep causal and FIFO edges, on one lane, on two lanes, at equal ticks, with the floor raised, and for events a reordering adds. A run with a vacuous entry is compared. A delay is FIFO per lane, and duplicate classification is exact: a duplicate's run, run anyway, equals the run it duplicates.
 - **Fork.** For every script of the oracle's bounds, and for each witness, a forked child's run, report, and snapshots equal the child run from its initial state.
 - **Rounds and resumption.** A search at 1, 2, and 4 workers, with a budget that expires mid-round, and interrupted and resumed at each round boundary, produces one report.
 - **Minimization.** Each result passes the final neighborhood check of §13.
-- **Planted bugs.** Each witness fails as pinned. Every race is found within the CI bounds or budget, and the unpatched scenario agrees on every script the CI search runs.
+- **Planted bugs.** Each witness fails as pinned. R8 fails under no delay-only script within the CI bounds, or within the stated budget (§10). Every race is found within the CI bounds or budget, and the unpatched scenario agrees on every script the CI search runs.
 - **Mutation.** Source mutants of the script layer, identities, admissibility, enumeration, fork, rounds, and minimization are judged against committed expectations: the oracle's orderings, each race's pinned finding and minimized script, and the unpatched scenario's script count within the CI bounds. Each mutant is detected or listed as equivalent with its reason.
 
 ## 18. Contracts (D12)
@@ -383,7 +396,7 @@ An independent audit of the first draft (at `673c8ac`) found the reductions unso
 | M6A-01 | blocker | Destination equality is not an independence proof, because handlers share the scheduler (§8.3). The domain is exact and nothing is pruned (D4). The diamond counterexample is an oracle case (§17) |
 | M6A-02 | blocker | The convergence cut is removed (§9.5). It may return only as a revision with a full continuation definition (O7) |
 | M6A-03 | blocker | A deviation's branch point is its earliest scheduling, which for a group order is the earliest scheduling of any of its events (§8.4). Fork is distinct from restore, checks the parent, and never produces a reproducer checkpoint (§9.3). Identity semantics are frozen: tagged namespaces, `Init` wakes, counts on accepted schedulings, ordinal meaning (§7.1). The search forks from a scripted reference, so golden snapshots are unchanged (§7.4) |
-| M6A-04 | major | Delays are every `d` in `1..=D`, an exact domain; positions are gone (§7.3). `D` bounds the requested cycles, and clamped duplicates are no-ops (§9.2) |
+| M6A-04 | major | Delays are every `d` in `1..=D`, an exact domain; positions are gone (§7.3). `D` bounds the requested cycles, and clamped delays are duplicates (§9.2) |
 | M6A-05 | major | Group orders keep causal and FIFO edges (§8.2). Legacy C is unchanged |
 | M6A-06 | major | A group order is a complete admissible permutation with dense ranks, counting one deviation (§7.2). Branch points are totally ordered, and a script's parent is unique (§9.2). The oracle is independent of the finder (§17) |
 | M6A-07 | major | R6 is replaced by `handoff-flag-first`, R7's failing interleaving is stated, and R8's construction is frozen. Each race needs a witness before the bounds are frozen, moved to M6.2 (§10) |
@@ -392,3 +405,12 @@ An independent audit of the first draft (at `673c8ac`) found the reductions unso
 | M6A-10 | major | Minimization repeats to a fixed point and checks the final neighborhood (§13). plan.md says 1-minimal |
 | M6A-11 | minor | Preemption points are per PID (§11.1). `BackendFailed` cannot satisfy detection (§16). Validation lists each obligation with finite fixtures and worker counts (§17) |
 | Open questions | — | The domain, the reduction contract, the composition with A, B, and C, budgets and resumption, and the meaning of minimization are decided here. The bounds wait for the witnesses and the feasibility gate |
+
+### 23.2 Revision 3: the Review of Revision 2
+
+A review of revision 2 accepted its direction and found two gaps.
+
+| Gap | Change |
+|---|---|
+| A reordering can add or remove events of its own group, and revision 2 dropped a script naming a missing event as unreached, without comparing its run | An entry whose identity does not occur is vacuous, and every run is compared. Effective ranks keep every dispatched order causal and FIFO, including for events a reordering adds, so a changed group never fails a script. Only exact duplicates, whose runs are identical, skip their own run (§7.2, §9.2). The conditional wake is an oracle case (§17) |
+| R8's two events are not delayed directly, but a delay of another message can move when they are scheduled | "Only a group order finds R8" is checked by running every delay-only script within the CI bounds, or stated for the budget that ran (§10, §17) |
