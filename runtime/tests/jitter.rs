@@ -179,6 +179,17 @@ fn draws_are_deterministic_bounded_and_keyed_by_every_input() {
 }
 
 #[test]
+fn the_widest_jitter_draws_every_word_and_overflows_time_as_an_error() {
+    let j = jitter(7, u64::MAX);
+    assert!((0..64).any(|n| j.draw(0, 0, n) > u64::MAX / 2));
+    let mut rt = platform(cycles(2), Some(j)).unwrap();
+    assert!(matches!(
+        rt.init(),
+        Err(RuntimeError::Faulted(SimError::Time(_)))
+    ));
+}
+
+#[test]
 fn the_context_and_material_are_pinned() {
     let j = jitter(0x0123_4567_89ab_cdef, u64::MAX - 1);
     let mut material = Vec::new();

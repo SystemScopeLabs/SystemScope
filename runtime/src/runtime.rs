@@ -699,7 +699,7 @@ impl Ctx<'_> {
                 self.domains,
             )?
             .max(lane.last);
-            lane.sent += 1;
+            lane.sent = lane.sent.checked_add(1).ok_or(SimError::SequenceOverflow)?;
             lane.last = tick;
         }
         let pending = Pending {

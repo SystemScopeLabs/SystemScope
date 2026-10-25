@@ -118,14 +118,18 @@ impl Jitter {
         material[13..].copy_from_slice(&ordinal.to_le_bytes());
         let out = blake3::derive_key(JITTER_CONTEXT, &material);
         let word = u64::from_le_bytes(out[..8].try_into().expect("8 bytes"));
-        word % (self.max_cycles + 1)
+        // `max_cycles` is `u64::MAX` at most, when every word is in range.
+        match self.max_cycles.checked_add(1) {
+            Some(span) => word % span,
+            None => word,
+        }
     }
 }
 
 /// One direction of a jittered link: what makes the next draw and keeps it FIFO.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Lane {
-    /// Messages sent so far.
+    /// Messages sent so far. Restored as found, so sending past `u64::MAX` is an error.
     pub sent: u64,
     /// The latest delivery tick, or 0 before the first.
     pub last: Tick,
