@@ -1,5 +1,6 @@
 //! Scripted schedules (`docs/m6-design.md` §7): identities, delays, group orders with
-//! effective ranks, vacuous entries, snapshots, and forks.
+//! effective ranks, vacuous entries, snapshots, and forks; and the choice points of a
+//! scripted run (§8).
 
 use systemscope_contracts::component::{
     Component, Delivered, InitContext, PortId, PortSpec, Role, SimContext,
@@ -13,6 +14,9 @@ use systemscope_contracts::time::{
     ClockDomainId, Duration, Frequency, Rounding, SimulationClock, Tick,
 };
 use systemscope_contracts::topology::LinkLatency;
+use systemscope_runtime::choice::{
+    BranchPoint, Choice, ChoiceError, ChoicePoint, Recording, choice_points,
+};
 use systemscope_runtime::jitter::{Jitter, LinkSet};
 use systemscope_runtime::runtime::{Dispatched, Runtime, RuntimeError, SessionConfig};
 use systemscope_runtime::scheduler::SchedulerConfig;
@@ -458,4 +462,94 @@ fn elaboration_refuses_a_script_it_cannot_honor() {
             "an event is listed twice",
         ]
     );
+}
+
+fn record(script: Option<Script>) -> Recording {
+    let mut rt = platform(script);
+    rt.init().unwrap();
+    let mut rec = Recording::after_init(&rt);
+    while rec.step(&mut rt).unwrap().is_some() {}
+    rec
+}
+
+#[test]
+fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
+    let rec = record(Some(Script::default()));
+    let points = choice_points(&rec, LinkSet::of(&[0]), None).unwrap();
+    let branches: Vec<BranchPoint> = points.iter().map(|c| c.branch).collect();
+    let at = |at, kind, id| BranchPoint { at, kind, id };
+    // Reads 0-2 and wakes 1 and 2 come from init; wake 3 from wake 2, the fourth event;
+    // read 3 from wake 3, the fifth.
+    assert_eq!(
+        branches,
+        [
+            at(0, 0, msg(0)),
+            at(0, 0, msg(1)),
+            at(0, 0, msg(2)),
+            at(0, 1, msg(0)),
+            at(5, 0, msg(3)),
+        ]
+    );
+    let Choice::Group(group) = &points[3].choice else {
+        panic!("{:?}", points[3]);
+    };
+    assert_eq!(group.events, [msg(0), msg(1), wake(0), wake(1), wake(2)]);
+    // Read 0 before read 1 (FIFO), wake 2 before wake 3 (causal).
+    assert_eq!(group.preds, [0, 0b1, 0, 0, 0b1000]);
+    assert_eq!(group.count(), Some(30));
+    assert_eq!(group.orders().count(), 29);
+    // Only what branches after a point is offered.
+    let later = choice_points(&rec, LinkSet::of(&[0]), Some(branches[3])).unwrap();
+    assert_eq!(later, points[4..]);
+    assert_eq!(
+        choice_points(&rec, LinkSet::default(), None).unwrap(),
+        points[3..4]
+    );
+    let mut plain = platform(None);
+    plain.init().unwrap();
+    let mut unscripted = Recording::after_init(&plain);
+    while unscripted.step(&mut plain).unwrap().is_some() {}
+    assert_eq!(
+        choice_points(&unscripted, LinkSet::of(&[0]), None),
+        Err(ChoiceError::Unscripted)
+    );
+}
+
+#[test]
+fn every_admissible_order_dispatches_as_its_script_asks() {
+    let rec = record(Some(Script::default()));
+    let points: Vec<ChoicePoint> = choice_points(&rec, LinkSet::default(), None).unwrap();
+    let [
+        ChoicePoint {
+            choice: Choice::Group(group),
+            ..
+        },
+    ] = &points[..]
+    else {
+        panic!("{points:?}");
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for positions in group.orders() {
+        let order = group.order(&positions);
+        let child = record(grouped(order.clone()));
+        let dispatched: Vec<EventId> = child.steps[..]
+            .iter()
+            .filter(|s| s.event.key.tick.0 == 2 * CYCLE)
+            .map(|s| s.event.id.unwrap())
+            .collect();
+        // Wake 3 occurs only if wake 1 sets the flag before wake 2 runs.
+        let mut expected = order.clone();
+        let w1 = order.iter().position(|&e| e == wake(0)).unwrap();
+        let w2 = order.iter().position(|&e| e == wake(1)).unwrap();
+        if w2 < w1 {
+            expected.retain(|&e| e != wake(2));
+        }
+        assert_eq!(dispatched, expected, "{order:?}");
+        seen.insert(dispatched);
+    }
+    // The 9 other orders with wake 1 first, and the 6 orders of the other four events
+    // with wake 2 first: an order that only moves the missing wake 3 dispatches as
+    // another, a duplicate (§9.2).
+    assert_eq!(seen.len(), 15);
+    assert!(!seen.contains(&group.events));
 }

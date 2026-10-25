@@ -2,6 +2,7 @@
 //!
 //! See `docs/m0-design.md` for the specification.
 
+pub mod choice;
 pub mod export;
 pub mod jitter;
 pub mod rng;
