@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use serde_json::json;
 use systemscope_contracts::trace::Value;
 
-use systemscope_acceptance::m3::mutants::{Fate, M5_TARGETS, TARGETS, caught, target};
+use systemscope_acceptance::m4::mutants::{Fate, M5_TARGETS, TARGETS, caught, target};
 use systemscope_acceptance::m5::Fixture;
 use systemscope_acceptance::m5::expected::{
     self, ARCH, DETECTED, DIR, RUNS_FILE, first_difference,

@@ -17,7 +17,8 @@ use systemscope_verify::observation::Observation;
 use systemscope_verify::profile::{Plan, plan};
 use systemscope_verify::recorded::{RecordedBackend, stream_bytes, stream_from_bytes};
 
-use super::{Fixture, verify};
+use super::verify;
+use crate::m3::Fixture;
 
 /// How [`judge`] starts a detected mutant's message. `cargo xtask m4-mutants summarize`
 /// reads it, and what follows it, from cargo-mutants' logs.
@@ -106,7 +107,7 @@ pub fn backend(fixture: &Fixture, root: &Path) -> Result<RecordedBackend, String
         BackendId {
             name: "recorded".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            build: super::SCENARIO.to_owned(),
+            build: crate::m3::SCENARIO.to_owned(),
         },
         verify::backend(fixture).support(),
         &verify::scenario(fixture),

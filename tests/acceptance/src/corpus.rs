@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 use systemscope_verify::bundle::{Bundle, Manifest, read_dir};
 use systemscope_verify::compare::Outcome;
 
-use crate::m3::{self, Fixture, repro};
+use crate::m3::{self, Fixture};
+use crate::m4::repro;
 
 /// Where the corpus is committed.
 pub const DIR: &str = "tests/verification/corpus";

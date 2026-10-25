@@ -16,9 +16,9 @@ use systemscope_verify::error::EngineError;
 use systemscope_verify::observation::{Observation, ObservedValue};
 use systemscope_verify::report::same_engine;
 
-use super::Fixture;
 use super::expected::the_plan;
 use super::verify::{self, CPU_PATH};
+use crate::m3::Fixture;
 
 /// BLAKE3 `derive_key` context for fault seeds, in m0-design §5.2's form.
 pub const CONTEXT: &str = "SystemScope 2026-10 m4 fault injection v1";

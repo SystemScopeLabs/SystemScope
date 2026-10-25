@@ -15,7 +15,7 @@ on:
       - components/os/src/interrupts.rs
       - components/os/src/process.rs
       - tests/acceptance/src/m5/**
-      - tests/acceptance/src/m3/mutants.rs
+      - tests/acceptance/src/m4/mutants.rs
       - tests/verification/**
       - .github/workflows/m5-source-mutants.yml
 permissions:

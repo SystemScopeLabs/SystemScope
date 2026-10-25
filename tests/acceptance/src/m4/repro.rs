@@ -17,8 +17,8 @@ use systemscope_verify::profile::{Plan, plan};
 use systemscope_verify::report::Builder;
 use systemscope_verify::runtime::RuntimeBackend;
 
-use super::Fixture;
 use super::verify::{self, CPU_PATH};
+use crate::m3::Fixture;
 
 /// The directory suffix of a bundle.
 pub const SUFFIX: &str = ".repro";

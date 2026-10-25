@@ -23,7 +23,8 @@ use super::races::Race;
 use super::verify::SCHEDULE;
 use super::{Fixture, parallel};
 use crate::coverage;
-use crate::m3::{self, expected};
+use crate::m3;
+use crate::m4::{expected, verify};
 
 /// Where the reports are committed.
 pub const DIR: &str = "tests/verification/coverage";
@@ -77,13 +78,13 @@ pub fn m5_arch(fixture: &Fixture) -> Result<String, String> {
 /// `m3-reference`'s architectural coverage, for comparison.
 pub fn m3_arch(fixture: &m3::Fixture) -> Result<String, String> {
     let plan = expected::the_plan(fixture)?;
-    let mut b = m3::verify::backend(fixture);
+    let mut b = verify::backend(fixture);
     let side = Side {
         backend: &mut b,
         input: InputVariant::None,
-        config: m3::verify::config(),
+        config: verify::config(),
     };
-    let r = run(&plan, &m3::verify::scenario(fixture), side);
+    let r = run(&plan, &verify::scenario(fixture), side);
     if let Some(f) = &r.failure {
         return Err(format!("m3-reference fails: {f}"));
     }

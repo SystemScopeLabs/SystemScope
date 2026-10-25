@@ -15,8 +15,8 @@ on:
       - components/rv32i/src/sv32.rs
       - components/os/src/procop.rs
       - components/os/src/process.rs
-      - tests/acceptance/src/m3/expected.rs
-      - tests/acceptance/src/m3/mutants.rs
+      - tests/acceptance/src/m4/expected.rs
+      - tests/acceptance/src/m4/mutants.rs
       - tests/verification/**
       - .github/workflows/source-mutants.yml
 permissions:

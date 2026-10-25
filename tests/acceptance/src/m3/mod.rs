@@ -23,14 +23,9 @@ use systemscope_rv32::m3ref::{self, Config};
 use systemscope_rv32::runner::Start;
 
 pub mod checkpoint;
-pub mod expected;
-pub mod faults;
 pub mod golden;
-pub mod mutants;
 pub mod observation;
 pub mod portable;
-pub mod repro;
-pub mod verify;
 
 /// The scenario's platform, as the golden file records it.
 pub const SCENARIO: &str = "m3-reference";

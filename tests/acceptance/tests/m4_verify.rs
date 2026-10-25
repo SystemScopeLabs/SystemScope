@@ -11,7 +11,7 @@
 
 use systemscope_acceptance::m3::Fixture;
 use systemscope_acceptance::m3::golden::Golden;
-use systemscope_acceptance::m3::verify::{self, CPU_PATH};
+use systemscope_acceptance::m4::verify::{self, CPU_PATH};
 use systemscope_contracts::trace::Value;
 use systemscope_rv32::m3::Scenario;
 use systemscope_rv32::workspace_root;

@@ -155,9 +155,8 @@ use systemscope_acceptance::golden::{GOLDEN_PATH, Golden, MID_SNAPSHOT_PATH, des
 use systemscope_acceptance::m1::golden as m1;
 use systemscope_acceptance::m2::golden as m2;
 use systemscope_acceptance::m3::golden as m3g;
-use systemscope_acceptance::m3::{
-    Fixture as M3Fixture, checkpoint as m3c, expected as m4x, mutants as m4m, repro as m4r,
-};
+use systemscope_acceptance::m3::{Fixture as M3Fixture, checkpoint as m3c};
+use systemscope_acceptance::m4::{expected as m4x, mutants as m4m, repro as m4r};
 use systemscope_acceptance::m5 as m5g;
 use systemscope_acceptance::m5::campaign as m5c;
 use systemscope_acceptance::m5::coverage as m5cov;

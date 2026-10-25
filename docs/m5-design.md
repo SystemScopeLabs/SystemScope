@@ -653,7 +653,7 @@ M5.6c implemented the coverage reports (`tests/acceptance/src/coverage.rs`, `tes
 
 ### 27.11 M5.7a
 
-M5.7a implemented M5's source mutants (`tests/acceptance/src/m5/expected.rs`, the M5 targets in `tests/acceptance/src/m3/mutants.rs`, `cargo xtask m5-expected` and `m5-mutants`, the `m5-source-mutants` workflow).
+M5.7a implemented M5's source mutants (`tests/acceptance/src/m5/expected.rs`, the M5 targets in `tests/acceptance/src/m4/mutants.rs`, `cargo xtask m5-expected` and `m5-mutants`, the `m5-source-mutants` workflow).
 
 | Section | Revision | Why |
 |---|---|---|

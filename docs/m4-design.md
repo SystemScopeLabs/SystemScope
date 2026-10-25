@@ -1253,7 +1253,7 @@ M4.1 implemented the frozen design and revised it in three places. Each revision
 | §25.1, injective instructions | `SUB` and `XOR` also need `rs2 ≠ rs1` | with `rs2 = rs1`, flipping bit 0 of `x[rs1]` changes both operands and leaves `rd_value` 0 |
 | §25.1, SP-3 | the expected first divergence is `arch[e + 1]` as a kind divergence, `retire` expected and `exception` actual, not a `retire` differing in `pc` | the trampoline's first instruction, at `stvec`, is `csrrw x31, sscratch, x31`, which points `x31` at the trap frame. The patched handler starts at the second, a store through `x31`, which still holds the user's value, so it faults with `StorePageFault`. The fault repeats at the same store, and the actual side runs out of its safety budget after the divergence. The selector and the ordinal are unchanged |
 
-Where the state patcher lives, which §25.1 left open: the SystemScope runtime adapter (`verification/src/runtime.rs`) takes the patch function from its caller. The `m3-reference` patcher is in `tests/acceptance/src/m3/verify.rs`, on the portable snapshot decoder, so `systemscope-verify` keeps the dependencies of §22 and knows no platform. It patches `pc`, `x1` to `x31`, and `stvec`, after checking the old value.
+Where the state patcher lives, which §25.1 left open: the SystemScope runtime adapter (`verification/src/runtime.rs`) takes the patch function from its caller. The `m3-reference` patcher is in `tests/acceptance/src/m4/verify.rs`, on the portable snapshot decoder, so `systemscope-verify` keeps the dependencies of §22 and knows no platform. It patches `pc`, `x1` to `x31`, and `stvec`, after checking the old value.
 
 The §28.1 per-kind counts are reproduced exactly: 2,176 `retire` and 24 `exception`, the 23 delegated exceptions and the halting trap.
 
@@ -1370,7 +1370,7 @@ M4.6 ran the Spike differentials through the M4 engine. The engine now verifies 
 
 ### 30.7 M4.7
 
-M4.7 added the verification campaigns and the regression corpus. `verification/src/recorded.rs` adds the recorded backend, which replays committed streams: record-only with `DeterministicReplay` and the stream capabilities it holds, refusing any input variant and any other scenario or profile. The acceptance crate commits `m3-reference`'s expected streams and judges the source mutants against them (`tests/acceptance/src/m3/expected.rs`, `mutants.rs`), replays the corpus (`corpus.rs`), and runs the fault-injection campaign (`m3/faults.rs`). `tests/rv32/src/spike_adapter.rs` runs the Spike campaign. It revised the design in these places.
+M4.7 added the verification campaigns and the regression corpus. `verification/src/recorded.rs` adds the recorded backend, which replays committed streams: record-only with `DeterministicReplay` and the stream capabilities it holds, refusing any input variant and any other scenario or profile. The acceptance crate commits `m3-reference`'s expected streams and judges the source mutants against them (`tests/acceptance/src/m4/expected.rs`, `mutants.rs`), replays the corpus (`corpus.rs`), and runs the fault-injection campaign (`m3/faults.rs`). `tests/rv32/src/spike_adapter.rs` runs the Spike campaign. It revised the design in these places.
 
 | Section | Revision | Why |
 |---|---|---|

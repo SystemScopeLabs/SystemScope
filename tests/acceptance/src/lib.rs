@@ -11,6 +11,8 @@
 //!   platform validation, checkpoint and resume from every event of the M3 scenario on
 //!   `m3-reference`, observation invariance, and the golden files that
 //!   `cargo xtask m3-golden bless` writes.
+//! - [`m4`] (`docs/m4-design.md`): M4 verification on `m3-reference`: its backend and
+//!   profile, reproducers, expected streams, faults, and source-mutant targets.
 //! - [`m5`] (`docs/m5-design.md` §12, §13, §15): the golden files that `cargo xtask
 //!   m5-golden bless` writes, the linear every-event resume of `m5-reference`, and its
 //!   `outcome` and `schedule` streams under the M4 engine.
@@ -27,6 +29,7 @@ pub mod layout;
 pub mod m1;
 pub mod m2;
 pub mod m3;
+pub mod m4;
 pub mod m5;
 pub mod observation;
 pub mod process;

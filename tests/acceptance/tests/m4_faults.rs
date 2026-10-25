@@ -3,7 +3,8 @@
 //! result. The findings are pinned, so the campaign cannot change what a seed means
 //! unnoticed. Four tests of eight seeds run in parallel.
 
-use systemscope_acceptance::m3::{Fixture, faults};
+use systemscope_acceptance::m3::Fixture;
+use systemscope_acceptance::m4::faults;
 use systemscope_rv32::m3::Scenario;
 use systemscope_rv32::workspace_root;
 

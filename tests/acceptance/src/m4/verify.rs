@@ -14,8 +14,8 @@ use systemscope_verify::profile::{
 use systemscope_verify::runtime::{Projected, Projection, RuntimeBackend};
 use systemscope_verify::state::{Source, StateField};
 
-use super::Fixture;
-use super::portable::Platform;
+use crate::m3::Fixture;
+use crate::m3::portable::{self, Platform};
 
 /// The CPU's path, which names the patchable fields: `soc.cpu0/pc`, `soc.cpu0/x1` to
 /// `soc.cpu0/x31`, and `soc.cpu0/stvec`.
@@ -148,7 +148,7 @@ impl Projection for M3Projection {
 /// The scenario of `fixture`.
 pub fn scenario(fixture: &Fixture) -> Scenario {
     Scenario {
-        platform: super::SCENARIO.to_owned(),
+        platform: crate::m3::SCENARIO.to_owned(),
         topology_hash: fixture.platform().topology_hash(),
         cpu_profile: "M3".to_owned(),
         program: fixture.disk_blake3,
@@ -173,7 +173,7 @@ pub fn backend(fixture: &Fixture) -> RuntimeBackend {
         BackendId {
             name: "systemscope".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            build: super::SCENARIO.to_owned(),
+            build: crate::m3::SCENARIO.to_owned(),
         },
         Box::new(move |_, input| match input {
             InputVariant::Media(p) => {
@@ -282,7 +282,7 @@ pub fn decode_state(bytes: &[u8]) -> Result<Vec<StateField>, String> {
     }
     component(1, bus);
     let pages = p.ram.iter().map(|(index, bytes)| {
-        let pa = super::portable::RAM_BASE + u64::from(*index) * super::portable::PAGE_BYTES;
+        let pa = portable::RAM_BASE + u64::from(*index) * portable::PAGE_BYTES;
         StateField {
             component: m3ref::PATHS[2].to_owned(),
             field: format!("page[{pa:#010x}]"),

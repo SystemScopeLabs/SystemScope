@@ -4,8 +4,8 @@
 
 use std::fs;
 
-use systemscope_acceptance::m3::expected::{DETECTED, ORACLE_MISMATCH};
-use systemscope_acceptance::m3::mutants::{
+use systemscope_acceptance::m4::expected::{DETECTED, ORACLE_MISMATCH};
+use systemscope_acceptance::m4::mutants::{
     EQUIVALENTS, Equivalent, Fate, Mutant, TARGETS, caught, parse_equivalents, read_outcomes,
     render, target, violations,
 };
