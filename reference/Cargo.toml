@@ -4,6 +4,7 @@ description = "The SystemScope M0 reference scenario m0-reference"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 systemscope-contracts.workspace = true

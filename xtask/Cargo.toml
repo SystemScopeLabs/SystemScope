@@ -4,6 +4,7 @@ description = "SystemScope workspace tasks: cargo xtask bless, the golden, refer
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

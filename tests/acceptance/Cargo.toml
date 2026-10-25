@@ -4,6 +4,7 @@ description = "SystemScope acceptance tests: M0 AT-1 to AT-3, M1-A6 to M1-A8, th
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 publish = false
 
 [dependencies]

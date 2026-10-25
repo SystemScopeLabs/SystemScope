@@ -4,6 +4,7 @@ description = "Toy components for validating SystemScope M0 contracts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 # Components depend only on contracts, never on the runtime (docs/m0-design.md §2).
 [dependencies]

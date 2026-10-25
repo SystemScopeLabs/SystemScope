@@ -4,6 +4,7 @@ description = "Platform components for SystemScope: address bus, multi-master bu
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 # Components depend only on contracts, never on the runtime (docs/m1-design.md §3).
 [dependencies]

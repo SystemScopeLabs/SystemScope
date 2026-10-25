@@ -4,6 +4,7 @@ description = "Deterministic discrete-event simulation runtime for SystemScope"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 blake3 = "1"

@@ -4,6 +4,7 @@ description = "Backend-neutral differential verification for SystemScope: observ
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 blake3 = "1"

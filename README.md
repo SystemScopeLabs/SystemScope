@@ -204,3 +204,11 @@ cargo xtask act4 run
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the acceptance tests, the golden-file policy,
 the fixtures, the Spike differential, and the ACT4 corpus.
+
+## License
+
+SystemScope is licensed under the [MIT License](LICENSE). The committed third-party test
+fixtures keep their upstream licenses, which sit beside them:
+[riscv-tests](tests/rv32/fixtures/LICENSE.riscv-tests),
+[riscv-test-env](tests/rv32/env/LICENSE.riscv-test-env), and
+[riscv-arch-test](tests/act4/fixtures/LICENSE.riscv-arch-test).
