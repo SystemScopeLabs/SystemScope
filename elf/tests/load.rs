@@ -419,6 +419,22 @@ fn segments_must_be_inside_the_ram() {
 }
 
 #[test]
+fn many_overlapping_segments_are_rejected_before_any_is_allocated() {
+    // 1024 headers each claiming the whole 16 MiB RAM would need 16 GiB if each segment
+    // were materialized before the overlap check.
+    const RAM: u32 = 16 << 20;
+    let phdrs = vec![load(BASE, &[], RAM); 1024];
+    let f = Elf::new(BASE, phdrs).build();
+    assert_eq!(
+        load_elf32(&f, BASE, RAM).unwrap_err(),
+        ElfError::OverlappingSegments {
+            first: 0,
+            second: 1
+        }
+    );
+}
+
+#[test]
 fn overlapping_segments_are_rejected_in_any_order() {
     let cases: [(u32, u32, u32, u32); 4] = [
         (0x100, 0x20, 0x100, 0x20), // identical

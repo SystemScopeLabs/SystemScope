@@ -85,13 +85,15 @@ pub struct LoadImage {
 struct Placed {
     index: u16,
     offset: u32,
-    bytes: Vec<u8>,
+    /// The segment's bytes in the file.
+    file: std::ops::Range<usize>,
+    memsz: u32,
 }
 
 impl Placed {
     /// One past the last RAM offset, in `u64` so it cannot overflow.
     fn end(&self) -> u64 {
-        u64::from(self.offset) + self.bytes.len() as u64
+        u64::from(self.offset) + u64::from(self.memsz)
     }
 }
 
@@ -141,22 +143,22 @@ pub fn load_elf32(elf: &[u8], ram_base: u32, ram_size: u32) -> Result<LoadImage,
         if start < ram_start || end > ram_end {
             return Err(ElfError::SegmentOutsideRam { index });
         }
-        // Both ranges were checked above, so these conversions and the slice succeed on
-        // every target that can hold the file and the RAM; they are still checked.
-        let mut bytes = usize::try_from(file_start)
+        // Both ranges were checked above, so these conversions succeed on every target
+        // that can hold the file; they are still checked.
+        let file = usize::try_from(file_start)
             .ok()
             .zip(usize::try_from(file_end).ok())
-            .and_then(|(from, to)| elf.get(from..to))
-            .ok_or(invalid(SegmentError::FileRangeOutsideFile))?
-            .to_vec();
-        let memsz = usize::try_from(ph.memsz).map_err(|_| ElfError::SegmentOutsideRam { index })?;
-        bytes.resize(memsz, 0);
+            .map(|(from, to)| from..to)
+            .ok_or(invalid(SegmentError::FileRangeOutsideFile))?;
         placed.push(Placed {
             index,
             offset: ph.vaddr - ram_base,
-            bytes,
+            file,
+            memsz: ph.memsz,
         });
     }
+    // Nothing is allocated until every segment and the entry are checked, so the image
+    // never holds more than `ram_size` bytes, however many headers the file has.
     placed.sort_by_key(|p| p.offset);
     for pair in placed.windows(2) {
         let (a, b) = (&pair[0], &pair[1]);
@@ -178,14 +180,27 @@ pub fn load_elf32(elf: &[u8], ram_base: u32, ram_size: u32) -> Result<LoadImage,
     if !placed.iter().any(inside) {
         return Err(ElfError::EntryOutsideSegments(entry));
     }
-    Ok(LoadImage {
-        segments: placed
-            .into_iter()
-            .map(|p| LoadSegment {
+    let segments = placed
+        .into_iter()
+        .map(|p| {
+            let mut bytes = elf
+                .get(p.file)
+                .ok_or(ElfError::InvalidSegment {
+                    index: p.index,
+                    reason: SegmentError::FileRangeOutsideFile,
+                })?
+                .to_vec();
+            let memsz = usize::try_from(p.memsz)
+                .map_err(|_| ElfError::SegmentOutsideRam { index: p.index })?;
+            bytes.resize(memsz, 0);
+            Ok(LoadSegment {
                 offset: p.offset,
-                bytes: p.bytes,
+                bytes,
             })
-            .collect(),
+        })
+        .collect::<Result<_, ElfError>>()?;
+    Ok(LoadImage {
+        segments,
         entry,
         image_hash: *blake3::hash(elf).as_bytes(),
     })
