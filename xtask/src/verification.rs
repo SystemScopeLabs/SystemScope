@@ -107,7 +107,7 @@ pub(crate) fn mutants_summarize(targets: &'static [m4m::Target], dir: &Path) -> 
             continue;
         }
         match m4m::read_outcomes(&out) {
-            Ok(m) => runs.push((t, m)),
+            Ok(m) => runs.push((t, m.into_iter().filter(|m| t.selects(&m.name)).collect())),
             Err(e) => {
                 eprintln!("{e}");
                 return ExitCode::FAILURE;

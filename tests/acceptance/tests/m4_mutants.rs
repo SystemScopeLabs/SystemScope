@@ -44,6 +44,13 @@ fn a_target_selects_its_functions_and_runs_the_case() {
     let at = |flag: &str| args[args.iter().position(|a| a == flag).unwrap() + 1].clone();
     assert_eq!(at("-f"), t.file);
     assert_eq!(at("-F"), t.re());
+    assert!(t.selects("process.rs:1:1: replace Processes::schedule_next -> u32 with 0"));
+    assert!(t.selects("process.rs:2:3: replace + with - in Processes::yield_current"));
+    assert!(!t.selects("process.rs:2:3: replace + with - in Processes::yield_currently"));
+    // cargo-mutants 27.1 runs a field deletion in any function of the file.
+    assert!(
+        !t.selects("process.rs:4:5: delete field a from struct P expression in Processes::new")
+    );
     assert_eq!(at("-o"), "target/m4-mutants/schedule");
     assert_eq!(at("--test-package"), "systemscope-acceptance");
     for flag in ["--no-config", "--in-place", "--baseline=skip"] {

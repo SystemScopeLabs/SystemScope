@@ -48,6 +48,20 @@ impl Target {
         format!(r"(in |replace )({})\b", self.functions.join("|"))
     }
 
+    /// Whether [`Target::re`] matches the mutant `name`. cargo-mutants 27.1 applies
+    /// neither `-F` nor `-E` to a struct field deletion, so a run also holds those of
+    /// the file's other functions, and the summary keeps only the target's own.
+    pub fn selects(&self, name: &str) -> bool {
+        self.functions.iter().any(|f| {
+            ["in ", "replace "].iter().any(|prefix| {
+                let needle = format!("{prefix}{f}");
+                name.match_indices(&needle).any(|(i, _)| {
+                    !name[i + needle.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')
+                })
+            })
+        })
+    }
+
     /// cargo-mutants' arguments for this target, writing into `out`. The baseline is
     /// skipped: cargo-mutants would test only the mutated package there, so the caller
     /// runs the case unmutated first. The repository's mutants configuration is not read:
@@ -191,7 +205,7 @@ pub const M5_TARGETS: [Target; 8] = [
         class: "tied sequence",
         package: "systemscope-runtime",
         file: "runtime/src/scheduler.rs",
-        functions: &["Scheduler<T>::schedule"],
+        functions: &["Scheduler<T>::schedule", "Scheduler<T>::schedule_ranked"],
         test: M5_TEST,
     },
     Target {
