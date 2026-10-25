@@ -5,8 +5,12 @@
 all-features = true
 
 [advisories]
-# Every advisory of the RustSec database fails, unmaintained and unsound crates included.
+# Every advisory of the RustSec database fails, unmaintained and unsound crates included,
+# for direct and transitive dependencies alike (cargo-deny's default checks only crates a
+# workspace member uses directly).
 yanked = "deny"
+unmaintained = "all"
+unsound = "all"
 
 [licenses]
 # The licenses the dependency graph may carry, all compatible with MIT.
