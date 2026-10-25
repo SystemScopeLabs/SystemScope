@@ -166,11 +166,15 @@ planned as M4 and moved to M7, with its scope unchanged.
 
 ## Build and test
 
-Clone both repositories side by side:
+Clone both repositories side by side, with `contracts` at the commit CI pins (the `ref`
+in `.github/actions/setup/action.yml`). The workspace reads `../contracts` as a path
+dependency, so `Cargo.lock` cannot pin it; a change that moves the pin updates that `ref`
+in the same pull request.
 
 ```sh
-git clone https://github.com/SystemScopeLabs/contracts.git
 git clone https://github.com/SystemScopeLabs/systemscope.git
+git clone https://github.com/SystemScopeLabs/contracts.git
+git -C contracts checkout "$(sed -n 's/^ *ref: //p' systemscope/.github/actions/setup/action.yml)"
 cd systemscope
 ```
 
