@@ -74,6 +74,9 @@ jobs:
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test at2
       - name: AT-3 observation invariance (O0-O5, compile-fail)
         run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test at3 --test compile_fail
+      # Flipped and arbitrary bytes into the snapshot, ELF, and corpus decoders.
+      - name: Decoder robustness properties
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --test robustness
       # docs/m1-design.md §10.2, §10.6: the committed rv32ui ELFs and hello.elf, run from
       # the same bytes on both operating systems. No step builds anything or uses the
       # network.
