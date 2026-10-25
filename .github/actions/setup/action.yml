@@ -17,7 +17,7 @@ runs:
     # bump it deliberately.
     - uses: actions/checkout@v7
       with:
-        repository: SystemScopeLabs/contracts
+        repository: SystemScopeLabs/SystemsScope-contracts
         ref: 90900a128d51f6b42e86dc789447882c90c52ef4
         path: contracts
     - name: Install pinned toolchain

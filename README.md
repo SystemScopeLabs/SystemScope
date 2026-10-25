@@ -121,7 +121,7 @@ M0, the deterministic simulation kernel, is tagged `v0.1.0-m0`. More documents:
 ## Architecture
 
 ```text
-contracts   (SystemScopeLabs/contracts)   time, events, components, protocols (mem.v0, mem.v1, irq.v0, block.v0), snapshots, trace, observation
+contracts   (SystemScopeLabs/SystemsScope-contracts)   time, events, components, protocols (mem.v0, mem.v1, irq.v0, block.v0), snapshots, trace, observation
 systemscope (this repository)
 ├─ runtime/              scheduler, topology elaboration, lifecycle, snapshots, trace sinks
 ├─ components/toy/       M0: ToyCpu, ToyDma, ToyBus, ToyMemory
@@ -172,8 +172,8 @@ dependency, so `Cargo.lock` cannot pin it; a change that moves the pin updates t
 in the same pull request.
 
 ```sh
-git clone https://github.com/SystemScopeLabs/systemscope.git
-git clone https://github.com/SystemScopeLabs/contracts.git
+git clone https://github.com/SystemScopeLabs/SystemScope.git systemscope
+git clone https://github.com/SystemScopeLabs/SystemsScope-contracts.git contracts
 git -C contracts checkout "$(sed -n 's/^ *ref: //p' systemscope/.github/actions/setup/action.yml)"
 cd systemscope
 ```
