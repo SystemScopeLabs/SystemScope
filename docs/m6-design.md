@@ -271,6 +271,8 @@ Before any bound is frozen, M6.2 measures on `m5-reference` and its races:
 - the distinct effective delays per message within candidate `D`, and the asynchronous wakes;
 - the events after each branch point, and the checkpoint and trace bytes.
 
+Measured at M6.2 on the reference run under the empty script (`tests/acceptance/tests/m6_feasibility.rs`): 1,332,749 events in about 0.6 seconds of a release build, a final snapshot of 146,862 bytes, and 86,626 scoped sends, 81,090 of them on link 4 (bus to `blk`'s registers). 5,371 dispatches offer a pick, each exactly one other event. No `(tick, phase)` holds both a self-wake of a component and a message to it. The effective delays per message and the events after each branch point are not yet measured.
+
 For one illustration, 1,000 scoped messages with `D = 2` make 2,000 depth-one scripts, about 50 minutes at M5's 1.5 seconds per full run, and depth two makes two million. Forks save the prefix, not the count. So CI exhausts small bounds on synthetic topologies, and searches `m5-reference` with a fixed budget unless its exhaustion is measured to fit.
 
 ## 10. Planted Order-Dependent Bugs (D9)
