@@ -8,6 +8,7 @@
 
 use systemscope_runtime::jitter::{Jitter, LinkSet};
 use systemscope_runtime::runtime::Runtime;
+use systemscope_runtime::script::Script;
 use systemscope_runtime::ties::Ties;
 use systemscope_rv32::block_irq;
 use systemscope_rv32::m2ref;
@@ -410,6 +411,44 @@ fn a_tied_run_restores_to_the_same_end() {
         );
         assert_eq!(reference.snapshot, resumed.snapshot, "{k}");
     }
+}
+
+/// An empty script (`docs/m6-design.md` §7.2) changes no rank and no tick, so a scripted
+/// session runs the frozen schedule: the same events, execution digest, output, and
+/// component states. Only the state digest differs, since it covers the snapshot's
+/// format and script.
+#[test]
+fn an_empty_script_runs_the_frozen_schedule() {
+    let schedule = |o: &Outcome| (o.execution, o.events);
+    let frozen = m2_run(&m2ref::Config::frozen());
+    let scripted = m2_run(&m2ref::Config {
+        script: Some(Script::default()),
+        ..m2ref::Config::frozen()
+    });
+    assert_eq!(
+        schedule(&scripted.finished.finished.outcome),
+        schedule(&frozen.finished.finished.outcome)
+    );
+    assert_ne!(
+        scripted.finished.finished.outcome.state,
+        frozen.finished.finished.outcome.state
+    );
+    assert_eq!(scripted.output, frozen.output);
+    let frozen = m3_run(&m3ref::Config::frozen(), Start::Init { traced: false });
+    let scripted = m3_run(
+        &m3ref::Config {
+            script: Some(Script::default()),
+            ..m3ref::Config::frozen()
+        },
+        Start::Init { traced: false },
+    );
+    assert_eq!(
+        schedule(&scripted.finished.outcome),
+        schedule(&frozen.finished.outcome)
+    );
+    assert_eq!(scripted.output, frozen.output);
+    let states = |run: &M3Run| m2ref::components(run.snapshot.as_ref().unwrap()).unwrap();
+    assert_eq!(states(&scripted), states(&frozen));
 }
 
 /// An unjittered snapshot keeps format version 1; a jittered one is version 2; a tied

@@ -32,6 +32,7 @@ use systemscope_contracts::trace::{
 use crate::jitter::{Jitter, JitterState};
 use crate::rng::Xoshiro256StarStar;
 use crate::scheduler::{Scheduler, SchedulerConfig};
+use crate::script::{EventId, Script, ScriptState};
 use crate::trace::{ResumeError, Trace, check_prefix, dispatch_record};
 
 /// Settings fixed for the lifetime of a session.
@@ -43,6 +44,9 @@ pub struct SessionConfig {
     pub scheduler: SchedulerConfig,
     /// Perturbation B, per-message jitter (`docs/m5-design.md` §7.2), or `None`.
     pub jitter: Option<Jitter>,
+    /// A scripted schedule (`docs/m6-design.md` §7), or `None`. Exclusive with jitter and
+    /// ties.
+    pub script: Option<Script>,
 }
 
 /// Where a session is in its lifecycle.
@@ -91,6 +95,8 @@ pub(crate) struct Pending {
     pub(crate) source: ComponentId,
     pub(crate) target: ComponentId,
     pub(crate) delivery: Delivered,
+    /// The event's identity, in a scripted session only.
+    pub(crate) id: Option<EventId>,
 }
 
 /// One dispatched event, as seen by the driver.
@@ -104,6 +110,8 @@ pub struct Dispatched {
     pub target: ComponentId,
     /// What was delivered.
     pub delivery: Delivered,
+    /// The event's identity (`docs/m6-design.md` §7.1), in a scripted session only.
+    pub id: Option<EventId>,
 }
 
 /// Why [`Runtime::run`] returned.
@@ -170,6 +178,8 @@ pub struct Runtime {
     pub(crate) scheduler: Scheduler<Pending>,
     /// Perturbation B's lanes, if the session is jittered.
     pub(crate) jitter: Option<JitterState>,
+    /// The script and its identity counts, if the session is scripted.
+    pub(crate) script: Option<ScriptState>,
     /// Chained BLAKE3 over every dispatched event's `canonical(ev)` (§4.4).
     pub(crate) execution_digest: [u8; 32],
     pub(crate) lifecycle: Lifecycle,
@@ -220,6 +230,10 @@ impl Runtime {
             .unzip();
         let mut topology = Encoder::new();
         encode_topology(&mut topology, &component_decls(&slots), &links);
+        let script = config
+            .script
+            .clone()
+            .map(|s| ScriptState::new(s, links.len(), slots.len()));
         Runtime {
             clock,
             domains,
@@ -229,8 +243,12 @@ impl Runtime {
             peers,
             links,
             topology_hash: *blake3::hash(topology.as_bytes()).as_bytes(),
-            scheduler: Scheduler::new(config.scheduler),
+            scheduler: match config.script {
+                None => Scheduler::new(config.scheduler),
+                Some(_) => Scheduler::scripted(config.scheduler),
+            },
             jitter: config.jitter.clone().map(JitterState::new),
+            script,
             config,
             execution_digest: [0; 32],
             lifecycle: Lifecycle::Elaborated,
@@ -286,6 +304,16 @@ impl Runtime {
     /// The sequence number the next scheduled event will receive.
     pub fn next_sequence(&self) -> u64 {
         self.scheduler.next_sequence()
+    }
+
+    /// The script and its identity counts, if the session is scripted.
+    pub fn script(&self) -> Option<&ScriptState> {
+        self.script.as_ref()
+    }
+
+    /// The number of declared links.
+    pub(crate) fn links_len(&self) -> usize {
+        self.links.len()
     }
 
     /// Adds an observer (§8.2). Observers are driver state: they are never snapshotted
@@ -445,6 +473,7 @@ impl Runtime {
             source,
             target,
             delivery,
+            id,
         } = event.payload;
         let ev = CanonicalEvent {
             key: event.key,
@@ -472,6 +501,7 @@ impl Runtime {
             source,
             target,
             delivery,
+            id,
         };
         let mut control = Control::Continue;
         if !self.observers.is_empty() {
@@ -577,6 +607,7 @@ impl Runtime {
             peers: &self.peers[index],
             scheduler: &mut self.scheduler,
             jitter: self.jitter.as_mut(),
+            script: self.script.as_mut(),
             rng: &mut self.rngs[index],
             trace: capturing.then_some(&mut self.emitted),
             at,
@@ -641,6 +672,7 @@ struct Ctx<'a> {
     peers: &'a [Peer],
     scheduler: &'a mut Scheduler<Pending>,
     jitter: Option<&'a mut JitterState>,
+    script: Option<&'a mut ScriptState>,
     rng: &'a mut Xoshiro256StarStar,
     /// Where records go, or `None` when nothing captures them. Write-only for the component.
     trace: Option<&'a mut Vec<TraceRecord>>,
@@ -702,25 +734,121 @@ impl Ctx<'_> {
             lane.sent = lane.sent.checked_add(1).ok_or(SimError::SequenceOverflow)?;
             lane.last = tick;
         }
+        let delivery = Delivered::Message {
+            port: peer.port,
+            msg,
+        };
+        if let Some(script) = self.script.as_deref_mut() {
+            let send = Send {
+                me: self.me,
+                peer,
+                sent,
+                tick,
+                phase,
+            };
+            return send.scripted(script, self.scheduler, delivery, self.clock, self.domains);
+        }
         let pending = Pending {
             source: self.me,
             target: peer.component,
-            delivery: Delivered::Message {
-                port: peer.port,
-                msg,
-            },
+            delivery,
+            id: None,
         };
         self.scheduler.schedule(tick, phase, pending).map(|_| ())
     }
 
     fn try_wake(&mut self, when: ScheduleWhen, phase: Phase, token: u64) -> Result<(), SimError> {
         let tick = resolve(when, self.scheduler.now(), self.clock, self.domains)?;
-        let pending = Pending {
+        let mut pending = Pending {
             source: self.me,
             target: self.me,
             delivery: Delivered::Wake { token },
+            id: None,
         };
-        self.scheduler.schedule(tick, phase, pending).map(|_| ())
+        let Some(script) = self.script.as_deref_mut() else {
+            return self.scheduler.schedule(tick, phase, pending).map(|_| ());
+        };
+        let count = script.wakes[self.me.0 as usize];
+        let id = EventId::Wake {
+            component: self.me.0,
+            ordinal: count,
+        };
+        let next = count.checked_add(1).ok_or(SimError::SequenceOverflow)?;
+        pending.id = Some(id);
+        self.scheduler
+            .schedule_ranked(tick, phase, script.rank(id), pending)?;
+        script.wakes[self.me.0 as usize] = next;
+        Ok(())
+    }
+}
+
+/// A message send, resolved up to its link latency.
+struct Send {
+    me: ComponentId,
+    peer: Peer,
+    /// The send tick, before the latency.
+    sent: Tick,
+    /// The delivery tick by the link's latency.
+    tick: Tick,
+    phase: Phase,
+}
+
+impl Send {
+    /// Schedules the message in a scripted session (`docs/m6-design.md` §7.2, §7.3): its
+    /// delay if the script lists one, the lane's FIFO clamp, and its rank raised behind
+    /// the lane's previous message in the same `(tick, phase)`.
+    fn scripted(
+        self,
+        script: &mut ScriptState,
+        scheduler: &mut Scheduler<Pending>,
+        delivery: Delivered,
+        clock: &SimulationClock,
+        domains: &[ClockDomain],
+    ) -> Result<(), SimError> {
+        let Send {
+            me,
+            peer,
+            sent,
+            mut tick,
+            phase,
+        } = self;
+        let (link, dir) = (peer.link, peer.dir);
+        let lane = script.lanes[link as usize][usize::from(dir)];
+        let extra = script.delay((link, dir, lane.sent));
+        if extra > 0 {
+            let Some(LinkLatency::Cycles { domain, k }) = peer.latency else {
+                unreachable!("elaboration admits delays only on Cycles links");
+            };
+            let late = k
+                .checked_add(extra)
+                .ok_or(SimError::Time(TimeError::TimeOverflow))?;
+            tick = resolve(
+                ScheduleWhen::Cycles { domain, k: late },
+                sent,
+                clock,
+                domains,
+            )?;
+        }
+        let tick = tick.max(lane.last_tick());
+        let id = EventId::Msg {
+            link,
+            dir,
+            ordinal: lane.sent,
+        };
+        let rank = script.rank(id).max(lane.fifo_rank(tick, phase));
+        let next = lane.sent.checked_add(1).ok_or(SimError::SequenceOverflow)?;
+        let pending = Pending {
+            source: me,
+            target: peer.component,
+            delivery,
+            id: Some(id),
+        };
+        let key = scheduler.schedule_ranked(tick, phase, rank, pending)?;
+        script.lanes[link as usize][usize::from(dir)] = crate::script::Lane {
+            sent: next,
+            last: Some(key),
+        };
+        Ok(())
     }
 }
 

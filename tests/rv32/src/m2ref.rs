@@ -47,7 +47,10 @@ use systemscope_platform::{
 use systemscope_runtime::jitter::{Jitter, JitterState};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
 use systemscope_runtime::scheduler::SchedulerConfig;
-use systemscope_runtime::snapshot::{JITTERED_FORMAT_VERSION, TIED_FORMAT_VERSION};
+use systemscope_runtime::script::{EventId, Script, ScriptState};
+use systemscope_runtime::snapshot::{
+    JITTERED_FORMAT_VERSION, SCRIPTED_FORMAT_VERSION, TIED_FORMAT_VERSION,
+};
 use systemscope_runtime::ties::Ties;
 use systemscope_runtime::topology::TopologyBuilder;
 
@@ -138,6 +141,8 @@ pub struct Config {
     pub jitter: Option<Jitter>,
     /// Perturbation C (`docs/m5-design.md` §7.3); `None` in `m2-reference`.
     pub ties: Option<Ties>,
+    /// A scripted schedule (`docs/m6-design.md` §7); `None` in `m2-reference`.
+    pub script: Option<Script>,
 }
 
 impl Config {
@@ -157,6 +162,7 @@ impl Config {
             latencies: Latencies::default(),
             jitter: None,
             ties: None,
+            script: None,
         }
     }
 }
@@ -368,6 +374,7 @@ pub fn build(image: &LoadImage, disk: &[u8], config: &Config) -> Result<Runtime,
             ..SchedulerConfig::default()
         },
         jitter: config.jitter.clone(),
+        script: config.script.clone(),
     })
     .map_err(|e| BuildError::Elaboration(format!("{e:?}")))
 }
@@ -444,6 +451,11 @@ pub fn components(snapshot: &[u8]) -> Result<Vec<ComponentState>, DecodeError> {
     if version == TIED_FORMAT_VERSION {
         Ties::decode(&mut d)?;
     }
+    let scripted = version == SCRIPTED_FORMAT_VERSION;
+    if scripted {
+        Script::decode(&mut d)?;
+        ScriptState::decode_counts(&mut d)?;
+    }
     if d.u8()? == 1 {
         EventKey::decode(&mut d)?;
     }
@@ -452,6 +464,9 @@ pub fn components(snapshot: &[u8]) -> Result<Vec<ComponentState>, DecodeError> {
     d.raw(32)?; // execution digest
     for _ in 0..d.len()? {
         CanonicalEvent::decode(&mut d)?;
+        if scripted && d.u8()? == 1 {
+            EventId::decode(&mut d)?;
+        }
     }
     for _ in 0..d.len()? {
         d.raw(4 * 8)?;

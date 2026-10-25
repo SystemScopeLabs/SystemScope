@@ -124,6 +124,8 @@ impl<T> Ord for Entry<T> {
 /// Orders, validates, and dispatches events.
 pub struct Scheduler<T> {
     config: SchedulerConfig,
+    /// Whether sequences are rank-major: in a tied or a scripted session.
+    rank_major: bool,
     last_dispatched: Option<EventKey>,
     dispatched_in_phase: u64,
     next_sequence: u64,
@@ -135,6 +137,7 @@ impl<T> Scheduler<T> {
     pub fn new(config: SchedulerConfig) -> Scheduler<T> {
         Scheduler {
             config,
+            rank_major: config.ties.is_some(),
             last_dispatched: None,
             dispatched_in_phase: 0,
             next_sequence: 0,
@@ -190,6 +193,28 @@ impl<T> Scheduler<T> {
     /// In a tied session the sequence is rank-major (`docs/m5-design.md` §7.3), and S6
     /// applies to the counter below `2^COUNTER_BITS`. On error the scheduler is unchanged.
     pub fn schedule(&mut self, tick: Tick, phase: Phase, payload: T) -> Result<EventKey, SimError> {
+        self.schedule_ranked(tick, phase, 0, payload)
+    }
+
+    /// An empty scheduler for a scripted session (`docs/m6-design.md` §7.2): rank-major,
+    /// with the ranks its caller asks for instead of drawn ones. `config.ties` is `None`.
+    pub fn scripted(config: SchedulerConfig) -> Scheduler<T> {
+        Scheduler {
+            rank_major: true,
+            ..Scheduler::new(config)
+        }
+    }
+
+    /// [`Scheduler::schedule`] with a rank of at least `rank`, below `2^RANK_BITS`, in a
+    /// scripted session: the event's rank is `rank` raised to its floor. In any other
+    /// session `rank` is ignored.
+    pub fn schedule_ranked(
+        &mut self,
+        tick: Tick,
+        phase: Phase,
+        rank: u64,
+        payload: T,
+    ) -> Result<EventKey, SimError> {
         let (now, current) = (self.now(), self.phase());
         let violation = SimError::PhaseViolation {
             now,
@@ -211,20 +236,21 @@ impl<T> Scheduler<T> {
         }
         let counter = self.next_sequence;
         let next = counter.checked_add(1).ok_or(SimError::SequenceOverflow)?;
-        let sequence = match self.config.ties {
-            None => counter,
-            Some(t) => {
-                if next >> COUNTER_BITS != 0 {
-                    return Err(SimError::SequenceOverflow);
-                }
-                let floor = match self.last_dispatched {
-                    Some(last) if last.tick == tick && last.phase == phase => {
-                        ties::rank(last.sequence)
-                    }
-                    _ => 0,
-                };
-                t.rank(counter, floor) << COUNTER_BITS | counter
+        let sequence = if self.rank_major {
+            if next >> COUNTER_BITS != 0 {
+                return Err(SimError::SequenceOverflow);
             }
+            let floor = match self.last_dispatched {
+                Some(last) if last.tick == tick && last.phase == phase => ties::rank(last.sequence),
+                _ => 0,
+            };
+            let rank = match self.config.ties {
+                Some(t) => t.rank(counter, floor),
+                None => rank.max(floor),
+            };
+            rank << COUNTER_BITS | counter
+        } else {
+            counter
         };
         self.next_sequence = next;
         let key = EventKey {
@@ -287,6 +313,22 @@ impl<T> Scheduler<T> {
         config: SchedulerConfig,
         snapshot: SchedulerSnapshot<T>,
     ) -> Result<Scheduler<T>, SchedulerRestoreError> {
+        Scheduler::restore_with(config, snapshot, config.ties.is_some())
+    }
+
+    /// [`Scheduler::restore`] for a scripted session: rank-major without ties.
+    pub fn restore_scripted(
+        config: SchedulerConfig,
+        snapshot: SchedulerSnapshot<T>,
+    ) -> Result<Scheduler<T>, SchedulerRestoreError> {
+        Scheduler::restore_with(config, snapshot, true)
+    }
+
+    fn restore_with(
+        config: SchedulerConfig,
+        snapshot: SchedulerSnapshot<T>,
+        rank_major: bool,
+    ) -> Result<Scheduler<T>, SchedulerRestoreError> {
         let SchedulerSnapshot {
             last_dispatched,
             dispatched_in_phase,
@@ -304,9 +346,12 @@ impl<T> Scheduler<T> {
             ));
         }
 
-        let counter = |sequence| match config.ties {
-            None => sequence,
-            Some(_) => ties::counter(sequence),
+        let counter = |sequence| {
+            if rank_major {
+                ties::counter(sequence)
+            } else {
+                sequence
+            }
         };
         // The last dispatched event's sequence was assigned before `next_sequence`, or
         // the next event scheduled at the cursor would sort before it.
@@ -339,6 +384,7 @@ impl<T> Scheduler<T> {
         let heap = queue.into_iter().map(|e| Reverse(Entry(e))).collect();
         Ok(Scheduler {
             config,
+            rank_major,
             last_dispatched,
             dispatched_in_phase,
             next_sequence,

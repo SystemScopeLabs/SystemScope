@@ -59,6 +59,7 @@ use systemscope_platform::{
 use systemscope_runtime::jitter::Jitter;
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
 use systemscope_runtime::scheduler::SchedulerConfig;
+use systemscope_runtime::script::Script;
 use systemscope_runtime::ties::Ties;
 use systemscope_runtime::topology::TopologyBuilder;
 
@@ -184,6 +185,8 @@ pub struct Config {
     pub jitter: Option<Jitter>,
     /// Perturbation C (`docs/m5-design.md` §7.3); `None` in `m3-reference`.
     pub ties: Option<Ties>,
+    /// A scripted schedule (`docs/m6-design.md` §7); `None` in `m3-reference`.
+    pub script: Option<Script>,
     /// The kernel's configuration; [`build`] replaces its clock with the platform's.
     pub kernel: KernelConfig,
     /// The kernel's disk boot.
@@ -203,6 +206,7 @@ impl Config {
             latencies: Latencies::default(),
             jitter: None,
             ties: None,
+            script: None,
             kernel: kernel_config(ClockDomainId(0)),
             boot: DiskBoot {
                 layout: UserLayout::M3,
@@ -521,6 +525,7 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
             ..SchedulerConfig::default()
         },
         jitter: config.jitter.clone(),
+        script: config.script.clone(),
     })
     .map_err(|e| BuildError::Elaboration(format!("{e:?}")))
 }

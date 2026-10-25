@@ -16,6 +16,7 @@ use crate::jitter::{Jitter, JitterState, Lane};
 use crate::rng::Xoshiro256StarStar;
 use crate::runtime::{Lifecycle, Pending, Runtime, RuntimeError};
 use crate::scheduler::{Event, Scheduler, SchedulerRestoreError, SchedulerSnapshot};
+use crate::script::{EventId, Script, ScriptState};
 use crate::ties::Ties;
 
 /// First bytes of every snapshot.
@@ -40,6 +41,15 @@ pub const TIED_FORMAT_VERSION: u32 = 3;
 /// writes it.
 pub const LISTED_FORMAT_VERSION: u32 = 4;
 
+/// Version of the layout of a scripted session's snapshot (`docs/m6-design.md` §7.4):
+/// version 1 with, after the topology hash, the script and its identity counts (every
+/// lane, then every component's wakes), and each queued event followed by its identity
+/// as an option. No other session writes it.
+pub const SCRIPTED_FORMAT_VERSION: u32 = 5;
+
+/// A scripted snapshot's script and counts, decoded.
+type ScriptCounts = (Script, Vec<[crate::script::Lane; 2]>, Vec<u64>);
+
 /// A snapshot decoded but not yet checked against a session.
 struct Decoded<'a> {
     seed: u64,
@@ -50,11 +60,12 @@ struct Decoded<'a> {
     topology_hash: [u8; 32],
     jitter: Option<(Jitter, Vec<[Lane; 2]>)>,
     ties: Option<Ties>,
+    script: Option<ScriptCounts>,
     last_dispatched: Option<EventKey>,
     dispatched_in_phase: u64,
     next_sequence: u64,
     execution_digest: [u8; 32],
-    queue: Vec<CanonicalEvent>,
+    queue: Vec<(CanonicalEvent, Option<EventId>)>,
     rng_states: Vec<[u64; 4]>,
     /// `(id, schema_version, bytes)` per component.
     components: Vec<(u32, u32, &'a [u8])>,
@@ -71,6 +82,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         JITTERED_FORMAT_VERSION,
         TIED_FORMAT_VERSION,
         LISTED_FORMAT_VERSION,
+        SCRIPTED_FORMAT_VERSION,
     ]
     .contains(&version)
     {
@@ -137,6 +149,14 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         },
         _ => None,
     };
+    let script = match version {
+        SCRIPTED_FORMAT_VERSION => {
+            let script = Script::decode(&mut d)?;
+            let (lanes, wakes) = ScriptState::decode_counts(&mut d)?;
+            Some((script, lanes, wakes))
+        }
+        _ => None,
+    };
     let last_dispatched = match d.u8()? {
         0 => None,
         1 => Some(EventKey::decode(&mut d)?),
@@ -153,7 +173,22 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
     let execution_digest = d.array()?;
     let mut queue = Vec::new();
     for _ in 0..d.len()? {
-        queue.push(CanonicalEvent::decode(&mut d)?);
+        let ev = CanonicalEvent::decode(&mut d)?;
+        let id = match version {
+            SCRIPTED_FORMAT_VERSION => match d.u8()? {
+                0 => None,
+                1 => Some(EventId::decode(&mut d)?),
+                tag => {
+                    return Err(DecodeError::InvalidTag {
+                        what: "option",
+                        tag,
+                    }
+                    .into());
+                }
+            },
+            _ => None,
+        };
+        queue.push((ev, id));
     }
     let mut rng_states = Vec::new();
     for _ in 0..d.len()? {
@@ -173,6 +208,7 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
         topology_hash,
         jitter,
         ties,
+        script,
         last_dispatched,
         dispatched_in_phase,
         next_sequence,
@@ -238,6 +274,7 @@ impl Runtime {
             .as_ref()
             .is_some_and(|j| j.jitter.only.is_some());
         e.u32(match (&self.jitter, ties) {
+            _ if self.script.is_some() => SCRIPTED_FORMAT_VERSION,
             _ if listed => LISTED_FORMAT_VERSION,
             (_, Some(_)) => TIED_FORMAT_VERSION,
             (Some(_), None) => JITTERED_FORMAT_VERSION,
@@ -250,6 +287,11 @@ impl Runtime {
         encode_clock_domains(&mut e, &self.domains);
         e.raw(&self.topology_hash);
         match (&self.jitter, ties) {
+            _ if self.script.is_some() => {
+                let script = self.script.as_ref().expect("checked");
+                script.script.encode(&mut e);
+                script.encode_counts(&mut e);
+            }
             (Some(jitter), ties) if listed => {
                 e.u8(2);
                 jitter.jitter.encode(&mut e);
@@ -294,6 +336,7 @@ impl Runtime {
                 source,
                 target,
                 delivery,
+                id,
             } = event.payload;
             CanonicalEvent {
                 key: event.key,
@@ -302,6 +345,15 @@ impl Runtime {
                 delivery,
             }
             .encode(&mut e);
+            if self.script.is_some() {
+                match id {
+                    None => e.u8(0),
+                    Some(id) => {
+                        e.u8(1);
+                        id.encode(&mut e);
+                    }
+                }
+            }
         }
         e.len(self.rngs.len());
         for rng in &self.rngs {
@@ -336,7 +388,7 @@ impl Runtime {
         if self.trace.is_some() {
             return Err(RuntimeError::TraceNeedsPrefix);
         }
-        match self.try_restore(bytes) {
+        match self.try_restore(bytes, false) {
             Ok(()) => {
                 self.lifecycle = Lifecycle::Ready;
                 self.freshly_restored = true;
@@ -346,7 +398,27 @@ impl Runtime {
         }
     }
 
-    fn try_restore(&mut self, bytes: &[u8]) -> Result<(), RestoreError> {
+    /// Replaces `init` in a scripted session: resumes a parent run's snapshot under this
+    /// session's script, which extends the parent's (`docs/m6-design.md` §9.3). The
+    /// snapshot must be a scripted one whose script this session's keeps entry for entry,
+    /// and no event this session's further entries name may have been scheduled yet.
+    /// Every other check is [`Runtime::restore`]'s. A forked session's trace is its own:
+    /// it is never resumed from the parent's.
+    pub fn fork(&mut self, bytes: &[u8]) -> Result<(), RuntimeError> {
+        self.require_state(Lifecycle::Elaborated)?;
+        if self.trace.is_some() {
+            return Err(RuntimeError::TraceNeedsPrefix);
+        }
+        match self.try_restore(bytes, true) {
+            Ok(()) => {
+                self.lifecycle = Lifecycle::Ready;
+                Ok(())
+            }
+            Err(e) => Err(self.fail_restore(e)),
+        }
+    }
+
+    fn try_restore(&mut self, bytes: &[u8], fork: bool) -> Result<(), RestoreError> {
         let snap = decode(bytes)?;
 
         let session = [
@@ -392,6 +464,35 @@ impl Runtime {
                 "the snapshot's tie order differs from the session's",
             ));
         }
+        let script = match (snap.script, self.config.script.clone()) {
+            (None, None) if !fork => None,
+            (Some((found, lanes, wakes)), Some(own)) => {
+                if lanes.len() != self.links_len() || wakes.len() != self.components.len() {
+                    return Err(RestoreError::InvalidState(
+                        "not one lane pair per link and one wake count per component",
+                    ));
+                }
+                let parent = ScriptState::with_counts(found, lanes, wakes);
+                let accepted = if fork {
+                    parent.admits_fork(&own)
+                } else {
+                    parent.script == own
+                };
+                if !accepted {
+                    return Err(RestoreError::InvalidState(if fork {
+                        "the session's script does not extend the snapshot's from here"
+                    } else {
+                        "the snapshot's script differs from the session's"
+                    }));
+                }
+                Some(ScriptState::with_counts(own, parent.lanes, parent.wakes))
+            }
+            _ => {
+                return Err(RestoreError::InvalidState(
+                    "the snapshot's script differs from the session's",
+                ));
+            }
+        };
         let entries = self.components.iter().zip(&snap.components);
         for (id, (component, &(_, found, _))) in (0u32..).zip(entries) {
             let expected = component.snapshot_schema_version();
@@ -425,8 +526,13 @@ impl Runtime {
             ));
         }
         let mut queue = Vec::with_capacity(snap.queue.len());
-        for ev in snap.queue {
+        for (ev, id) in snap.queue {
             self.check_event(&ev)?;
+            if id.is_some() != script.is_some() {
+                return Err(RestoreError::InvalidState(
+                    "a queued event's identity does not match the session",
+                ));
+            }
             let CanonicalEvent {
                 key,
                 source,
@@ -439,18 +545,20 @@ impl Runtime {
                     source,
                     target,
                     delivery,
+                    id,
                 },
             });
         }
-        let scheduler = Scheduler::restore(
-            self.config.scheduler,
-            SchedulerSnapshot {
-                last_dispatched: snap.last_dispatched,
-                dispatched_in_phase: snap.dispatched_in_phase,
-                next_sequence: snap.next_sequence,
-                queue,
-            },
-        )
+        let snapshot = SchedulerSnapshot {
+            last_dispatched: snap.last_dispatched,
+            dispatched_in_phase: snap.dispatched_in_phase,
+            next_sequence: snap.next_sequence,
+            queue,
+        };
+        let scheduler = match script {
+            None => Scheduler::restore(self.config.scheduler, snapshot),
+            Some(_) => Scheduler::restore_scripted(self.config.scheduler, snapshot),
+        }
         .map_err(scheduler_error)?;
 
         for (component, &(_, schema, bytes)) in self.components.iter_mut().zip(&snap.components) {
@@ -460,6 +568,7 @@ impl Runtime {
         }
         self.scheduler = scheduler;
         self.jitter = jitter;
+        self.script = script;
         self.rngs = rngs;
         self.execution_digest = snap.execution_digest;
         Ok(())

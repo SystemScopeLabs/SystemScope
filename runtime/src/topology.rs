@@ -16,6 +16,7 @@ use systemscope_contracts::trace::LinkDecl;
 
 use crate::jitter::Jitter;
 use crate::runtime::{Peer, Runtime, SessionConfig, Slot};
+use crate::script::{EventId, Script};
 
 /// Why a topology could not be elaborated.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +44,10 @@ pub enum ElaborationError {
     /// The jitter setting is not allowed (`docs/m5-design.md` §7.2): `max_cycles` is 0,
     /// no link is named, a named link does not exist, or it has no `Cycles` latency.
     InvalidJitter(&'static str),
+    /// The script is not allowed (`docs/m6-design.md` §16): it is not canonical, names an
+    /// undeclared link, end, or component, delays a message on a link without a `Cycles`
+    /// latency, or comes with jitter or ties.
+    InvalidScript(&'static str),
 }
 
 impl fmt::Display for ElaborationError {
@@ -65,6 +70,7 @@ impl fmt::Display for ElaborationError {
                 write!(f, "unknown clock domain {}", id.0)
             }
             ElaborationError::InvalidJitter(why) => write!(f, "invalid jitter: {why}"),
+            ElaborationError::InvalidScript(why) => write!(f, "invalid script: {why}"),
         }
     }
 }
@@ -223,6 +229,14 @@ impl TopologyBuilder {
         if let Some(jitter) = &config.jitter {
             check_jitter(jitter, &links)?;
         }
+        if let Some(script) = &config.script {
+            if config.jitter.is_some() || config.scheduler.ties.is_some() {
+                return Err(ElaborationError::InvalidScript(
+                    "a script comes with jitter or ties",
+                ));
+            }
+            check_script(script, &links, slots.len())?;
+        }
 
         for (slot, slot_peers) in slots.iter().zip(&peers) {
             for (spec, peer) in slot.ports.iter().zip(slot_peers) {
@@ -287,6 +301,40 @@ fn check_jitter(jitter: &Jitter, links: &[LinkDecl]) -> Result<(), ElaborationEr
                 "a listed message is not on a jittered link",
             ));
         }
+    }
+    Ok(())
+}
+
+/// Checks a script against the elaborated links and components.
+fn check_script(
+    script: &Script,
+    links: &[LinkDecl],
+    components: usize,
+) -> Result<(), ElaborationError> {
+    script.check().map_err(ElaborationError::InvalidScript)?;
+    let named = |id: EventId| match id {
+        EventId::Msg { link, dir, .. } => (link as usize) < links.len() && dir <= 1,
+        EventId::Wake { component, .. } => (component as usize) < components,
+    };
+    for &((link, dir, ordinal), _) in &script.delays {
+        if !named(EventId::Msg { link, dir, ordinal }) {
+            return Err(ElaborationError::InvalidScript(
+                "a delayed message is on no declared link end",
+            ));
+        }
+        if !matches!(
+            links[link as usize].latency,
+            Some(LinkLatency::Cycles { .. })
+        ) {
+            return Err(ElaborationError::InvalidScript(
+                "a delayed message's link has no Cycles latency",
+            ));
+        }
+    }
+    if !script.groups.iter().flatten().all(|&id| named(id)) {
+        return Err(ElaborationError::InvalidScript(
+            "a group order names an undeclared link end or component",
+        ));
     }
     Ok(())
 }

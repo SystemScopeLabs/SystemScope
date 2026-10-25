@@ -222,6 +222,31 @@ fn two_runs_are_identical_and_tracing_changes_nothing() {
     assert_eq!(traced.snapshot, untraced.snapshot);
 }
 
+/// An empty script (`docs/m6-design.md` §7.2) runs the frozen schedule: only the state
+/// digest, which covers the snapshot's format and script, differs.
+#[test]
+fn an_empty_script_runs_the_frozen_schedule() {
+    let (firmware, disk, _) = fixture();
+    let mut config = Config::frozen();
+    config.m3.script = Some(systemscope_runtime::script::Script::default());
+    let scripted = m5::run_with(
+        &firmware,
+        &disk,
+        &config,
+        Start::Init { traced: false },
+        Vec::new(),
+    );
+    let frozen = fresh(false);
+    let (a, b) = (&scripted.finished.outcome, &frozen.finished.outcome);
+    assert_eq!(
+        (a.events, a.instret, a.execution),
+        (b.events, b.instret, b.execution)
+    );
+    assert_eq!(scripted.output, frozen.output);
+    let states = |run: &M5Run| m2ref::components(run.snapshot.as_ref().unwrap()).unwrap();
+    assert_eq!(states(&scripted), states(&frozen));
+}
+
 #[test]
 fn a_checkpoint_resumes_to_the_same_end_and_trace() {
     let (firmware, disk, expected) = fixture();

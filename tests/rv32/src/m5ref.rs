@@ -393,6 +393,7 @@ pub fn build(firmware: &LoadImage, disk: &[u8], config: &Config) -> Result<Runti
             ..SchedulerConfig::default()
         },
         jitter: m3.jitter.clone(),
+        script: m3.script.clone(),
     })
     .map_err(|e| BuildError::M3(m3ref::BuildError::Elaboration(format!("{e:?}"))))
 }

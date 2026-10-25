@@ -7,6 +7,7 @@ pub mod jitter;
 pub mod rng;
 pub mod runtime;
 pub mod scheduler;
+pub mod script;
 pub mod snapshot;
 pub mod ties;
 pub mod topology;

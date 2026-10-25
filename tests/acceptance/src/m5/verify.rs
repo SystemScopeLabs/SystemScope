@@ -656,6 +656,7 @@ pub fn defective_config(perturbation: &Perturbation, defect: Option<Defect>) -> 
     c.m3.latencies = perturbation.latencies.clone();
     c.m3.jitter = perturbation.jitter.clone();
     c.m3.ties = perturbation.ties;
+    c.m3.script = perturbation.script.clone();
     if let Some(slice) = perturbation.slice {
         c.m5.slice = slice;
     }

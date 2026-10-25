@@ -149,9 +149,11 @@ A delay delivers one message `d` cycles later than its parent run, `1 ≤ d ≤ 
 
 ### 7.4 Encoding and Identity (D1)
 
-`perturbation.bin` gains a script (tag 3 of the jitter field holds the delays; tag 2 of the tie field holds the group orders, each sorted by identity). A schedule's identity is its encoding's BLAKE3, as for any perturbation, and it is part of the session identity.
+`perturbation.bin` gains a script: tag 3 of the jitter field holds the delays, ascending by message; tag 2 of the tie field holds the group orders, each listing its events in its chosen order, with the groups ascending by their least identity. Each tag requires the other. A schedule's identity is its encoding's BLAKE3, as for any perturbation, and it is part of the session identity.
 
-A scripted session with the empty script is not an unscripted session: it keeps the counts and identities of §7.1, and writes the scripted snapshot format. Its trace and every stream equal the unscripted run's, which a test checks (§17). The reference that the search forks from is this run, so every M0–M5 golden snapshot, which comes from an unscripted session, is unchanged.
+A scripted session's snapshot is format version 5: version 1 with the script and its identity counts after the topology hash, and each queued event followed by its identity.
+
+A scripted session with the empty script is not an unscripted session: it keeps the counts and identities of §7.1, and writes the scripted snapshot format. Its trace, every stream, its execution digest, and its component states equal the unscripted run's, which a test checks on every reference platform (§17); only its state digest, which hashes the snapshot, differs. The reference that the search forks from is this run, so every M0–M5 golden snapshot, which comes from an unscripted session, is unchanged.
 
 ### 7.5 Composition with M5 Perturbations (D11)
 

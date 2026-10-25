@@ -156,6 +156,7 @@ fn build(v: Variant) -> Runtime {
             ties: None,
         },
         jitter: None,
+        script: None,
     };
     t.elaborate(config).unwrap()
 }

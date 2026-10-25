@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
 use systemscope_runtime::jitter::Jitter;
+use systemscope_runtime::script::Script;
 use systemscope_runtime::ties::Ties;
 
 /// The largest cycle count an override may set.
@@ -72,6 +73,8 @@ pub struct Perturbation {
     pub jitter: Option<Jitter>,
     /// Perturbation C, the tie order.
     pub ties: Option<Ties>,
+    /// A scripted schedule (`docs/m6-design.md` §7.5); exclusive with B and C.
+    pub script: Option<Script>,
 }
 
 impl Perturbation {
@@ -83,7 +86,9 @@ impl Perturbation {
     /// The canonical encoding, a reproducer's `perturbation.bin`: the link overrides in
     /// index order, the response overrides in path order, then the slice, the jitter
     /// setting, and the tie setting, each after a tag. A jitter setting with a list of
-    /// messages has tag 2 and the list after the setting.
+    /// messages has tag 2 and the list after the setting. A script takes both places
+    /// (`docs/m6-design.md` §7.4): its delays after jitter tag 3, its group orders after
+    /// tie tag 2.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.len(self.latencies.links.len());
@@ -102,6 +107,17 @@ impl Perturbation {
                 e.u8(1);
                 e.u32(slice);
             }
+        }
+        if let Some(script) = &self.script {
+            assert!(
+                self.jitter.is_none() && self.ties.is_none(),
+                "a script is exclusive with jitter and ties"
+            );
+            e.u8(3);
+            script.encode_delays(&mut e);
+            e.u8(2);
+            script.encode_groups(&mut e);
+            return e.into_bytes();
         }
         match &self.jitter {
             None => e.u8(0),
@@ -160,9 +176,19 @@ impl Perturbation {
             1 => Some(d.u32()?),
             tag => return Err(DecodeError::InvalidTag { what: "slice", tag }),
         };
+        let mut script = Script::default();
+        let scripted = DecodeError::InvalidTag {
+            what: "script",
+            tag: 0,
+        };
         p.jitter = match d.u8()? {
             0 => None,
             1 => Some(Jitter::decode(&mut d)?),
+            3 => {
+                script.decode_delays(&mut d)?;
+                p.script = Some(Script::default());
+                None
+            }
             2 => {
                 let mut j = Jitter::decode(&mut d)?;
                 j.decode_only(&mut d)?;
@@ -175,10 +201,17 @@ impl Perturbation {
                 });
             }
         };
-        p.ties = match d.u8()? {
-            0 => None,
-            1 => Some(Ties::decode(&mut d)?),
-            tag => return Err(DecodeError::InvalidTag { what: "ties", tag }),
+        p.ties = match (d.u8()?, p.script.is_some()) {
+            (0, false) => None,
+            (1, false) => Some(Ties::decode(&mut d)?),
+            (2, true) => {
+                script.decode_groups(&mut d)?;
+                script.check().map_err(|_| scripted)?;
+                p.script = Some(script);
+                None
+            }
+            (0..=2, _) => return Err(scripted),
+            (tag, _) => return Err(DecodeError::InvalidTag { what: "ties", tag }),
         };
         d.finish()?;
         Ok(p)
@@ -209,7 +242,82 @@ mod tests {
                 only: None,
             }),
             ties: Some(Ties { seed: 0x71e5 }),
+            script: None,
         }
+    }
+
+    fn scripted() -> Perturbation {
+        use systemscope_runtime::script::EventId;
+        Perturbation {
+            jitter: None,
+            ties: None,
+            script: Some(Script {
+                delays: vec![((2, 0, 1), 3), ((4, 1, 0), 1)],
+                groups: vec![vec![
+                    EventId::Wake {
+                        component: 3,
+                        ordinal: 0,
+                    },
+                    EventId::Msg {
+                        link: 2,
+                        dir: 0,
+                        ordinal: 0,
+                    },
+                ]],
+            }),
+            ..sample()
+        }
+    }
+
+    #[test]
+    fn a_script_round_trips_in_the_jitter_and_tie_places() {
+        for p in [
+            scripted(),
+            Perturbation {
+                script: Some(Script::default()),
+                ..Perturbation::default()
+            },
+        ] {
+            assert_eq!(Perturbation::from_bytes(&p.to_bytes()), Ok(p.clone()));
+            assert!(!p.is_empty());
+        }
+        let mut empty = Perturbation::default().to_bytes();
+        empty[9] = 3;
+        empty[10] = 2;
+        empty.splice(10..10, [0; 4]);
+        empty.extend([0; 4]);
+        assert_eq!(
+            Perturbation::from_bytes(&empty),
+            Ok(Perturbation {
+                script: Some(Script::default()),
+                ..Perturbation::default()
+            })
+        );
+        let mut delay = scripted();
+        delay.script.as_mut().unwrap().delays[1].1 = 2;
+        assert_ne!(delay.identity(), scripted().identity());
+    }
+
+    #[test]
+    fn a_script_refuses_a_lone_tag_and_a_non_canonical_script() {
+        let script = Err(DecodeError::InvalidTag {
+            what: "script",
+            tag: 0,
+        });
+        let mut lone = Perturbation::default().to_bytes();
+        lone[9] = 3;
+        lone.splice(10..10, [0; 4]);
+        assert_eq!(Perturbation::from_bytes(&lone), script);
+        let mut ties = sample();
+        ties.jitter = None;
+        let mut bytes = ties.to_bytes();
+        let at = bytes.len() - 9;
+        assert_eq!(bytes[at], 1);
+        bytes[at] = 2;
+        assert_eq!(Perturbation::from_bytes(&bytes), script);
+        let mut zero = scripted();
+        zero.script.as_mut().unwrap().delays[0].1 = 0;
+        assert_eq!(Perturbation::from_bytes(&zero.to_bytes()), script);
     }
 
     #[test]
@@ -279,17 +387,17 @@ mod tests {
             })
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[], &[], [0, 3, 0])),
+            Perturbation::from_bytes(&encoded(&[], &[], [0, 4, 0])),
             Err(DecodeError::InvalidTag {
                 what: "jitter",
-                tag: 3
+                tag: 4
             })
         );
         assert_eq!(
-            Perturbation::from_bytes(&encoded(&[], &[], [0, 0, 2])),
+            Perturbation::from_bytes(&encoded(&[], &[], [0, 0, 3])),
             Err(DecodeError::InvalidTag {
                 what: "ties",
-                tag: 2
+                tag: 3
             })
         );
         let mut trailing = sample().to_bytes();
