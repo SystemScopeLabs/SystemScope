@@ -141,8 +141,8 @@ systemscope (this repository)
 
 Directories marked *planned* do not exist yet.
 
-`systemscope` uses `contracts` from a sibling directory, and CI checks out a pinned commit
-of it.
+`systemscope` uses `contracts` from a sibling directory, and CI checks out the commit
+pinned in `.github/actions/setup/action.yml`.
 
 ## Roadmap
 

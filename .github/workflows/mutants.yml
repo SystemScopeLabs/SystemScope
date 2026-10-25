@@ -80,7 +80,8 @@ jobs:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    # The slowest of the 20 shards took 166 minutes (2026-10-24).
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       # Leave runner slots for pull request CI.
@@ -93,17 +94,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { path: systemscope }
-      - uses: actions/checkout@v7
+      - uses: ./systemscope/.github/actions/setup
         with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
-          save-if: ${{ strategy.job-index == 0 }}
+          save-cache: ${{ strategy.job-index == 0 }}
       - uses: taiki-e/install-action@v2
         with: { tool: "cargo-mutants,cargo-nextest" }
       - name: Run cargo-mutants shard ${{ matrix.shard }}/${{ needs.gate.outputs.shard_count }}

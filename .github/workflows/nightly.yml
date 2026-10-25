@@ -72,18 +72,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -115,16 +104,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       # Spike's configure requires dtc; the differential runs Spike with --disable-dtb.
       - name: Install dtc
         run: |
@@ -168,16 +148,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - run: cargo xtask m5-coverage verify campaign
 
   # docs/m5-design.md §19: every-event resume on m5-reference perturbed by each mechanism's
@@ -196,16 +167,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - run: cargo run --release --locked -p xtask -- m5-golden every-event perturbed ${{ matrix.mechanism }}
 
   coverage:
@@ -218,18 +180,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      - uses: actions/checkout@v7
+      - uses: ./systemscope/.github/actions/setup
         with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup component add llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+          components: llvm-tools-preview
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest

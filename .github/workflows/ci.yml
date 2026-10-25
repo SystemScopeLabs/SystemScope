@@ -21,32 +21,27 @@ defaults:
 
 jobs:
   lint:
-    name: fmt, check, clippy, machete
+    name: fmt, check, clippy, machete, rustdoc, deny
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-machete
+          tool: cargo-machete,cargo-deny
       - run: cargo fmt --all -- --check
       - run: cargo check --workspace --all-targets --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo machete
+      - name: Rustdoc, warnings denied
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+      # Advisories, licenses, banned crates, and sources (deny.toml).
+      - run: cargo deny --locked check
 
   test:
     name: test (${{ matrix.os }})
@@ -60,18 +55,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -312,18 +296,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: actions/download-artifact@v8
         with:
           name: m1-result-${{ matrix.from }}
@@ -351,18 +324,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: actions/download-artifact@v8
         with:
           name: m2-result-${{ matrix.from }}
@@ -390,18 +352,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: actions/download-artifact@v8
         with:
           name: m3-result-${{ matrix.from }}
@@ -429,18 +380,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: actions/download-artifact@v8
         with:
           name: m5-result-${{ matrix.from }}
@@ -474,18 +414,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       # Only the downloaded bundles: the cache may restore an earlier run's.
       - name: Clear earlier foreign reproducers
         shell: bash
@@ -513,18 +442,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -547,18 +465,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - name: M3 fixtures match their manifest
         run: cargo xtask m3-reference verify
       - name: Resume every checkpoint of shard ${{ matrix.shard }}
@@ -580,18 +487,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - name: M5 fixtures match their manifest
         run: cargo xtask m5-reference verify
       - name: Resume every checkpoint of shard ${{ matrix.shard }}
@@ -612,18 +508,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       # The versions tests/rv32/fixtures/manifest.json records; the build script checks
       # the tools' version strings again.
       - name: Install the pinned RISC-V toolchain
@@ -656,18 +541,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       # Spike's configure requires dtc. The M1 and M2 differentials run Spike with
       # --disable-dtb; the M3 one boots with its device tree, which Spike builds with dtc.
       - name: Install dtc
@@ -711,18 +585,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: systemscope
-      # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
-      # sibling layout, with contracts pinned to a pushed revision (bump it deliberately).
-      - uses: actions/checkout@v7
-        with:
-          repository: SystemScopeLabs/contracts
-          ref: 90900a128d51f6b42e86dc789447882c90c52ef4
-          path: contracts
-      - name: Install pinned toolchain
-        run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: systemscope
+      - uses: ./systemscope/.github/actions/setup
       - uses: actions/cache@v6
         with:
           path: ~/act4-cache

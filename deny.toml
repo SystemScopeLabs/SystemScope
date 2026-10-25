@@ -1,0 +1,32 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny/): advisories, licenses, banned
+# crates, and sources of every dependency. CI runs `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory of the RustSec database fails, unmaintained and unsound crates included.
+yanked = "deny"
+
+[licenses]
+# The licenses the dependency graph may carry, all compatible with MIT.
+allow = ["MIT", "Apache-2.0"]
+confidence-threshold = 0.9
+# Workspace crates and the contracts path dependency are not published.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# The pinned contracts revision predates its license field; the contracts are MIT, like
+# this repository.
+[[licenses.clarify]]
+crate = "systemscope-contracts"
+expression = "MIT"
+license-files = []

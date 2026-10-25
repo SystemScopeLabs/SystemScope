@@ -11,7 +11,11 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo machete
 cargo nextest run --workspace --locked --no-fail-fast
 cargo test --workspace --doc --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo deny --locked check
 ```
+
+`cargo deny` checks every dependency against the RustSec advisories, the licenses allowed in `deny.toml`, and its sources. nextest reports a test as slow after a minute and kills it after ten (`.config/nextest.toml`). Every workflow job sets up through `.github/actions/setup`, which holds the `contracts` pin.
 
 The acceptance tests (`tests/acceptance`, `docs/m0-design.md` §9) run the full `m0-reference`, so they take about a minute. Run one alone with `cargo nextest run -p systemscope-acceptance --test at1` (or `at2`, `at3`, `compile_fail`).
 

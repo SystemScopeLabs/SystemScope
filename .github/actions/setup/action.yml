@@ -1,0 +1,35 @@
+name: Set up SystemScope
+description: >
+  The sibling contracts checkout at its pinned revision, the pinned Rust toolchain, and
+  the cargo cache. Run it after checking this repository out to `systemscope`.
+inputs:
+  components:
+    description: Extra rustup components, space-separated
+    default: ""
+  save-cache:
+    description: Whether this job saves the cargo cache
+    default: "true"
+runs:
+  using: composite
+  steps:
+    # systemscope depends on `../contracts` by path (plan.md §10), so reproduce the
+    # sibling layout, with contracts pinned to a pushed revision. This is the only pin:
+    # bump it deliberately.
+    - uses: actions/checkout@v7
+      with:
+        repository: SystemScopeLabs/contracts
+        ref: 90900a128d51f6b42e86dc789447882c90c52ef4
+        path: contracts
+    - name: Install pinned toolchain
+      shell: bash
+      working-directory: systemscope
+      env:
+        COMPONENTS: ${{ inputs.components }}
+      run: |
+        rustup toolchain install
+        # shellcheck disable=SC2086 # COMPONENTS is a list
+        if [ -n "$COMPONENTS" ]; then rustup component add $COMPONENTS; fi
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: systemscope
+        save-if: ${{ inputs.save-cache }}

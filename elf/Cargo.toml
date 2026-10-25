@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish.workspace = true
 
 # Host-side code, not a component: it depends on nothing in the simulation
 # (docs/m1-design.md §3, §8). The parser is hand-written; blake3 names the program.

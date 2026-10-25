@@ -268,7 +268,7 @@ SystemScopeLabs (GitHub org)
    └─ docs/
 ```
 
-- `systemscope` depends on `contracts` as a **git dependency pinned to a revision**. During local development, a Cargo `[patch]` overrides it with a path.
+- `systemscope` depends on `contracts` by path, as a sibling checkout. CI checks out the **revision pinned** in `.github/actions/setup/action.yml`, the only pin.
 - A contract change lands in `contracts` first. `systemscope` then bumps the pinned revision.
 - Once contracts stabilize, components split out into their own repositories: `cpu`, `storage`, `network`, …
 - Because the org is already named after SystemScope, repositories do not repeat a `systemscope-` prefix.

@@ -4,6 +4,16 @@
 # Keep going after a failure so every test binary reports, including integration and
 # property tests behind a failing unit test.
 fail-fast = false
+# A test is reported as slow after a minute and killed after ten, so a hung test fails
+# with its name instead of running into the job's timeout. The slowest tests take about
+# a minute in a debug build.
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The offline minimization search runs hundreds of full runs by design (docs/m5-design.md
+# §16); it is never run in CI.
+[[profile.default.overrides]]
+filter = "binary(m5_minimize) & test(=search)"
+slow-timeout = { period = "300s" }
 
 [profile.ci]
 fail-fast = false
