@@ -38,6 +38,10 @@
 //!   perturbed by the mechanism's seed 0 (§19), which the weekly nightly runs for each mechanism.
 //! - `m5-repro emit <dir> | check <dir> | replay <dir>`: as `m4-repro`, for the reproducer
 //!   bundles of `m5-reference`'s seven minimized perturbations (`docs/m5-design.md` §18).
+//! - `bench [<runs>]`: the simulator's throughput on the M3 disks and the M5 disk,
+//!   untraced, as the median of `<runs>` runs (5 by default): events and retired
+//!   instructions per second of wall-clock time. Report only, never a check; run it with
+//!   `cargo run --release -p xtask -- bench`. The weekly nightly records it.
 //! - `rv32-fixtures build`: Linux only, with the pinned toolchain on `PATH`. Rebuilds the
 //!   40 `rv32ui` fixtures from the pinned `riscv-tests` with `tests/rv32/build-fixtures.sh`
 //!   (the only step that uses the network), `hello.elf` with
@@ -196,6 +200,7 @@ const USAGE: &str = "usage: cargo xtask bless\n       \
                      cargo xtask m5-coverage bless | verify [campaign]\n       \
                      cargo xtask m4-repro emit <dir> | check <dir> | replay <dir>\n       \
                      cargo xtask m5-repro emit <dir> | check <dir> | replay <dir>\n       \
+                     cargo xtask bench [<runs>]\n       \
                      cargo xtask rv32-fixtures build | manifest [<cache-dir>] | verify\n       \
                      cargo xtask spike build | verify | diff | random | campaign [<dir>]\n       \
                      cargo xtask act4 build [<cache-dir>] | install <out-dir> | check <out-dir> \
@@ -314,6 +319,14 @@ fn main() -> ExitCode {
         ["m5-repro", "emit", dir] => m5_repro_emit(Path::new(dir)),
         ["m5-repro", "check", dir] => m5_repro_check(Path::new(dir)),
         ["m5-repro", "replay", dir] => m5_repro_replay(Path::new(dir)),
+        ["bench"] => bench(5),
+        ["bench", runs] => match runs.parse() {
+            Ok(runs) if runs > 0 => bench(runs),
+            _ => {
+                eprintln!("{USAGE}");
+                ExitCode::FAILURE
+            }
+        },
         ["act4", "build"] => act4_build(&root().join(ACT4_CACHE)),
         ["act4", "build", cache] => act4_build(Path::new(cache)),
         ["act4", "install", out] => act4_install(Path::new(out)),
@@ -1087,6 +1100,75 @@ fn m5_repro_check(dir: &Path) -> ExitCode {
         result,
         "the foreign M5 reproducers equal this machine's byte for byte and replay here",
     )
+}
+
+/// A named workload that runs once and returns its events and retired instructions.
+type Workload = (String, Box<dyn Fn() -> (u64, u64)>);
+
+/// `bench`: the wall-clock throughput of each reference workload. Wall-clock time is read
+/// here only, around whole runs, and never reaches a simulation.
+#[expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "a benchmark measures wall-clock time outside the simulation"
+)]
+fn bench(runs: usize) -> ExitCode {
+    use std::time::Instant;
+
+    let root = root();
+    let mut workloads: Vec<Workload> = Vec::new();
+    for scenario in Scenario::ALL {
+        let (firmware, disk, _) = match m3::read_fixture(&root, scenario) {
+            Ok(f) => f,
+            Err(e) => return report(Err(vec![format!("{}: {e}", scenario.name())]), ""),
+        };
+        workloads.push((
+            format!("m3-reference {}", scenario.name()),
+            Box::new(move || {
+                let o = m3::run(&firmware, &disk, Start::Init { traced: false }, Vec::new())
+                    .finished
+                    .outcome;
+                (o.events, o.instret)
+            }),
+        ));
+    }
+    let (firmware, disk, _) = match m5::read_fixture(&root) {
+        Ok(f) => f,
+        Err(e) => return report(Err(vec![format!("m5-reference: {e}")]), ""),
+    };
+    workloads.push((
+        "m5-reference".to_owned(),
+        Box::new(move || {
+            let o = m5::run(&firmware, &disk, Start::Init { traced: false }, Vec::new())
+                .finished
+                .outcome;
+            (o.events, o.instret)
+        }),
+    ));
+    println!("| workload | events | instret | median ms | events/s | instret/s |");
+    println!("|---|---:|---:|---:|---:|---:|");
+    for (name, run) in &workloads {
+        let mut times = Vec::with_capacity(runs);
+        let mut counts = (0, 0);
+        for _ in 0..runs {
+            let start = Instant::now();
+            counts = run();
+            times.push(start.elapsed());
+        }
+        times.sort();
+        // Integer microseconds keep the workspace's no-float rule.
+        let median = times[runs / 2].as_micros().max(1);
+        let (events, instret) = counts;
+        let per_second = |n: u64| u128::from(n) * 1_000_000 / median;
+        println!(
+            "| {name} | {events} | {instret} | {}.{:03} | {} | {} |",
+            median / 1000,
+            median % 1000,
+            per_second(events),
+            per_second(instret)
+        );
+    }
+    ExitCode::SUCCESS
 }
 
 fn m5_repro_replay(dir: &Path) -> ExitCode {

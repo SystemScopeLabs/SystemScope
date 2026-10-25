@@ -429,6 +429,7 @@ name = "systemscope-acceptance"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "proptest",
  "serde_json",
  "systemscope-contracts",
  "systemscope-elf",

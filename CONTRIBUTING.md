@@ -76,6 +76,12 @@ Never edit an entry by hand. When an intended change alters an entry's result, r
 - `cargo xtask m5-repro emit <dir> | check <dir> | replay <dir>` writes, compares, and replays the reproducer bundles of the seven minimized perturbations (§18). CI emits them on both operating systems and checks each against the other.
 - `cargo xtask m5-mutants run <target> <out> | summarize <out>` runs the M5 source mutants (§21). A surviving mutant is either detected by a new test or listed, with its reason, in `tests/verification/equivalent-mutants.txt`.
 
+## Robustness and Throughput
+
+`tests/acceptance/tests/robustness.rs` feeds corrupted and arbitrary bytes to every decoder that reads outside input: the `m0-reference` and `m5-reference` snapshots, `result.bin`, observation evidence, `perturbation.bin`, and the bundle manifest. They must be refused with an error, never a panic, and anything that decodes must be the canonical encoding, so a corrupted snapshot that restores snapshots back to the same bytes. A new decoder of outside bytes gets a case there.
+
+`cargo run --release -p xtask -- bench [<runs>]` prints the wall-clock throughput of the M3 disks and the M5 disk, untraced: events and retired instructions per second, the median of `<runs>` runs. It is a report, never a check; the weekly nightly records it in its summary.
+
 ## rv32 Fixtures
 
 `tests/rv32/fixtures/` holds the 40 `rv32ui` ELFs built from the pinned `riscv-tests`, and `manifest.json`, which records their hashes and the pins (`docs/m1-design.md` §10.2, §10.6). Tests and CI only read them, so Linux and Windows run the same bytes.

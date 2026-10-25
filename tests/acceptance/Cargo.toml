@@ -21,6 +21,7 @@ systemscope-rv32i.workspace = true
 systemscope-verify.workspace = true
 
 [dev-dependencies]
+proptest = "1"
 trybuild = "1"
 
 [lints]

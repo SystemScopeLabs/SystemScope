@@ -170,6 +170,22 @@ jobs:
       - uses: ./systemscope/.github/actions/setup
       - run: cargo run --release --locked -p xtask -- m5-golden every-event perturbed ${{ matrix.mechanism }}
 
+  # Wall-clock throughput of the reference workloads (`cargo xtask bench`), for trends
+  # only: runner speed varies, so it never fails on a number.
+  bench:
+    name: bench (report only)
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 17 * * 6'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: systemscope
+      - uses: ./systemscope/.github/actions/setup
+      - name: Throughput
+        run: cargo run --release --locked -p xtask -- bench | tee -a "$GITHUB_STEP_SUMMARY"
+
   coverage:
     name: coverage (report only)
     if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 17 * * 6'
