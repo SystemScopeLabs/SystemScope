@@ -205,7 +205,7 @@ pub const M5_TARGETS: [Target; 8] = [
         class: "tied sequence",
         package: "systemscope-runtime",
         file: "runtime/src/scheduler.rs",
-        functions: &["Scheduler<T>::schedule", "Scheduler<T>::schedule_ranked"],
+        functions: &["Scheduler<T>::schedule"],
         test: M5_TEST,
     },
     Target {

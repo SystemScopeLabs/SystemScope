@@ -87,8 +87,8 @@ impl Perturbation {
     /// index order, the response overrides in path order, then the slice, the jitter
     /// setting, and the tie setting, each after a tag. A jitter setting with a list of
     /// messages has tag 2 and the list after the setting. A script takes both places
-    /// (`docs/m6-design.md` §7.4): its delays and shifts after jitter tag 3, its group
-    /// orders after tie tag 2.
+    /// (`docs/m6-design.md` §7.4): its delays and shifts after jitter tag 3, its picks
+    /// after tie tag 2.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut e = Encoder::new();
         e.len(self.latencies.links.len());
@@ -116,7 +116,7 @@ impl Perturbation {
             e.u8(3);
             script.encode_delays(&mut e);
             e.u8(2);
-            script.encode_groups(&mut e);
+            script.encode_picks(&mut e);
             return e.into_bytes();
         }
         match &self.jitter {
@@ -205,7 +205,7 @@ impl Perturbation {
             (0, false) => None,
             (1, false) => Some(Ties::decode(&mut d)?),
             (2, true) => {
-                script.decode_groups(&mut d)?;
+                script.decode_picks(&mut d)?;
                 script.check().map_err(|_| scripted)?;
                 p.script = Some(script);
                 None
@@ -254,17 +254,17 @@ mod tests {
             script: Some(Script {
                 delays: vec![((2, 0, 1), 3), ((4, 1, 0), 1)],
                 shifts: vec![((5, 2), -7)],
-                groups: vec![vec![
-                    EventId::Wake {
-                        component: 3,
-                        ordinal: 0,
-                    },
+                picks: vec![(
                     EventId::Msg {
                         link: 2,
                         dir: 0,
                         ordinal: 0,
                     },
-                ]],
+                    vec![EventId::Wake {
+                        component: 3,
+                        ordinal: 0,
+                    }],
+                )],
             }),
             ..sample()
         }
@@ -285,7 +285,7 @@ mod tests {
         let mut empty = Perturbation::default().to_bytes();
         empty[9] = 3;
         empty[10] = 2;
-        // No delays and no shifts, then no groups.
+        // No delays and no shifts, then no picks.
         empty.splice(10..10, [0; 8]);
         empty.extend([0; 4]);
         assert_eq!(

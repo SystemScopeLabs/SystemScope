@@ -33,28 +33,21 @@ fn measure_the_reference_choice_points() {
     let snapshot = rt.snapshot().unwrap().len();
     let points = choice_points(&rec, LinkSet::of(&JITTER_LINKS), &[], None).unwrap();
     let mut delays = [0u64; 14];
-    let mut sizes = std::collections::BTreeMap::<usize, u64>::new();
-    let (mut groups, mut orders, mut uncounted, mut largest) = (0u64, 0u64, 0u64, 0u64);
+    let mut offered = std::collections::BTreeMap::<usize, u64>::new();
+    let (mut dispatches, mut picks) = (0u64, 0u64);
     for p in &points {
         match &p.choice {
             Choice::Delay((link, _, _)) => delays[*link as usize] += 1,
             Choice::Shift(_) => {}
-            Choice::Group(g) => {
-                groups += 1;
-                *sizes.entry(g.events.len()).or_default() += 1;
-                match g.count() {
-                    Some(n) => {
-                        orders = orders.saturating_add(n - 1);
-                        largest = largest.max(n);
-                    }
-                    None => uncounted += 1,
-                }
+            Choice::Pick { ready, .. } => {
+                dispatches += 1;
+                picks += ready.len() as u64;
+                *offered.entry(ready.len()).or_default() += 1;
             }
         }
     }
     println!("events {} in {ran:?}", rec.steps.len());
     println!("final snapshot {snapshot} bytes");
     println!("scoped messages by link {delays:?}");
-    println!("groups with an alternative {groups}, sizes {sizes:?}");
-    println!("other admissible orders {orders}, largest count {largest}, uncounted {uncounted}");
+    println!("dispatches with a pick {dispatches}, picks {picks}, by count {offered:?}");
 }

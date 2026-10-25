@@ -1,6 +1,5 @@
-//! Scripted schedules (`docs/m6-design.md` §7): identities, delays, group orders with
-//! effective ranks, vacuous entries, snapshots, and forks; and the choice points of a
-//! scripted run (§8).
+//! Scripted schedules (`docs/m6-design.md` §7): identities, delays, picks, vacuous
+//! entries, snapshots, and forks; and the choice points of a scripted run (§8).
 
 use systemscope_contracts::component::{
     Component, Delivered, InitContext, PortId, PortSpec, Role, SimContext,
@@ -14,9 +13,7 @@ use systemscope_contracts::time::{
     ClockDomainId, Duration, Frequency, Rounding, SimulationClock, Tick,
 };
 use systemscope_contracts::topology::LinkLatency;
-use systemscope_runtime::choice::{
-    BranchPoint, Choice, ChoiceError, ChoicePoint, Recording, choice_points,
-};
+use systemscope_runtime::choice::{BranchPoint, Choice, ChoiceError, Recording, choice_points};
 use systemscope_runtime::jitter::{Jitter, LinkSet};
 use systemscope_runtime::runtime::{Dispatched, Runtime, RuntimeError, SessionConfig};
 use systemscope_runtime::scheduler::SchedulerConfig;
@@ -170,11 +167,25 @@ fn wake(ordinal: u64) -> EventId {
     }
 }
 
-fn grouped(group: Vec<EventId>) -> Option<Script> {
+/// The script whose only picks are `events`, at dispatches whose default is `default`.
+fn picked(default: EventId, events: Vec<EventId>) -> Option<Script> {
     Some(Script {
-        groups: vec![group],
+        picks: vec![(default, events)],
         ..Script::default()
     })
+}
+
+/// `script` with `event` picked at the next dispatch whose default is `default`.
+fn with_pick(script: &Script, default: EventId, event: EventId) -> Script {
+    let mut child = script.clone();
+    match child.picks.iter_mut().find(|(d, _)| *d == default) {
+        Some((_, events)) => events.push(event),
+        None => {
+            child.picks.push((default, vec![event]));
+            child.picks.sort();
+        }
+    }
+    child
 }
 
 /// `(cycle, "r<txn>" or "w<token>")` in dispatch order.
@@ -280,10 +291,10 @@ fn a_delay_moves_its_message_and_the_lane_stays_fifo() {
 }
 
 #[test]
-fn a_group_order_reorders_its_group_under_fifo_and_leaves_a_vacuous_entry() {
-    // Ranks w2 0, r1 1, r0 2, w1 3, w3 4: read 1 is raised behind read 0, and wake 2,
-    // first, finds no flag, so wake 3 never occurs.
-    let script = grouped(vec![wake(1), msg(1), msg(0), wake(0), wake(2)]);
+fn a_pick_dispatches_a_ready_event_in_place_of_the_default() {
+    // Wake 2 ahead of read 0 finds no flag, so wake 3 never occurs; read 0 is then the
+    // default again, and the list is done.
+    let script = picked(msg(0), vec![wake(1)]);
     let mut rt = platform(script.clone());
     rt.init().unwrap();
     let events: Vec<Dispatched> = std::iter::from_fn(|| rt.step().unwrap()).collect();
@@ -291,17 +302,40 @@ fn a_group_order_reorders_its_group_under_fifo_and_leaves_a_vacuous_entry() {
         order(&events),
         expect(&[(2, "w2"), (2, "r0"), (2, "r1"), (2, "w1"), (3, "r2")])
     );
-    assert_eq!(rt.script().unwrap().unscheduled(), [wake(2)]);
-    assert_eq!(platform(script).script().unwrap().unscheduled().len(), 5);
+    assert_eq!(rt.script().unwrap().unscheduled(), []);
+    assert_eq!(platform(script).script().unwrap().unscheduled().len(), 2);
+    // Two picks ahead of read 0, at successive dispatches: wake 2 then finds the flag
+    // and schedules wake 3 into the group, after the reads.
+    assert_eq!(
+        order(&run(picked(msg(0), vec![wake(0), wake(1)]))),
+        expect(&[
+            (2, "w1"),
+            (2, "w2"),
+            (2, "r0"),
+            (2, "r1"),
+            (2, "w3"),
+            (3, "r2"),
+            (4, "r3"),
+        ])
+    );
 }
 
 #[test]
-fn an_event_scheduled_into_its_own_group_is_raised_to_the_floor() {
-    // Wake 3 is ranked 0 but is scheduled while wake 2, rank 2, is dispatched: it runs
-    // right after wake 2 and before read 0, rank 3.
-    let script = grouped(vec![wake(2), wake(0), wake(1), msg(0), msg(1)]);
+fn a_pick_that_is_not_ready_is_vacuous_with_the_rest_of_its_list() {
+    let reference = order(&run(Some(Script::default())));
+    // Read 1 is behind read 0 on its lane, and wake 3 is not scheduled yet: either pick
+    // dispatches the default, read 0, and the entry after it never applies.
+    for first in [msg(1), wake(2)] {
+        assert_eq!(
+            order(&run(picked(msg(0), vec![first, wake(0)]))),
+            reference,
+            "{first:?}"
+        );
+    }
+    // Wake 3, scheduled while wake 2 is dispatched, can be picked ahead of read 0 once it
+    // is pending.
     assert_eq!(
-        order(&run(script)),
+        order(&run(picked(msg(0), vec![wake(0), wake(1), wake(2)]))),
         expect(&[
             (2, "w1"),
             (2, "w2"),
@@ -316,7 +350,7 @@ fn an_event_scheduled_into_its_own_group_is_raised_to_the_floor() {
 
 #[test]
 fn a_scripted_snapshot_restores_at_every_event_only_into_the_same_script() {
-    let script = grouped(vec![wake(1), msg(1), msg(0), wake(0)]);
+    let script = picked(msg(0), vec![wake(0), wake(1)]);
     let reference = run(script.clone());
     let mut rt = platform(script.clone());
     rt.init().unwrap();
@@ -425,21 +459,20 @@ fn elaboration_refuses_a_script_it_cannot_honor() {
         (delay((0, 2, 0), 1), None, None, TWO_CYCLES),
         (delay((0, 0, 0), 1), None, None, ticks),
         (
-            grouped(vec![msg(0), wake(0)])
-                .map(|mut s| {
-                    s.groups[0][1] = EventId::Wake {
-                        component: 2,
-                        ordinal: 0,
-                    };
-                    s
-                })
-                .unwrap(),
+            picked(
+                msg(0),
+                vec![EventId::Wake {
+                    component: 2,
+                    ordinal: 0,
+                }],
+            )
+            .unwrap(),
             None,
             None,
             TWO_CYCLES,
         ),
         (
-            grouped(vec![msg(0), msg(0)]).unwrap(),
+            picked(msg(0), vec![msg(0)]).unwrap(),
             None,
             None,
             TWO_CYCLES,
@@ -458,8 +491,8 @@ fn elaboration_refuses_a_script_it_cannot_honor() {
             "a delayed message is on no declared link end",
             "a delayed message is on no declared link end",
             "a delayed message's link has no Cycles latency",
-            "a group order names an undeclared link end or component",
-            "an event is listed twice",
+            "a pick names an undeclared link end or component",
+            "a pick names an event twice",
         ]
     );
 }
@@ -473,37 +506,51 @@ fn record(script: Option<Script>) -> Recording {
 }
 
 #[test]
-fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
+fn a_recording_yields_its_picks_and_scoped_messages_in_branch_order() {
     let rec = record(Some(Script::default()));
     let points = choice_points(&rec, LinkSet::of(&[0]), &[], None).unwrap();
     let branches: Vec<BranchPoint> = points.iter().map(|c| c.branch).collect();
     let at = |at, kind, id| BranchPoint { at, kind, id };
     // Reads 0-2 and wakes 1 and 2 come from init; wake 3 from wake 2, the fourth event;
-    // read 3 from wake 3, the fifth.
+    // read 3 from wake 3, the fifth. The first three dispatches have a ready event other
+    // than their default; a pick branches before what its dispatch schedules.
     assert_eq!(
         branches,
         [
-            at(0, 0, msg(0)),
-            at(0, 0, msg(1)),
-            at(0, 0, msg(2)),
             at(0, 1, msg(0)),
-            at(5, 0, msg(3)),
+            at(0, 1, msg(1)),
+            at(0, 1, msg(2)),
+            at(1, 0, msg(0)),
+            at(2, 0, msg(1)),
+            at(3, 0, wake(0)),
+            at(5, 1, msg(3)),
         ]
     );
-    let Choice::Group(group) = &points[3].choice else {
-        panic!("{:?}", points[3]);
-    };
-    assert_eq!(group.events, [msg(0), msg(1), wake(0), wake(1), wake(2)]);
-    // Read 0 before read 1 (FIFO), wake 2 before wake 3 (causal).
-    assert_eq!(group.preds, [0, 0b1, 0, 0, 0b1000]);
-    assert_eq!(group.count(), Some(30));
-    assert_eq!(group.orders().count(), 29);
+    let picks: Vec<&Choice> = points[3..6].iter().map(|p| &p.choice).collect();
+    // Read 1 waits behind read 0 (FIFO), and wake 3 is not pending until wake 2 runs.
+    assert_eq!(
+        picks,
+        [
+            &Choice::Pick {
+                default: msg(0),
+                ready: vec![wake(0), wake(1)],
+            },
+            &Choice::Pick {
+                default: msg(1),
+                ready: vec![wake(0), wake(1)],
+            },
+            &Choice::Pick {
+                default: wake(0),
+                ready: vec![wake(1)],
+            },
+        ]
+    );
     // Only what branches after a point is offered.
     let later = choice_points(&rec, LinkSet::of(&[0]), &[], Some(branches[3])).unwrap();
     assert_eq!(later, points[4..]);
     assert_eq!(
         choice_points(&rec, LinkSet::default(), &[], None).unwrap(),
-        points[3..4]
+        points[3..6]
     );
     let mut plain = platform(None);
     plain.init().unwrap();
@@ -515,43 +562,79 @@ fn a_recording_yields_its_groups_and_scoped_messages_in_branch_order() {
     );
 }
 
-#[test]
-fn every_admissible_order_dispatches_as_its_script_asks() {
-    let rec = record(Some(Script::default()));
-    let points: Vec<ChoicePoint> = choice_points(&rec, LinkSet::default(), &[], None).unwrap();
-    let [
-        ChoicePoint {
-            choice: Choice::Group(group),
-            ..
-        },
-    ] = &points[..]
-    else {
-        panic!("{points:?}");
-    };
-    let mut seen = std::collections::BTreeSet::new();
-    for positions in group.orders() {
-        let order = group.order(&positions);
-        let child = record(grouped(order.clone()));
-        let dispatched: Vec<EventId> = child.steps[..]
-            .iter()
-            .filter(|s| s.event.key.tick.0 == 2 * CYCLE)
-            .map(|s| s.event.id.unwrap())
-            .collect();
-        // Wake 3 occurs only if wake 1 sets the flag before wake 2 runs.
-        let mut expected = order.clone();
-        let w1 = order.iter().position(|&e| e == wake(0)).unwrap();
-        let w2 = order.iter().position(|&e| e == wake(1)).unwrap();
-        if w2 < w1 {
-            expected.retain(|&e| e != wake(2));
+/// The group at cycle 2 of every script reachable from `script` by picks after `after`,
+/// with the script that reached it.
+fn pick_orders(script: Script, after: Option<BranchPoint>, out: &mut Vec<(Vec<EventId>, Script)>) {
+    let rec = record(Some(script.clone()));
+    let group: Vec<EventId> = rec
+        .steps
+        .iter()
+        .filter(|s| s.event.key.tick.0 == 2 * CYCLE)
+        .map(|s| s.event.id.unwrap())
+        .collect();
+    out.push((group, script.clone()));
+    for point in choice_points(&rec, LinkSet::default(), &[], after).unwrap() {
+        let Choice::Pick { default, ready } = &point.choice else {
+            panic!("{point:?}");
+        };
+        for &event in ready {
+            pick_orders(with_pick(&script, *default, event), Some(point.branch), out);
         }
-        assert_eq!(dispatched, expected, "{order:?}");
-        seen.insert(dispatched);
     }
-    // The 9 other orders with wake 1 first, and the 6 orders of the other four events
-    // with wake 2 first: an order that only moves the missing wake 3 dispatches as
-    // another, a duplicate (§9.2).
-    assert_eq!(seen.len(), 15);
-    assert!(!seen.contains(&group.events));
+}
+
+#[test]
+fn every_admissible_order_is_one_list_of_picks() {
+    let mut reached = Vec::new();
+    pick_orders(Script::default(), None, &mut reached);
+    // By hand: read 0 before read 1, and wake 3 exists exactly when wake 1 precedes
+    // wake 2, anywhere after wake 2.
+    let mut admissible = std::collections::BTreeSet::new();
+    let four = [msg(0), msg(1), wake(0), wake(1)];
+    for a in 0..4 {
+        for b in 0..4 {
+            for c in 0..4 {
+                for d in 0..4 {
+                    let order = [four[a], four[b], four[c], four[d]];
+                    let at = |e| order.iter().position(|&x| x == e).unwrap();
+                    if [a, b, c, d]
+                        .iter()
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                        < 4
+                        || at(msg(1)) < at(msg(0))
+                    {
+                        continue;
+                    }
+                    if at(wake(1)) < at(wake(0)) {
+                        admissible.insert(order.to_vec());
+                        continue;
+                    }
+                    for w3 in at(wake(1)) + 1..=4 {
+                        let mut with = order.to_vec();
+                        with.insert(w3, wake(2));
+                        admissible.insert(with);
+                    }
+                }
+            }
+        }
+    }
+    let orders: std::collections::BTreeSet<Vec<EventId>> =
+        reached.iter().map(|(o, _)| o.clone()).collect();
+    // Each order once, and every admissible one.
+    assert_eq!(orders.len(), reached.len());
+    assert_eq!(orders, admissible);
+    for (order, script) in &reached {
+        assert_eq!(&order_of(script), order, "{script:?}");
+    }
+}
+
+fn order_of(script: &Script) -> Vec<EventId> {
+    run(Some(script.clone()))
+        .iter()
+        .filter(|d| d.key.tick.0 == 2 * CYCLE)
+        .map(|d| d.id.unwrap())
+        .collect()
 }
 
 /// A periodic timer in miniature: its first wake at cycle 4, in `COMPLETE`, then one every
@@ -752,6 +835,6 @@ fn a_shifted_run_restores_at_every_event_and_yields_its_shift_points() {
     assert!(
         points
             .iter()
-            .all(|p| p.branch.kind == 0 || matches!(p.choice, Choice::Group(_)))
+            .all(|p| p.branch.kind == 1 || matches!(p.choice, Choice::Pick { .. }))
     );
 }

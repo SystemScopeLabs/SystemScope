@@ -16,7 +16,7 @@ use crate::jitter::{Jitter, JitterState, Lane};
 use crate::rng::Xoshiro256StarStar;
 use crate::runtime::{Lifecycle, Pending, Runtime, RuntimeError};
 use crate::scheduler::{Event, Scheduler, SchedulerRestoreError, SchedulerSnapshot};
-use crate::script::{EventId, Script, ScriptState};
+use crate::script::{Counts, EventId, Script, ScriptState};
 use crate::ties::Ties;
 
 /// First bytes of every snapshot.
@@ -43,12 +43,12 @@ pub const LISTED_FORMAT_VERSION: u32 = 4;
 
 /// Version of the layout of a scripted session's snapshot (`docs/m6-design.md` §7.4):
 /// version 1 with, after the topology hash, the script and its identity counts (every
-/// lane, then every component's wakes), and each queued event followed by its identity
-/// as an option. No other session writes it.
+/// lane, then every component's wakes, then the picks taken ahead of the current default
+/// event as an option), and each queued event followed by its identity as an option. No other session writes it.
 pub const SCRIPTED_FORMAT_VERSION: u32 = 5;
 
 /// A scripted snapshot's script and counts, decoded.
-type ScriptCounts = (Script, Vec<[crate::script::Lane; 2]>, Vec<u64>);
+type ScriptCounts = (Script, Counts);
 
 /// A snapshot decoded but not yet checked against a session.
 struct Decoded<'a> {
@@ -152,8 +152,8 @@ fn decode(bytes: &[u8]) -> Result<Decoded<'_>, RestoreError> {
     let script = match version {
         SCRIPTED_FORMAT_VERSION => {
             let script = Script::decode(&mut d)?;
-            let (lanes, wakes) = ScriptState::decode_counts(&mut d)?;
-            Some((script, lanes, wakes))
+            let counts = ScriptState::decode_counts(&mut d)?;
+            Some((script, counts))
         }
         _ => None,
     };
@@ -466,15 +466,24 @@ impl Runtime {
         }
         let script = match (snap.script, self.config.script.clone()) {
             (None, None) if !fork => None,
-            (Some((found, lanes, wakes)), Some(own)) => {
-                if lanes.len() != self.links_len() || wakes.len() != self.components.len() {
+            (Some((found, counts)), Some(own)) => {
+                if counts.lanes.len() != self.links_len()
+                    || counts.wakes.len() != self.components.len()
+                {
                     return Err(RestoreError::InvalidState(
                         "not one lane pair per link and one wake count per component",
                     ));
                 }
-                let parent = ScriptState::with_counts(found, lanes, wakes);
+                if let Some((default, _)) = counts.ahead
+                    && !snap.queue.iter().any(|q| q.1 == Some(default))
+                {
+                    return Err(RestoreError::InvalidState(
+                        "picks were taken ahead of an event that is not queued",
+                    ));
+                }
+                let parent = ScriptState::with_counts(found, counts);
                 let accepted = if fork {
-                    parent.admits_fork(&own)
+                    parent.admits_fork(&own, |id| snap.queue.iter().any(|q| q.1 == Some(id)))
                 } else {
                     parent.script == own
                 };
@@ -485,7 +494,7 @@ impl Runtime {
                         "the snapshot's script differs from the session's"
                     }));
                 }
-                Some(ScriptState::with_counts(own, parent.lanes, parent.wakes))
+                Some(ScriptState::with_counts(own, parent.counts()))
             }
             _ => {
                 return Err(RestoreError::InvalidState(

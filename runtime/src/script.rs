@@ -1,24 +1,23 @@
 //! Scripted schedules (`docs/m6-design.md` §7).
 //!
 //! A script lists deviations from the reference ordering: delays of single messages,
-//! shifts of single wakes, and orders of tie groups. It names events by [`EventId`], what scheduled them, never by
-//! `sequence`, which a deviation changes for every later event. A scripted session counts
-//! every directed link's messages and every component's wakes to give each event its
-//! identity.
+//! shifts of single wakes, and picks of single dispatches. It names events by
+//! [`EventId`], what scheduled them, never by `sequence`, which a deviation changes for
+//! every later event. A scripted session counts every directed link's messages and every
+//! component's wakes to give each event its identity.
 //!
-//! A group order gives each event it lists a rank, its position in the list. The
-//! scheduler then raises the rank to its floor (causal) and to the rank of the previous
-//! message of its lane in the same `(tick, phase)` (FIFO), so every dispatched order is
-//! admissible, whatever events a reordering adds or removes.
+//! A pick dispatches a ready event of the next `(tick, phase)` in place of the default
+//! event, the one with the least counter (§7.2). Ready means pending with no earlier
+//! message of its lane pending, so every dispatched order is admissible, whatever events
+//! a pick adds or removes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use systemscope_contracts::canonical::{DecodeError, Decoder, Encoder};
-use systemscope_contracts::event::{EventKey, Phase};
+use systemscope_contracts::event::EventKey;
 use systemscope_contracts::time::Tick;
 
 use crate::jitter::MessageId;
-use crate::ties::RANK_BITS;
 
 /// An event's identity in a scripted session (`docs/m6-design.md` §7.1): the `n`-th
 /// message accepted for one direction of a link, or the `n`-th wake a component
@@ -95,9 +94,10 @@ pub struct Script {
     /// later if positive, in the clock domain it names (`docs/m6-design.md` §7.6).
     /// Ascending by wake, never 0.
     pub shifts: Vec<(WakeId, i64)>,
-    /// Group orders, each its events in the order chosen, at least two. An event's rank
-    /// is its position. Ascending by each group's least identity; no identity twice.
-    pub groups: Vec<Vec<EventId>>,
+    /// `(default, events)`: the events dispatched, in order, at successive dispatches
+    /// while `default` is the default event, at least one. Ascending by default; no
+    /// identity twice, as a default or an event.
+    pub picks: Vec<(EventId, Vec<EventId>)>,
 }
 
 /// Why a script is not canonical.
@@ -124,12 +124,14 @@ impl Script {
         }
     }
 
-    /// Appends the group orders: their count, then each group's length and identities.
-    pub fn encode_groups(&self, e: &mut Encoder) {
-        e.len(self.groups.len());
-        for group in &self.groups {
-            e.len(group.len());
-            for id in group {
+    /// Appends the picks: their count, then each default event, and its events' count
+    /// and identities.
+    pub fn encode_picks(&self, e: &mut Encoder) {
+        e.len(self.picks.len());
+        for (default, events) in &self.picks {
+            default.encode(e);
+            e.len(events.len());
+            for id in events {
                 id.encode(e);
             }
         }
@@ -150,37 +152,38 @@ impl Script {
         Ok(())
     }
 
-    /// Reads group orders into `self`.
-    pub fn decode_groups(&mut self, d: &mut Decoder<'_>) -> Result<(), DecodeError> {
-        self.groups.clear();
+    /// Reads picks into `self`.
+    pub fn decode_picks(&mut self, d: &mut Decoder<'_>) -> Result<(), DecodeError> {
+        self.picks.clear();
         for _ in 0..d.len()? {
-            let mut group = Vec::new();
+            let default = EventId::decode(d)?;
+            let mut events = Vec::new();
             for _ in 0..d.len()? {
-                group.push(EventId::decode(d)?);
+                events.push(EventId::decode(d)?);
             }
-            self.groups.push(group);
+            self.picks.push((default, events));
         }
         Ok(())
     }
 
-    /// Appends the canonical encoding: the delays and shifts, then the group orders.
+    /// Appends the canonical encoding: the delays and shifts, then the picks.
     pub fn encode(&self, e: &mut Encoder) {
         self.encode_delays(e);
-        self.encode_groups(e);
+        self.encode_picks(e);
     }
 
     /// Reads one script, refusing one that is not canonical.
     pub fn decode(d: &mut Decoder<'_>) -> Result<Script, DecodeError> {
         let mut script = Script::default();
         script.decode_delays(d)?;
-        script.decode_groups(d)?;
+        script.decode_picks(d)?;
         script.check().map_err(invalid)?;
         Ok(script)
     }
 
     /// Checks what a script means without a topology: delays ascending and at least 1,
-    /// shifts ascending and neither 0 nor `i64::MIN`, groups of two or more, ascending by least identity, no identity twice, and every
-    /// rank below `2^RANK_BITS`.
+    /// shifts ascending and neither 0 nor `i64::MIN`, and picks ascending by default, each
+    /// with an event, and no identity twice among them.
     pub fn check(&self) -> Result<(), &'static str> {
         if self.delays.windows(2).any(|w| w[0].0 >= w[1].0) {
             return Err("the delays are not ascending");
@@ -197,33 +200,30 @@ impl Script {
         if self.shifts.iter().any(|&(_, cycles)| cycles == i64::MIN) {
             return Err("a shift has no magnitude");
         }
-        let mut seen = std::collections::BTreeSet::new();
-        let mut least = None;
-        for group in &self.groups {
-            if group.len() < 2 {
-                return Err("a group order lists fewer than two events");
+        if self.picks.windows(2).any(|w| w[0].0 >= w[1].0) {
+            return Err("the picks are not ascending");
+        }
+        if self.picks.iter().any(|(_, events)| events.is_empty()) {
+            return Err("a default event has no pick");
+        }
+        let mut seen = BTreeSet::new();
+        let named = self
+            .picks
+            .iter()
+            .flat_map(|(default, events)| std::iter::once(default).chain(events));
+        for id in named {
+            if !seen.insert(*id) {
+                return Err("a pick names an event twice");
             }
-            if group.len() as u64 > 1 << RANK_BITS {
-                return Err("a group order lists too many events");
-            }
-            if group.iter().any(|id| !seen.insert(*id)) {
-                return Err("an event is listed twice");
-            }
-            let min = group.iter().min().copied();
-            if least >= min {
-                return Err("the group orders are not ascending");
-            }
-            least = min;
         }
         Ok(())
     }
 
-    /// Every identity the script names, with its rank if it is in a group order.
-    fn ranks(&self) -> BTreeMap<EventId, u64> {
-        self.groups
+    /// Every identity the picks name, defaults and events.
+    fn picked(&self) -> impl Iterator<Item = EventId> + '_ {
+        self.picks
             .iter()
-            .flat_map(|g| (0u64..).zip(g).map(|(rank, id)| (*id, rank)))
-            .collect()
+            .flat_map(|(default, events)| std::iter::once(*default).chain(events.iter().copied()))
     }
 }
 
@@ -241,14 +241,19 @@ impl Lane {
     pub fn last_tick(&self) -> Tick {
         self.last.map_or(Tick::ZERO, |k| k.tick)
     }
+}
 
-    /// The rank a message to `(tick, phase)` must reach to stay behind the previous one.
-    pub fn fifo_rank(&self, tick: Tick, phase: Phase) -> u64 {
-        match self.last {
-            Some(k) if k.tick == tick && k.phase == phase => crate::ties::rank(k.sequence),
-            _ => 0,
-        }
-    }
+/// A scripted session's counts: every lane, every component's wakes, and the picks
+/// taken ahead of the current default event.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Two lanes per link, by declaration index, `a` to `b` first.
+    pub lanes: Vec<[Lane; 2]>,
+    /// Wakes scheduled so far, by component id.
+    pub wakes: Vec<u64>,
+    /// `(default, n)`: the last dispatch picked the `n`-th event ahead of `default`,
+    /// which is still pending; `None` if it dispatched its default.
+    pub ahead: Option<(EventId, u64)>,
 }
 
 /// A scripted session's runtime state: the script and every identity count.
@@ -258,11 +263,13 @@ pub struct ScriptState {
     pub script: Script,
     delays: BTreeMap<MessageId, u64>,
     shifts: BTreeMap<WakeId, i64>,
-    ranks: BTreeMap<EventId, u64>,
+    picks: BTreeMap<EventId, Vec<EventId>>,
     /// Two lanes per link, by declaration index, `a` to `b` first.
     pub lanes: Vec<[Lane; 2]>,
     /// Wakes scheduled so far, by component id.
     pub wakes: Vec<u64>,
+    /// As [`Counts::ahead`].
+    pub ahead: Option<(EventId, u64)>,
 }
 
 impl ScriptState {
@@ -271,20 +278,33 @@ impl ScriptState {
     pub fn new(script: Script, links: usize, components: usize) -> ScriptState {
         ScriptState::with_counts(
             script,
-            vec![[Lane::default(); 2]; links],
-            vec![0; components],
+            Counts {
+                lanes: vec![[Lane::default(); 2]; links],
+                wakes: vec![0; components],
+                ahead: None,
+            },
         )
     }
 
     /// The state of `script` with the given counts.
-    pub fn with_counts(script: Script, lanes: Vec<[Lane; 2]>, wakes: Vec<u64>) -> ScriptState {
+    pub fn with_counts(script: Script, counts: Counts) -> ScriptState {
         ScriptState {
             delays: script.delays.iter().copied().collect(),
             shifts: script.shifts.iter().copied().collect(),
-            ranks: script.ranks(),
+            picks: script.picks.iter().cloned().collect(),
             script,
-            lanes,
-            wakes,
+            lanes: counts.lanes,
+            wakes: counts.wakes,
+            ahead: counts.ahead,
+        }
+    }
+
+    /// The counts, apart from the script.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            lanes: self.lanes.clone(),
+            wakes: self.wakes.clone(),
+            ahead: self.ahead,
         }
     }
 
@@ -298,9 +318,32 @@ impl ScriptState {
         self.shifts.get(&wake).copied().unwrap_or(0)
     }
 
-    /// The script rank of `id`, or 0 if no group order lists it.
-    pub fn rank(&self, id: EventId) -> u64 {
-        self.ranks.get(&id).copied().unwrap_or(0)
+    /// The event the script picks at a dispatch whose default event is `default`, if any:
+    /// the entry after the picks already taken ahead of it.
+    pub fn pick(&self, default: EventId) -> Option<EventId> {
+        let taken = match self.ahead {
+            Some((d, n)) if d == default => n,
+            _ => 0,
+        };
+        let events = self.picks.get(&default)?;
+        usize::try_from(taken)
+            .ok()
+            .and_then(|i| events.get(i))
+            .copied()
+    }
+
+    /// Records a dispatch whose default event was `default`: `picked` if the script's
+    /// pick was dispatched in its place.
+    pub fn dispatched(&mut self, default: EventId, picked: bool) {
+        self.ahead = if picked {
+            let taken = match self.ahead {
+                Some((d, n)) if d == default => n,
+                _ => 0,
+            };
+            Some((default, taken + 1))
+        } else {
+            None
+        };
     }
 
     /// Whether `id` was already scheduled, by the counts.
@@ -331,10 +374,9 @@ impl ScriptState {
             .shifts
             .iter()
             .map(|&((component, ordinal), _)| EventId::Wake { component, ordinal });
-        let ranked = self.script.groups.iter().flatten().copied();
         let mut out: Vec<EventId> = delays
             .chain(shifts)
-            .chain(ranked)
+            .chain(self.script.picked())
             .filter(|&id| !self.scheduled(id))
             .collect();
         out.sort();
@@ -342,7 +384,8 @@ impl ScriptState {
         out
     }
 
-    /// Appends the counts: every lane, then every wake count.
+    /// Appends the counts: every lane, then every wake count, then the picks taken ahead
+    /// of the current default event.
     pub fn encode_counts(&self, e: &mut Encoder) {
         e.len(self.lanes.len());
         for lanes in &self.lanes {
@@ -361,10 +404,18 @@ impl ScriptState {
         for &n in &self.wakes {
             e.u64(n);
         }
+        match self.ahead {
+            None => e.u8(0),
+            Some((default, n)) => {
+                e.u8(1);
+                default.encode(e);
+                e.u64(n);
+            }
+        }
     }
 
     /// Reads counts, unchecked.
-    pub fn decode_counts(d: &mut Decoder<'_>) -> Result<(Vec<[Lane; 2]>, Vec<u64>), DecodeError> {
+    pub fn decode_counts(d: &mut Decoder<'_>) -> Result<Counts, DecodeError> {
         let mut lanes = Vec::new();
         for _ in 0..d.len()? {
             let mut lane = || -> Result<Lane, DecodeError> {
@@ -387,16 +438,38 @@ impl ScriptState {
         for _ in 0..d.len()? {
             wakes.push(d.u64()?);
         }
-        Ok((lanes, wakes))
+        let ahead = match d.u8()? {
+            0 => None,
+            1 => Some((EventId::decode(d)?, d.u64()?)),
+            tag => {
+                return Err(DecodeError::InvalidTag {
+                    what: "option",
+                    tag,
+                });
+            }
+        };
+        Ok(Counts {
+            lanes,
+            wakes,
+            ahead,
+        })
     }
 
-    /// Whether `child` extends this state's script with entries none of whose events
-    /// were scheduled yet: what a fork needs (`docs/m6-design.md` §9.3).
-    pub fn admits_fork(&self, child: &Script) -> bool {
+    /// Whether `child` extends this state's script with entries that have not taken
+    /// effect yet: what a fork needs (`docs/m6-design.md` §9.3). A new delay or shift's
+    /// event must not be scheduled yet, and a new pick's default must not be dispatched
+    /// yet: unscheduled, or `pending`. Each of the parent's pick lists must begin the
+    /// child's list for its default.
+    pub fn admits_fork(&self, child: &Script, pending: impl Fn(EventId) -> bool) -> bool {
         let parent = &self.script;
         let delays_kept = parent.delays.iter().all(|d| child.delays.contains(d));
         let shifts_kept = parent.shifts.iter().all(|s| child.shifts.contains(s));
-        let groups_kept = parent.groups.iter().all(|g| child.groups.contains(g));
+        let picks_kept = parent.picks.iter().all(|(default, events)| {
+            child
+                .picks
+                .iter()
+                .any(|(d, e)| d == default && e.starts_with(events))
+        });
         let new_delays = child
             .delays
             .iter()
@@ -407,19 +480,18 @@ impl ScriptState {
             .iter()
             .filter(|s| !parent.shifts.contains(s))
             .map(|&((component, ordinal), _)| EventId::Wake { component, ordinal });
-        let new_ranked = child
-            .groups
+        let new_picks = child
+            .picks
             .iter()
-            .filter(|g| !parent.groups.contains(g))
-            .flatten()
-            .copied();
+            .filter(|(d, e)| !parent.picks.iter().any(|p| p.0 == *d && p.1 == *e))
+            .map(|(d, _)| *d);
         delays_kept
             && shifts_kept
-            && groups_kept
-            && !new_delays
-                .chain(new_shifts)
-                .chain(new_ranked)
-                .any(|id| self.scheduled(id))
+            && picks_kept
+            && !new_delays.chain(new_shifts).any(|id| self.scheduled(id))
+            && new_picks
+                .into_iter()
+                .all(|d| !self.scheduled(d) || pending(d))
     }
 }
 
@@ -439,15 +511,15 @@ mod tests {
         Script {
             delays: vec![((1, 0, 3), 2), ((4, 1, 0), 7)],
             shifts: vec![((1, 2), -40), ((2, 0), 3)],
-            groups: vec![
-                vec![wake(2, 5), msg(0, 1, 9)],
-                vec![msg(3, 0, 1), wake(0, 0), msg(3, 0, 0)],
+            picks: vec![
+                (msg(0, 1, 9), vec![wake(2, 5)]),
+                (wake(0, 0), vec![msg(3, 0, 1), msg(3, 0, 0)]),
             ],
         }
     }
 
     #[test]
-    fn a_script_round_trips_and_ranks_by_position() {
+    fn a_script_round_trips_and_picks_in_order() {
         for script in [Script::default(), sample()] {
             let mut e = Encoder::new();
             script.encode(&mut e);
@@ -456,10 +528,19 @@ mod tests {
             assert_eq!(Script::decode(&mut d), Ok(script.clone()));
             assert!(d.finish().is_ok());
         }
-        let state = ScriptState::new(sample(), 5, 3);
-        assert_eq!(state.rank(msg(0, 1, 9)), 1);
-        assert_eq!(state.rank(msg(3, 0, 0)), 2);
-        assert_eq!(state.rank(msg(9, 0, 0)), 0);
+        let mut state = ScriptState::new(sample(), 5, 3);
+        assert_eq!(state.pick(msg(0, 1, 9)), Some(wake(2, 5)));
+        assert_eq!(state.pick(wake(0, 0)), Some(msg(3, 0, 1)));
+        assert_eq!(state.pick(msg(3, 0, 1)), None);
+        state.dispatched(wake(0, 0), true);
+        assert_eq!(state.ahead, Some((wake(0, 0), 1)));
+        assert_eq!(state.pick(wake(0, 0)), Some(msg(3, 0, 0)));
+        // The count belongs to its default event.
+        assert_eq!(state.pick(msg(0, 1, 9)), Some(wake(2, 5)));
+        state.dispatched(wake(0, 0), true);
+        assert_eq!(state.pick(wake(0, 0)), None);
+        state.dispatched(wake(0, 0), false);
+        assert_eq!(state.ahead, None);
         assert_eq!(state.delay((4, 1, 0)), 7);
         assert_eq!(state.delay((4, 1, 1)), 0);
         assert_eq!(state.shift((1, 2)), -40);
@@ -493,16 +574,20 @@ mod tests {
             "a shift has no magnitude"
         );
         assert_eq!(
-            refused(sample(), |s| s.groups[0].truncate(1)),
-            "a group order lists fewer than two events"
+            refused(sample(), |s| s.picks.swap(0, 1)),
+            "the picks are not ascending"
         );
         assert_eq!(
-            refused(sample(), |s| s.groups[1][0] = wake(2, 5)),
-            "an event is listed twice"
+            refused(sample(), |s| s.picks[0].1.clear()),
+            "a default event has no pick"
         );
         assert_eq!(
-            refused(sample(), |s| s.groups.swap(0, 1)),
-            "the group orders are not ascending"
+            refused(sample(), |s| s.picks[1].1[0] = wake(2, 5)),
+            "a pick names an event twice"
+        );
+        assert_eq!(
+            refused(sample(), |s| s.picks[1].1[1] = wake(0, 0)),
+            "a pick names an event twice"
         );
     }
 
@@ -516,23 +601,39 @@ mod tests {
         assert!(!state.scheduled(msg(1, 1, 0)));
         assert!(state.scheduled(wake(2, 5)));
         assert!(!state.scheduled(msg(9, 0, 0)));
+        let none = |_| false;
         // The sample delays (1, 0, 3), already sent: no fork may add it.
-        assert!(!state.admits_fork(&sample()));
+        assert!(!state.admits_fork(&sample(), none));
         let later = Script {
             delays: vec![((1, 0, 4), 1)],
             shifts: vec![((2, 7), -1)],
-            groups: vec![vec![wake(2, 6), msg(1, 1, 0)]],
+            picks: vec![(wake(2, 6), vec![msg(1, 1, 0)])],
         };
         // A shift of wake (2, 5), already scheduled, is refused as the delay is.
-        assert!(!state.admits_fork(&Script {
-            shifts: vec![((2, 5), 1)],
+        assert!(!state.admits_fork(
+            &Script {
+                shifts: vec![((2, 5), 1)],
+                ..Script::default()
+            },
+            none
+        ));
+        assert!(state.admits_fork(&later, none));
+        // A pick ahead of wake (2, 5) needs it still pending.
+        let ahead_of_5 = Script {
+            picks: vec![(wake(2, 5), vec![msg(1, 1, 0)])],
             ..Script::default()
-        }));
-        assert!(state.admits_fork(&later));
-        let forked =
-            ScriptState::with_counts(later.clone(), state.lanes.clone(), state.wakes.clone());
-        // A fork keeps the parent's entries.
-        assert!(!forked.admits_fork(&Script::default()));
+        };
+        assert!(!state.admits_fork(&ahead_of_5, none));
+        assert!(state.admits_fork(&ahead_of_5, |id| id == wake(2, 5)));
+        let forked = ScriptState::with_counts(later.clone(), state.counts());
+        // A fork keeps the parent's entries, and extends a pick list only at its end.
+        assert!(!forked.admits_fork(&Script::default(), none));
+        let mut longer = later.clone();
+        longer.picks[0].1.push(wake(2, 8));
+        assert!(forked.admits_fork(&longer, none));
+        let mut before = later.clone();
+        before.picks[0].1.insert(0, wake(2, 8));
+        assert!(!forked.admits_fork(&before, none));
         assert_eq!(
             forked.unscheduled(),
             vec![msg(1, 0, 4), msg(1, 1, 0), wake(2, 6), wake(2, 7)]

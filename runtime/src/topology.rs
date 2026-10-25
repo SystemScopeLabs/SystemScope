@@ -340,9 +340,13 @@ fn check_script(
             "a shifted wake is of no declared component",
         ));
     }
-    if !script.groups.iter().flatten().all(|&id| named(id)) {
+    let picked = script
+        .picks
+        .iter()
+        .flat_map(|(default, events)| std::iter::once(default).chain(events));
+    if !picked.into_iter().all(|&id| named(id)) {
         return Err(ElaborationError::InvalidScript(
-            "a group order names an undeclared link end or component",
+            "a pick names an undeclared link end or component",
         ));
     }
     Ok(())

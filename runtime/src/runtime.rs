@@ -461,10 +461,50 @@ impl Runtime {
         }
     }
 
+    /// The sequence of the event the script picks at the next dispatch, whose default
+    /// event is `default`, if it is ready (`docs/m6-design.md` §7.2): pending in the
+    /// default's `(tick, phase)`, with no earlier message of its lane pending.
+    fn ready_pick(&self, default: EventId) -> Option<u64> {
+        let picked = self.script.as_ref()?.pick(default)?;
+        let next = self.scheduler.peek()?.key;
+        let mut found = None;
+        for event in self.scheduler.pending() {
+            let Some(id) = event.payload.id else { continue };
+            if id == picked {
+                let key = event.key;
+                found = (key.tick == next.tick && key.phase == next.phase).then_some(key.sequence);
+            } else if let (
+                EventId::Msg { link, dir, ordinal },
+                EventId::Msg {
+                    link: l,
+                    dir: d,
+                    ordinal: o,
+                },
+            ) = (picked, id)
+                && (l, d) == (link, dir)
+                && o < ordinal
+            {
+                return None;
+            }
+        }
+        found
+    }
+
     /// Pops and dispatches the next event, then shows it to the observers. Returns the
     /// event and whether any observer asked for a pause.
     fn dispatch(&mut self) -> Result<Option<(Dispatched, Control)>, RuntimeError> {
-        let event = match self.scheduler.pop() {
+        let default = self.scheduler.peek().and_then(|e| e.payload.id);
+        let pick = default.and_then(|d| self.ready_pick(d));
+        let popped = match pick {
+            Some(sequence) => self.scheduler.pop_sequence(sequence),
+            None => self.scheduler.pop(),
+        };
+        if let (Ok(Some(event)), Some(script), Some(default)) =
+            (&popped, self.script.as_mut(), default)
+        {
+            script.dispatched(default, pick == Some(event.key.sequence));
+        }
+        let event = match popped {
             Ok(Some(event)) => event,
             Ok(None) => return Ok(None),
             Err(e) => return Err(self.enter_fault(e)),
@@ -779,8 +819,7 @@ impl Ctx<'_> {
             tick = shifted(when, shift, phase, self.scheduler, self.clock, self.domains)?;
         }
         pending.id = Some(id);
-        self.scheduler
-            .schedule_ranked(tick, phase, script.rank(id), pending)?;
+        self.scheduler.schedule(tick, phase, pending)?;
         script.wakes[self.me.0 as usize] = next;
         Ok(())
     }
@@ -832,9 +871,8 @@ struct Send {
 }
 
 impl Send {
-    /// Schedules the message in a scripted session (`docs/m6-design.md` §7.2, §7.3): its
-    /// delay if the script lists one, the lane's FIFO clamp, and its rank raised behind
-    /// the lane's previous message in the same `(tick, phase)`.
+    /// Schedules the message in a scripted session (`docs/m6-design.md` §7.3): its delay
+    /// if the script lists one, and the lane's FIFO clamp.
     fn scripted(
         self,
         script: &mut ScriptState,
@@ -873,7 +911,6 @@ impl Send {
             dir,
             ordinal: lane.sent,
         };
-        let rank = script.rank(id).max(lane.fifo_rank(tick, phase));
         let next = lane.sent.checked_add(1).ok_or(SimError::SequenceOverflow)?;
         let pending = Pending {
             source: me,
@@ -881,7 +918,7 @@ impl Send {
             delivery,
             id: Some(id),
         };
-        let key = scheduler.schedule_ranked(tick, phase, rank, pending)?;
+        let key = scheduler.schedule(tick, phase, pending)?;
         script.lanes[link as usize][usize::from(dir)] = crate::script::Lane {
             sent: next,
             last: Some(key),

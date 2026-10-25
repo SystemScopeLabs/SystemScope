@@ -124,8 +124,11 @@ impl<T> Ord for Entry<T> {
 /// Orders, validates, and dispatches events.
 pub struct Scheduler<T> {
     config: SchedulerConfig,
-    /// Whether sequences are rank-major: in a tied or a scripted session.
+    /// Whether sequences are rank-major: in a tied session.
     rank_major: bool,
+    /// Whether a pick may dispatch a later event of the next `(tick, phase)` before its
+    /// least one: in a scripted session.
+    picking: bool,
     last_dispatched: Option<EventKey>,
     dispatched_in_phase: u64,
     next_sequence: u64,
@@ -138,6 +141,7 @@ impl<T> Scheduler<T> {
         Scheduler {
             config,
             rank_major: config.ties.is_some(),
+            picking: false,
             last_dispatched: None,
             dispatched_in_phase: 0,
             next_sequence: 0,
@@ -186,6 +190,25 @@ impl<T> Scheduler<T> {
         self.heap.peek().map(|Reverse(e)| e.0.key)
     }
 
+    /// The next event to dispatch, if any.
+    pub fn peek(&self) -> Option<&Event<T>> {
+        self.heap.peek().map(|Reverse(e)| &e.0)
+    }
+
+    /// Every pending event, in no particular order.
+    pub fn pending(&self) -> impl Iterator<Item = &Event<T>> {
+        self.heap.iter().map(|Reverse(e)| &e.0)
+    }
+
+    /// An empty scheduler for a scripted session (`docs/m6-design.md` §7.2): sequences
+    /// are counters, and [`Scheduler::pop_sequence`] may pick. `config.ties` is `None`.
+    pub fn scripted(config: SchedulerConfig) -> Scheduler<T> {
+        Scheduler {
+            picking: true,
+            ..Scheduler::new(config)
+        }
+    }
+
     /// Schedules `payload` at `(tick, phase)` and returns its key.
     ///
     /// Enforces S1 (not in the past), S2 (no earlier phase in the current tick),
@@ -193,28 +216,6 @@ impl<T> Scheduler<T> {
     /// In a tied session the sequence is rank-major (`docs/m5-design.md` §7.3), and S6
     /// applies to the counter below `2^COUNTER_BITS`. On error the scheduler is unchanged.
     pub fn schedule(&mut self, tick: Tick, phase: Phase, payload: T) -> Result<EventKey, SimError> {
-        self.schedule_ranked(tick, phase, 0, payload)
-    }
-
-    /// An empty scheduler for a scripted session (`docs/m6-design.md` §7.2): rank-major,
-    /// with the ranks its caller asks for instead of drawn ones. `config.ties` is `None`.
-    pub fn scripted(config: SchedulerConfig) -> Scheduler<T> {
-        Scheduler {
-            rank_major: true,
-            ..Scheduler::new(config)
-        }
-    }
-
-    /// [`Scheduler::schedule`] with a rank of at least `rank`, below `2^RANK_BITS`, in a
-    /// scripted session: the event's rank is `rank` raised to its floor. In any other
-    /// session `rank` is ignored.
-    pub fn schedule_ranked(
-        &mut self,
-        tick: Tick,
-        phase: Phase,
-        rank: u64,
-        payload: T,
-    ) -> Result<EventKey, SimError> {
         let (now, current) = (self.now(), self.phase());
         let violation = SimError::PhaseViolation {
             now,
@@ -236,21 +237,20 @@ impl<T> Scheduler<T> {
         }
         let counter = self.next_sequence;
         let next = counter.checked_add(1).ok_or(SimError::SequenceOverflow)?;
-        let sequence = if self.rank_major {
-            if next >> COUNTER_BITS != 0 {
-                return Err(SimError::SequenceOverflow);
+        let sequence = match self.config.ties.filter(|_| self.rank_major) {
+            Some(t) => {
+                if next >> COUNTER_BITS != 0 {
+                    return Err(SimError::SequenceOverflow);
+                }
+                let floor = match self.last_dispatched {
+                    Some(last) if last.tick == tick && last.phase == phase => {
+                        ties::rank(last.sequence)
+                    }
+                    _ => 0,
+                };
+                t.rank(counter, floor) << COUNTER_BITS | counter
             }
-            let floor = match self.last_dispatched {
-                Some(last) if last.tick == tick && last.phase == phase => ties::rank(last.sequence),
-                _ => 0,
-            };
-            let rank = match self.config.ties {
-                Some(t) => t.rank(counter, floor),
-                None => rank.max(floor),
-            };
-            rank << COUNTER_BITS | counter
-        } else {
-            counter
+            None => counter,
         };
         self.next_sequence = next;
         let key = EventKey {
@@ -270,6 +270,38 @@ impl<T> Scheduler<T> {
         let Some(next) = self.peek_key() else {
             return Ok(None);
         };
+        let count = self.admit(next)?;
+        let Reverse(Entry(event)) = self.heap.pop().expect("peeked entry exists");
+        self.last_dispatched = Some(event.key);
+        self.dispatched_in_phase = count;
+        Ok(Some(event))
+    }
+
+    /// [`Scheduler::pop`], but dispatching the pending event with `sequence` if it is in
+    /// the next event's `(tick, phase)`: a pick (`docs/m6-design.md` §7.2). Only a
+    /// scripted scheduler picks; otherwise, or if no such event is pending, it pops.
+    pub fn pop_sequence(&mut self, sequence: u64) -> Result<Option<Event<T>>, SimError> {
+        let Some(next) = self.peek_key() else {
+            return Ok(None);
+        };
+        let at = self.heap.iter().position(|Reverse(e)| {
+            let key = e.0.key;
+            key.sequence == sequence && key.tick == next.tick && key.phase == next.phase
+        });
+        let Some(at) = at.filter(|_| self.picking) else {
+            return self.pop();
+        };
+        let count = self.admit(next)?;
+        let mut entries = std::mem::take(&mut self.heap).into_vec();
+        let Reverse(Entry(event)) = entries.swap_remove(at);
+        self.heap = BinaryHeap::from(entries);
+        self.last_dispatched = Some(event.key);
+        self.dispatched_in_phase = count;
+        Ok(Some(event))
+    }
+
+    /// S5: the count of `next`'s dispatch in its `(tick, phase)`, if within the limit.
+    fn admit(&self, next: EventKey) -> Result<u64, SimError> {
         let same_phase = self
             .last_dispatched
             .is_some_and(|last| last.tick == next.tick && last.phase == next.phase);
@@ -285,10 +317,7 @@ impl<T> Scheduler<T> {
                 limit: self.config.max_events_per_phase,
             });
         }
-        let Reverse(Entry(event)) = self.heap.pop().expect("peeked entry exists");
-        self.last_dispatched = Some(event.key);
-        self.dispatched_in_phase = count;
-        Ok(Some(event))
+        Ok(count)
     }
 
     /// Captures the full state, with the queue sorted by key.
@@ -313,10 +342,11 @@ impl<T> Scheduler<T> {
         config: SchedulerConfig,
         snapshot: SchedulerSnapshot<T>,
     ) -> Result<Scheduler<T>, SchedulerRestoreError> {
-        Scheduler::restore_with(config, snapshot, config.ties.is_some())
+        Scheduler::restore_with(config, snapshot, false)
     }
 
-    /// [`Scheduler::restore`] for a scripted session: rank-major without ties.
+    /// [`Scheduler::restore`] for a scripted session: a pick may have left events of the
+    /// last dispatched event's `(tick, phase)` with smaller sequences pending.
     pub fn restore_scripted(
         config: SchedulerConfig,
         snapshot: SchedulerSnapshot<T>,
@@ -327,8 +357,9 @@ impl<T> Scheduler<T> {
     fn restore_with(
         config: SchedulerConfig,
         snapshot: SchedulerSnapshot<T>,
-        rank_major: bool,
+        picking: bool,
     ) -> Result<Scheduler<T>, SchedulerRestoreError> {
+        let rank_major = config.ties.is_some();
         let SchedulerSnapshot {
             last_dispatched,
             dispatched_in_phase,
@@ -376,7 +407,14 @@ impl<T> Scheduler<T> {
             if key.phase == Phase::Observe {
                 return Err(SchedulerRestoreError::ObservePhaseEvent(key));
             }
-            if last_dispatched.is_some_and(|last| key <= last) {
+            let before = |last: EventKey| {
+                if picking {
+                    (key.tick, key.phase) < (last.tick, last.phase) || key.sequence == last.sequence
+                } else {
+                    key <= last
+                }
+            };
+            if last_dispatched.is_some_and(before) {
                 return Err(SchedulerRestoreError::EventBeforeCursor(key));
             }
         }
@@ -385,6 +423,7 @@ impl<T> Scheduler<T> {
         Ok(Scheduler {
             config,
             rank_major,
+            picking,
             last_dispatched,
             dispatched_in_phase,
             next_sequence,
