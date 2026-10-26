@@ -11,6 +11,7 @@ use systemscope_contracts::snapshot::{RestoreError, SnapshotReader, SnapshotWrit
 use systemscope_contracts::time::{Duration, SimulationClock};
 use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
+use systemscope_runtime::script::Script;
 use systemscope_runtime::topology::TopologyBuilder;
 use systemscope_verify::backend::{Backend, Capabilities, Capability, Side};
 use systemscope_verify::case::{BackendId, BackendRunConfig, InputVariant, Scenario, StatePatch};
@@ -28,9 +29,11 @@ pub const MARK: u64 = 0x5EED_C0DE_5EED_C0DE;
 pub const LIMIT: u64 = 12;
 
 /// Counts wakes up to [`LIMIT`]: each wake traces `t.step`, every fourth `t.out`, every
-/// fifth `t.noise`, and the last `t.halt`. `bad_at` adds a record the projection refuses.
+/// fifth `t.noise`, and the last `t.halt`, with `base` added to every count it traces.
+/// `bad_at` adds a record the projection refuses.
 pub struct Counter {
     n: u64,
+    base: u64,
     halts: bool,
     bad_at: Option<u64>,
 }
@@ -49,12 +52,13 @@ impl Component for Counter {
     fn handle_event(&mut self, _: &Delivered, ctx: &mut dyn SimContext) -> Result<(), SimError> {
         self.n += 1;
         let n = self.n;
-        ctx.trace("t.step", vec![("n", Value::U64(n))]);
+        let traced = Value::U64(n + self.base);
+        ctx.trace("t.step", vec![("n", traced.clone())]);
         if n.is_multiple_of(4) {
-            ctx.trace("t.out", vec![("byte", Value::U64(n))]);
+            ctx.trace("t.out", vec![("byte", traced.clone())]);
         }
         if n.is_multiple_of(5) {
-            ctx.trace("t.noise", vec![("n", Value::U64(n))]);
+            ctx.trace("t.noise", vec![("n", traced)]);
         }
         if self.bad_at == Some(n) {
             ctx.trace("t.bad", Vec::new());
@@ -101,11 +105,61 @@ pub fn runtime(halts: bool, bad_at: Option<u64>) -> Runtime {
         "counter",
         Box::new(Counter {
             n: 0,
+            base: 0,
             halts,
             bad_at,
         }),
     );
     t.elaborate(SessionConfig::default()).unwrap()
+}
+
+/// The count [`pair`]'s second counter adds to every count it traces.
+pub const PAIR_BASE: u64 = 100;
+
+/// Two halting counters under `script`, the second tracing counts from [`PAIR_BASE`]:
+/// their wakes tie at every tick, so each tick's first dispatch offers a pick that swaps
+/// their records.
+pub fn pair(script: Script) -> Runtime {
+    let mut t = TopologyBuilder::new(SimulationClock::default());
+    for (name, base) in [("a", 0), ("b", PAIR_BASE)] {
+        let counter = Counter {
+            n: 0,
+            base,
+            halts: true,
+            bad_at: None,
+        };
+        t.add_component(name, Box::new(counter));
+    }
+    let config = SessionConfig {
+        script: Some(script),
+        ..SessionConfig::default()
+    };
+    t.elaborate(config).unwrap()
+}
+
+/// An adapter over [`pair`] under `script`, whose build names the script.
+pub fn pair_backend(script: Script) -> RuntimeBackend {
+    let id = BackendId {
+        build: format!("pair {script:?}"),
+        ..id()
+    };
+    RuntimeBackend::new(
+        id,
+        Box::new(move |_, input| match input {
+            InputVariant::None => Ok(pair(script.clone())),
+            _ => Err("the pair takes no input variant".to_owned()),
+        }),
+        Box::new(|| Box::new(CounterProjection::default())),
+    )
+}
+
+/// The scenario of [`pair`].
+pub fn pair_scenario() -> Scenario {
+    Scenario {
+        platform: "pair".to_owned(),
+        topology_hash: pair(Script::default()).topology_hash(),
+        ..scenario()
+    }
 }
 
 /// `t.step` is a `retire` (pc `4n`, `rd_value` absent when 3 divides `n`, `paddr` `n`),

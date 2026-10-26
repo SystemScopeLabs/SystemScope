@@ -2,13 +2,14 @@
 //! records yields the next observation (`docs/m4-design.md` §8.4, §9.2).
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 
 use systemscope_contracts::component::ComponentId;
 use systemscope_contracts::observe::{Control, Observer, WorldView};
 use systemscope_contracts::time::Tick;
 use systemscope_contracts::trace::{TraceRecord, Value};
+use systemscope_runtime::choice;
 use systemscope_runtime::runtime::Runtime;
 use systemscope_runtime::snapshot::component_states;
 
@@ -300,7 +301,95 @@ impl RuntimeBackend {
         if let Some(e) = s.shared.borrow().error.clone() {
             return Err(e);
         }
-        s.advance(build, patch.as_ref())
+        s.advance(build, patch.as_ref(), None)
+    }
+
+    /// [`RuntimeBackend::step_event`], recording the event in `rec` for the choice points
+    /// of a scripted run (`docs/m6-design.md` §8).
+    pub fn step_recorded(&mut self, rec: &mut choice::Recording) -> Result<(), EngineError> {
+        let RuntimeBackend {
+            session,
+            build,
+            patch,
+            ..
+        } = self;
+        let Some(s) = session.as_mut() else {
+            return Err(EngineError::Internal("step before start".to_owned()));
+        };
+        if let Some(e) = s.shared.borrow().error.clone() {
+            return Err(e);
+        }
+        s.advance(build, patch.as_ref(), Some(rec))
+    }
+
+    /// Whether the started side has reached the stop rule.
+    pub fn finished(&self) -> Option<bool> {
+        let s = self.session.as_ref()?;
+        Some(s.shared.borrow().projection.finished())
+    }
+
+    /// Starts this side from a checkpoint of its parent, a scripted side whose script
+    /// this side's extends (`docs/m6-design.md` §9.3). Unlike [`Backend::restore`], the
+    /// checkpoint is another execution's: the runtime's fork checks it is the parent's.
+    /// The streams continue at the checkpoint's covered counts, and this side's own
+    /// checkpoints are of its own execution.
+    pub fn fork(
+        &mut self,
+        scenario: &Scenario,
+        input: &InputVariant,
+        config: &BackendRunConfig,
+        profile: &ComparisonProfile,
+        from: &Checkpoint,
+    ) -> Result<(), EngineError> {
+        self.session = None;
+        let patch = self.input_patch(input)?;
+        let names: Vec<&str> = from.streams.iter().map(|m| m.stream.as_str()).collect();
+        if !names.iter().copied().eq(profile
+            .streams()
+            .map(|s| s.stream.as_str())
+            .collect::<BTreeSet<_>>())
+        {
+            return Err(EngineError::Internal(format!(
+                "the checkpoint marks {names:?}, not the compared streams"
+            )));
+        }
+        let shared = shared(&self.projection, profile, from.event_index, |name| {
+            let m = from.mark(name).expect("checked above");
+            (m.covered, m.prefix)
+        })?;
+        shared
+            .borrow_mut()
+            .projection
+            .load(&from.projection)
+            .map_err(|why| EngineError::Internal(format!("projection state: {why}")))?;
+        let mut runtime = (self.build)(scenario, input).map_err(EngineError::BackendFailed)?;
+        runtime
+            .fork(&from.state)
+            .map_err(|e| EngineError::BackendFailed(format!("fork: {e}")))?;
+        runtime.add_observer(Box::new(Tap(Rc::clone(&shared))));
+        self.session = Some(Session {
+            runtime,
+            shared,
+            scenario: scenario.clone(),
+            input: input.clone(),
+            execution: execution_id(scenario, input, &self.id),
+            budget: config.budget,
+            events: from.event_index,
+            pending: patch
+                .as_ref()
+                .is_some_and(|p| p.event_index > from.event_index),
+            patch,
+        });
+        Ok(())
+    }
+
+    /// The state patch of `input`, if this adapter can apply it.
+    fn input_patch(&self, input: &InputVariant) -> Result<Option<StatePatch>, EngineError> {
+        match input {
+            InputVariant::None | InputVariant::Media(_) => Ok(None),
+            InputVariant::State(p) if self.patch.is_some() => Ok(Some(p.clone())),
+            InputVariant::State(_) => Err(EngineError::Unsupported("state patch".to_owned())),
+        }
     }
 }
 
@@ -318,8 +407,14 @@ impl Session {
         Ok(())
     }
 
-    /// Dispatches one event, then applies the state patch if it is due.
-    fn advance(&mut self, build: &Build, patch: Option<&Patch>) -> Result<(), EngineError> {
+    /// Dispatches one event, recorded in `rec` if given, then applies the state patch if
+    /// it is due.
+    fn advance(
+        &mut self,
+        build: &Build,
+        patch: Option<&Patch>,
+        rec: Option<&mut choice::Recording>,
+    ) -> Result<(), EngineError> {
         if self.events >= self.budget {
             return Err(EngineError::BackendFailed(format!(
                 "the safety budget of {} events ran out before the stop rule",
@@ -327,12 +422,16 @@ impl Session {
             )));
         }
         self.shared.borrow_mut().event_index = self.events + 1;
-        match self.runtime.step() {
-            Ok(Some(_)) => {
+        let stepped = match rec {
+            Some(rec) => rec.step(&mut self.runtime).map(|s| s.is_some()),
+            None => self.runtime.step().map(|d| d.is_some()),
+        };
+        match stepped {
+            Ok(true) => {
                 self.events += 1;
                 self.patch_if_due(build, patch)
             }
-            Ok(None) => Err(EngineError::BackendFailed(format!(
+            Ok(false) => Err(EngineError::BackendFailed(format!(
                 "the event queue drained after {} events, before the stop rule",
                 self.events
             ))),
@@ -474,13 +573,7 @@ impl Backend for RuntimeBackend {
         profile: &ComparisonProfile,
     ) -> Result<(), EngineError> {
         self.session = None;
-        let patch = match input {
-            InputVariant::None | InputVariant::Media(_) => None,
-            InputVariant::State(p) if self.patch.is_some() => Some(p.clone()),
-            InputVariant::State(_) => {
-                return Err(EngineError::Unsupported("state patch".to_owned()));
-            }
-        };
+        let patch = self.input_patch(input)?;
         let shared = shared(&self.projection, profile, 0, |_| (0, [0; 32]))?;
         let mut runtime = (self.build)(scenario, input).map_err(EngineError::BackendFailed)?;
         runtime.add_observer(Box::new(Tap(Rc::clone(&shared))));
@@ -528,7 +621,7 @@ impl Backend for RuntimeBackend {
                     return Ok(None);
                 }
             }
-            s.advance(build, patch.as_ref())?;
+            s.advance(build, patch.as_ref(), None)?;
         }
     }
 
