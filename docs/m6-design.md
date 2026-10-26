@@ -238,6 +238,8 @@ Two picks never duplicate each other or their parent: each dispatches another ev
 
 A duplicate is reported and not extended. A vacuous entry (§7.1) never stops a run or its comparison: it is counted, and the run's other deviations take effect as usual.
 
+Every other child is extended whatever its comparison: the enumeration never reads a result. R7 needs it, since its witness diverges only with both of its shifts, and either alone agrees (§10). A run's choice points are those of the events it dispatches up to its stop rule. A run that faults the session or reaches its event limit ends there, and is extended only at the choice points of the events it dispatched.
+
 ### 9.3 Fork (D5)
 
 A child differs from its parent only from its new branch point. So the search restores the parent's latest checkpoint strictly before that branch point and attaches the child's script, instead of running from the start.
@@ -278,6 +280,15 @@ Measured again to the stop rule of `m5.outcome`, the CPU's trap taken in M or it
 Every single pick of each run was then judged against its unperturbed run under `m5.outcome` (`judge_every_single_pick`, about 21 minutes per run on 10 threads). No pick changes `outcome` on the unpatched run or on R1–R7. R8 diverges under 358 of its 5,371 picks, among them picks between events at components other than the bus, which change when its requests arrive. So at depth one, picks find only R8 (§19, risk 3).
 
 For one illustration, 1,000 scoped messages with `D = 2` make 2,000 depth-one scripts, about 50 minutes at M5's 1.5 seconds per full run, and depth two makes two million. Forks save the prefix, not the count. So CI exhausts small bounds on synthetic topologies, and searches `m5-reference` with a fixed budget unless its exhaustion is measured to fit.
+
+### 9.8 Placement (O3)
+
+The search is split by what each part depends on:
+- **The search tree, in `systemscope-runtime`** beside `runtime::choice`: a child's script from its parent's and a choice point, the classification of duplicates (§9.2), and fork (§9.3). It reads the scripted session and its recording only.
+- **The driver, in `systemscope-verify`** beside the M4 engine: the frontier, rounds, budgets, the checkpoint store and its eviction, resumption, coverage, and the report. It supplies the three things the tree does not know: where a run stops, from the profile's stop rule; the score of §11.2, from the run's trace; and each run's comparison. M7 reads the search's results from this library.
+- **The campaigns, in `systemscope-acceptance`** with M5's: the subjects, the races and their fixtures, and each campaign's bounds.
+
+Dependencies run one way, from acceptance to verification to the runtime. The oracle (§17) checks the tree on synthetic topologies with neither a profile nor a comparison.
 
 ## 10. Planted Order-Dependent Bugs (D9)
 
@@ -374,7 +385,7 @@ Picks, delays, shifts, and identities are runtime-internal, like C and B. Identi
 |---|---|---|
 | O1 | The numerical bounds `k`, `D`, scope, `E`, the asynchronous set, `B`, budgets, checkpoint interval and memory, and the references (A overrides) of each campaign, from the witnesses and the feasibility gate | M6.3 **(open)** |
 | O2 | The scripted session's snapshot format version and byte layout | M6.1: version 5 (§7.4) |
-| O3 | Where the search lives: a library module beside the M4 engine, since M7 will display its results, or the acceptance crate with M5's campaigns | M6.3 **(open)** |
+| O3 | Where the search lives: a library module beside the M4 engine, since M7 will display its results, or the acceptance crate with M5's campaigns | M6.3: split by dependency, the tree in the runtime, the driver in verification, and the campaigns in acceptance (§9.8) |
 | O4 | R8's device and transition | M6.2: the bus's request queueing (§10) |
 | O5 | The coverage score's weights (§11.2) | M6.5 **(open)** |
 | O6 | Whether full exhaustion of `m5-reference` within some bounds fits a weekly job | M6.3 **(open)** |
@@ -387,7 +398,7 @@ Picks, delays, shifts, and identities are runtime-internal, like C and B. Identi
 | **M6.0** | complete | Design freeze (this document) | docs |
 | **M6.1** | complete | Scripted schedules: identities and counts, scripted ranks and delays, admissibility, the `perturbation.bin` tags, the snapshot format (O2), fork; the empty script checked against the unscripted run; identity proven on every M0–M5 golden | code, tests |
 | **M6.2** | complete | Shifts (§7.6) in scripts, `perturbation.bin`, and snapshots; picks in place of M6.1's group orders (§7.2); choice points, the independent oracle on synthetic topologies, the feasibility gate (§9.7); R6–R8 fixtures and their witnesses (O4) | code, tests, fixtures |
-| **M6.3** | planned | The search: enumeration, classification, rounds, budgets, checkpoints, resumption; bounds frozen (O1, O3, O6) | code, CI |
+| **M6.3** | in progress | The search: enumeration, classification, rounds, budgets, checkpoints, resumption; bounds frozen (O1, O3, O6) | code, CI |
 | **M6.4** | planned | Campaigns: every race found within the CI bounds or budget, the unpatched scenario agreeing on every run, findings pinned, the comparison with M5's campaigns | code, CI |
 | **M6.5** | planned | Schedule coverage and coverage-guided order; the report blessed (O5) | code, CI |
 | **M6.6** | planned | Schedule minimization, evidence, and cross-OS reproducers | code, CI |
