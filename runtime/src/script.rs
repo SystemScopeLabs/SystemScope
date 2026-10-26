@@ -181,6 +181,11 @@ impl Script {
         Ok(script)
     }
 
+    /// Its deviations: each delay, each shift, and each picked event.
+    pub fn deviations(&self) -> usize {
+        self.delays.len() + self.shifts.len() + self.picks.iter().map(|p| p.1.len()).sum::<usize>()
+    }
+
     /// Checks what a script means without a topology: delays ascending and at least 1,
     /// shifts ascending and neither 0 nor `i64::MIN`, and picks ascending by default, each
     /// with an event, and no identity twice among them.
@@ -270,6 +275,8 @@ pub struct ScriptState {
     pub wakes: Vec<u64>,
     /// As [`Counts::ahead`].
     pub ahead: Option<(EventId, u64)>,
+    /// See [`ScriptState::duplicates`].
+    duplicates: Vec<EventId>,
 }
 
 impl ScriptState {
@@ -296,6 +303,7 @@ impl ScriptState {
             lanes: counts.lanes,
             wakes: counts.wakes,
             ahead: counts.ahead,
+            duplicates: Vec::new(),
         }
     }
 
@@ -306,6 +314,19 @@ impl ScriptState {
             wakes: self.wakes.clone(),
             ahead: self.ahead,
         }
+    }
+
+    /// The events whose delay or shift took effect as a duplicate (`docs/m6-design.md`
+    /// §9.2) since this state began, in order: the event got the tick the next smaller
+    /// `d` or `|s|` of the same sign gives, the parent's for 1. Not part of a snapshot,
+    /// so empty after a restore or a fork.
+    pub fn duplicates(&self) -> &[EventId] {
+        &self.duplicates
+    }
+
+    /// Notes that `id`'s delay or shift took effect as a duplicate.
+    pub(crate) fn duplicated(&mut self, id: EventId) {
+        self.duplicates.push(id);
     }
 
     /// The extra cycles of `message`, or 0.

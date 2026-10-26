@@ -815,12 +815,25 @@ impl Ctx<'_> {
         };
         let next = count.checked_add(1).ok_or(SimError::SequenceOverflow)?;
         let shift = script.shift((self.me.0, count));
+        let mut duplicate = false;
         if shift != 0 {
+            // The tick one cycle nearer gives, the unshifted one for 1. A shift's tick moves
+            // with `s` and stops at an earlier wake's floor, so it equals a nearer one's
+            // exactly when it equals this one's. The floor is not the parent's tick, so
+            // the parent's would not do.
+            let nearer = match shift - shift.signum() {
+                0 => tick,
+                s => shifted(when, s, phase, self.scheduler, self.clock, self.domains)?,
+            };
             tick = shifted(when, shift, phase, self.scheduler, self.clock, self.domains)?;
+            duplicate = tick == nearer;
         }
         pending.id = Some(id);
         self.scheduler.schedule(tick, phase, pending)?;
         script.wakes[self.me.0 as usize] = next;
+        if duplicate {
+            script.duplicated(id);
+        }
         Ok(())
     }
 }
@@ -891,6 +904,9 @@ impl Send {
         let (link, dir) = (peer.link, peer.dir);
         let lane = script.lanes[link as usize][usize::from(dir)];
         let extra = script.delay((link, dir, lane.sent));
+        // The undelayed tick, before the lane's clamp. A delay's tick, `max(t + d, last)`,
+        // grows with `d`, so it equals a smaller `d`'s exactly when it equals this one's.
+        let undelayed = tick;
         if extra > 0 {
             let Some(LinkLatency::Cycles { domain, k }) = peer.latency else {
                 unreachable!("elaboration admits delays only on Cycles links");
@@ -906,6 +922,7 @@ impl Send {
             )?;
         }
         let tick = tick.max(lane.last_tick());
+        let duplicate = extra > 0 && undelayed.max(lane.last_tick()) == tick;
         let id = EventId::Msg {
             link,
             dir,
@@ -923,6 +940,9 @@ impl Send {
             sent: next,
             last: Some(key),
         };
+        if duplicate {
+            script.duplicated(id);
+        }
         Ok(())
     }
 }

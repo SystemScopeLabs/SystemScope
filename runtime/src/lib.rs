@@ -9,6 +9,7 @@ pub mod rng;
 pub mod runtime;
 pub mod scheduler;
 pub mod script;
+pub mod search;
 pub mod snapshot;
 pub mod ties;
 pub mod topology;

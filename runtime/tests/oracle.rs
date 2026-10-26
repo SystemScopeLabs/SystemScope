@@ -1,7 +1,8 @@
 //! The oracle of `docs/m6-design.md` §17: on small synthetic topologies, an enumerator
-//! that shares no code with the choice-point finder or the scripted session lists every
-//! dispatch order within the bounds, and the scripts reached from the empty one through
-//! choice points, other than duplicates, must reach exactly those orders, each once.
+//! that shares no code with the choice-point finder, the search tree, or the scripted
+//! session lists every dispatch order within the bounds, and the scripts the search tree
+//! reaches from the empty one, other than duplicates, must reach exactly those orders,
+//! each once.
 //!
 //! The enumerator is a naive model of the scheduler, after `scheduler_props.rs`: a list
 //! of pending events, scanned at every dispatch. It tries every ready event at each pop,
@@ -20,10 +21,11 @@ use systemscope_contracts::protocol::mem::{self, MemMsg, TxnId};
 use systemscope_contracts::snapshot::{RestoreError, SnapshotReader, SnapshotWriter};
 use systemscope_contracts::time::{ClockDomainId, Frequency, Rounding, SimulationClock, Tick};
 use systemscope_contracts::topology::LinkLatency;
-use systemscope_runtime::choice::{BranchPoint, Choice, Recording, choice_points};
+use systemscope_runtime::choice::{BranchPoint, Recording};
 use systemscope_runtime::jitter::LinkSet;
 use systemscope_runtime::runtime::{Dispatched, Runtime, SessionConfig};
 use systemscope_runtime::script::{EventId, Script};
+use systemscope_runtime::search::{Bounds, children};
 use systemscope_runtime::topology::TopologyBuilder;
 
 /// Ticks per cycle of the only clock (1 GHz on the default 1 ps tick, at phase 0).
@@ -347,12 +349,15 @@ fn order_of(steps: &[Dispatched]) -> Order {
         .collect()
 }
 
-fn record(topology: &Topology, script: &Script) -> Recording {
+/// `script`'s run from init, and the events whose deviations the runtime classified
+/// duplicates.
+fn record(topology: &Topology, script: &Script) -> (Recording, Vec<EventId>) {
     let mut rt = platform(topology, script);
     rt.init().unwrap();
     let mut rec = Recording::after_init(&rt);
     while rec.step(&mut rt).unwrap().is_some() {}
-    rec
+    let duplicates = rt.script().unwrap().duplicates().to_vec();
+    (rec, duplicates)
 }
 
 /// The tick `id` is dispatched at in `rec`.
@@ -368,77 +373,29 @@ struct Reached {
     order: Order,
 }
 
-/// Every script reachable from `script`, with at most `k` deviations more, by one
-/// deviation at a time at a choice point after `last` (§9.2): duplicates are counted in
-/// `duplicates` and not extended.
+/// The sign of `child`'s deviation of `id`: +1 for a delay.
+fn sign(child: &Script, id: EventId) -> i64 {
+    child
+        .shifts
+        .iter()
+        .find(|&&((component, ordinal), _)| EventId::Wake { component, ordinal } == id)
+        .map_or(1, |s| s.1.signum())
+}
+
+/// Every script the search tree (`runtime::search`) reaches from `script`: duplicates
+/// are counted in `duplicates` and not extended. The runtime's classification of each
+/// duplicate is checked against one by effective tick, from the children's full runs.
 fn search(
     topology: &Topology,
-    bounds: (u64, i64),
+    bounds: &Bounds,
     script: Script,
     last: Option<BranchPoint>,
-    k: usize,
     out: &mut Vec<Reached>,
     duplicates: &mut usize,
 ) {
-    let (d_max, e_max) = bounds;
-    let rec = record(topology, &script);
-    let mut children: Vec<(Script, BranchPoint)> = Vec::new();
-    if k > 0 {
-        let scope = LinkSet::of(&topology.scope);
-        for point in choice_points(&rec, scope, &topology.asynchronous, last).unwrap() {
-            match point.choice {
-                Choice::Pick { default, ready } => {
-                    for event in ready {
-                        let mut child = script.clone();
-                        match child.picks.iter_mut().find(|(d, _)| *d == default) {
-                            Some((_, events)) => events.push(event),
-                            None => {
-                                child.picks.push((default, vec![event]));
-                                child.picks.sort();
-                            }
-                        }
-                        children.push((child, point.branch));
-                    }
-                }
-                Choice::Delay(id) => {
-                    let (link, dir, ordinal) = id;
-                    let msg = EventId::Msg { link, dir, ordinal };
-                    let mut seen = vec![tick_of(&rec, msg)];
-                    for d in 1..=d_max {
-                        let mut child = script.clone();
-                        child.delays.push((id, d));
-                        child.delays.sort();
-                        let tick = tick_of(&record(topology, &child), msg);
-                        if seen.contains(&tick) {
-                            *duplicates += 1;
-                        } else {
-                            seen.push(tick);
-                            children.push((child, point.branch));
-                        }
-                    }
-                }
-                Choice::Shift(id) => {
-                    let (component, ordinal) = id;
-                    let wake = EventId::Wake { component, ordinal };
-                    for sign in [-1, 1] {
-                        let mut seen = vec![tick_of(&rec, wake)];
-                        for m in 1..=e_max {
-                            let mut child = script.clone();
-                            child.shifts.push((id, sign * m));
-                            child.shifts.sort();
-                            let tick = tick_of(&record(topology, &child), wake);
-                            if seen.contains(&tick) {
-                                *duplicates += 1;
-                            } else {
-                                seen.push(tick);
-                                children.push((child, point.branch));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let (rec, flagged) = record(topology, &script);
+    assert_eq!(flagged, [], "{script:?}");
+    let children = children(&script, last, &rec, bounds).unwrap();
     out.push(Reached {
         order: order_of(
             &rec.steps
@@ -449,16 +406,34 @@ fn search(
         script,
         last,
     });
-    for (child, branch) in children {
-        search(
-            topology,
-            bounds,
-            child,
-            Some(branch),
-            k - 1,
-            out,
-            duplicates,
-        );
+    // The effective ticks seen for each deviated event and sign, from its parent's on.
+    let mut seen: BTreeMap<(EventId, i64), Vec<u64>> = BTreeMap::new();
+    for child in children {
+        let id = child.branch.id;
+        let (child_rec, flagged) = record(topology, &child.script);
+        let duplicate = child.branch.kind == 1 && {
+            let ticks = seen
+                .entry((id, sign(&child.script, id)))
+                .or_insert_with(|| vec![tick_of(&rec, id)]);
+            let tick = tick_of(&child_rec, id);
+            let again = ticks.contains(&tick);
+            ticks.push(tick);
+            again
+        };
+        let expected: &[EventId] = if duplicate { &[id] } else { &[] };
+        assert_eq!(flagged, expected, "{:?}", child.script);
+        if duplicate {
+            *duplicates += 1;
+        } else {
+            search(
+                topology,
+                bounds,
+                child.script,
+                Some(child.branch),
+                out,
+                duplicates,
+            );
+        }
     }
 }
 
@@ -698,12 +673,18 @@ fn enumerate(topology: &Topology, bounds: (u64, i64), k: usize) -> BTreeSet<Orde
 fn check(topology: &Topology, bounds: (u64, i64), k: usize) -> (usize, usize) {
     let mut reached = Vec::new();
     let mut duplicates = 0;
+    let tree = Bounds {
+        deviations: k,
+        delay: bounds.0,
+        shift: bounds.1.unsigned_abs(),
+        scope: LinkSet::of(&topology.scope),
+        asynchronous: topology.asynchronous.clone(),
+    };
     search(
         topology,
-        bounds,
+        &tree,
         Script::default(),
         None,
-        k,
         &mut reached,
         &mut duplicates,
     );
