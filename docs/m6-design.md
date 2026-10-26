@@ -292,6 +292,20 @@ The search is split by what each part depends on:
 
 Dependencies run one way, from acceptance to verification to the runtime. The oracle (§17) checks the tree on synthetic topologies with neither a profile nor a comparison.
 
+### 9.9 The Driver
+
+The driver (`verification::search`) runs the tree of §9.2 against a target: a scenario and input variant, the run configuration, the plan, the reference recording each run is compared with, an adapter for any script, and a guide (§11.2).
+
+- **State.** The search state is the frontier, the explored scripts with their classes, the merged coverage, the round count, and the runs left. Checkpoints and the observations kept for forks are a store beside it, which never changes a result: a child without a checkpoint is run from its initial state.
+- **Frontier order.** An entry is a child: its script, its branch point, its depth, its parent's place among the explored scripts, its place among its siblings, and its candidates. Entries are ranked by depth, then by score, highest first, then by branch point, then by parent, then by sibling: a total order. The score is recomputed each round from the merged coverage.
+- **Rounds.** A round takes the first `B` entries, or all if fewer, and runs them on any number of threads. Each run produces its class, its observations, its children, its checkpoints, and the coverage it adds. The results are merged in frontier order: the class is appended to the explored scripts, the coverage merged, and the children entered. A round always completes. The search ends after a round when the frontier is empty, exhausting its bounds, or no runs are left, with the overshoot reported.
+- **A run.** The root runs from its initial state; a child is forked from its parent's latest stored checkpoint before its branch point, with the parent's observations before that checkpoint put in front of its own (§9.4), or run from its initial state. It steps to its stop rule, recording its choice points, its new deviation's duplicate classification, its trace for the guide, and a checkpoint at the first event boundary at or after each multiple of the checkpoint interval. A duplicate ends at its classification. A run that reaches the event limit is truncated, and one that faults fails, each ending there.
+- **Classes.** A duplicate is neither compared nor extended. Every other run is compared with the reference under the plan: agreed, diverged at an ordinal, or failed, as M5 judges (m5-design §14). Its children are those of §9.2, with the events pending at the stop only if it reached the stop.
+- **Store.** After each round the store keeps, for each frontier entry, its parent's latest checkpoint before its branch point and drops every other. Over the memory budget, in encoded checkpoint bytes, it evicts the checkpoint farthest from the nearest branch point it serves, ties by run and event index. A parent's observations are kept while a stored checkpoint of it remains.
+- **Guide.** A guide reads each run's events with their trace records, from the run's start, and reports the coverage items each event covers and the candidate items each dispatched event offers. A guide's reader saves its state into each checkpoint and resumes from it, as a projection does (m4-design §8.4). A child's candidates are those of the events its new deviation moves: the delayed message, the shifted wake, or the picked event and the default. Its score is the weight of its candidates not yet covered. A forked run reports only the coverage of its events after the checkpoint, the rest being its parent's, already merged.
+
+So the explored scripts, their classes, and the order and coverage are the same for any thread count, any store budget and checkpoint interval, and with or without forks. The tests check this on synthetic topologies against the tree (§17).
+
 ## 10. Planted Order-Dependent Bugs (D9)
 
 M5's races have wide windows: each diverged for 14 to 32 of 32 seeds under A or B (m5-design §17). M6 adds races with narrow windows. Each is an input variant of `m5-reference` with its correct counterpart, found by instruction pattern as in M5.

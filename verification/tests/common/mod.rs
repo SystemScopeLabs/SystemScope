@@ -8,7 +8,9 @@ use systemscope_contracts::error::SimError;
 use systemscope_contracts::event::{Phase, ScheduleWhen};
 use systemscope_contracts::observe::StateView;
 use systemscope_contracts::snapshot::{RestoreError, SnapshotReader, SnapshotWriter};
-use systemscope_contracts::time::{Duration, SimulationClock};
+use systemscope_contracts::time::{
+    ClockDomainId, Duration, Frequency, Rounding, SimulationClock, Tick,
+};
 use systemscope_contracts::trace::{TraceRecord, Value};
 use systemscope_runtime::runtime::{Runtime, SessionConfig};
 use systemscope_runtime::script::Script;
@@ -30,12 +32,27 @@ pub const LIMIT: u64 = 12;
 
 /// Counts wakes up to [`LIMIT`]: each wake traces `t.step`, every fourth `t.out`, every
 /// fifth `t.noise`, and the last `t.halt`, with `base` added to every count it traces.
-/// `bad_at` adds a record the projection refuses.
+/// `bad_at` adds a record the projection refuses. With `cycles`, it wakes after a cycle
+/// of clock domain 0 instead of a nanosecond.
 pub struct Counter {
     n: u64,
     base: u64,
+    cycles: bool,
     halts: bool,
     bad_at: Option<u64>,
+}
+
+impl Counter {
+    fn next(&self) -> ScheduleWhen {
+        if self.cycles {
+            ScheduleWhen::Cycles {
+                domain: ClockDomainId(0),
+                k: 1,
+            }
+        } else {
+            ScheduleWhen::After(Duration::from_ns(1))
+        }
+    }
 }
 
 impl Component for Counter {
@@ -47,7 +64,7 @@ impl Component for Counter {
     }
     fn init(&mut self, ctx: &mut dyn InitContext) -> Result<(), SimError> {
         ctx.trace("t.init", Vec::new());
-        ctx.wake_self(ScheduleWhen::After(Duration::from_ns(1)), Phase::Commit, 0)
+        ctx.wake_self(self.next(), Phase::Commit, 0)
     }
     fn handle_event(&mut self, _: &Delivered, ctx: &mut dyn SimContext) -> Result<(), SimError> {
         self.n += 1;
@@ -68,7 +85,7 @@ impl Component for Counter {
             return Ok(());
         }
         if n < LIMIT {
-            ctx.wake_self(ScheduleWhen::After(Duration::from_ns(1)), Phase::Commit, 0)?;
+            ctx.wake_self(self.next(), Phase::Commit, 0)?;
         }
         Ok(())
     }
@@ -106,6 +123,7 @@ pub fn runtime(halts: bool, bad_at: Option<u64>) -> Runtime {
         Box::new(Counter {
             n: 0,
             base: 0,
+            cycles: false,
             halts,
             bad_at,
         }),
@@ -116,15 +134,22 @@ pub fn runtime(halts: bool, bad_at: Option<u64>) -> Runtime {
 /// The count [`pair`]'s second counter adds to every count it traces.
 pub const PAIR_BASE: u64 = 100;
 
-/// Two halting counters under `script`, the second tracing counts from [`PAIR_BASE`]:
-/// their wakes tie at every tick, so each tick's first dispatch offers a pick that swaps
-/// their records.
+/// Two halting counters under `script`, the second tracing counts from [`PAIR_BASE`],
+/// each waking every cycle of a 1 GHz clock: their wakes tie at every tick, so each
+/// tick's first dispatch offers a pick that swaps their records.
 pub fn pair(script: Script) -> Runtime {
     let mut t = TopologyBuilder::new(SimulationClock::default());
+    t.add_clock(
+        Frequency::from_hz(1_000_000_000).unwrap(),
+        Tick::ZERO,
+        Rounding::Floor,
+    )
+    .unwrap();
     for (name, base) in [("a", 0), ("b", PAIR_BASE)] {
         let counter = Counter {
             n: 0,
             base,
+            cycles: true,
             halts: true,
             bad_at: None,
         };
