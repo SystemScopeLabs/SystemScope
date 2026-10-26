@@ -6,6 +6,10 @@
 //! the counters of the events scheduled while it was dispatched. Which events were
 //! pending at a dispatch follows from the counters, and identities give the FIFO lanes.
 //!
+//! A run that stops at a stop rule keeps the events still pending there: an event of the
+//! last `(tick, phase)` may be ready at its dispatches, and a pending event's delay or
+//! shift branches before the stop.
+//!
 //! A recording may begin at a checkpoint of the search (§9.4), which is never inside a
 //! `(tick, phase)`: its choice points after a branch point past the checkpoint are those
 //! of the whole run, since every event scheduled before the checkpoint has a branch
@@ -14,6 +18,8 @@
 use std::ops::Range;
 
 use crate::jitter::{LinkSet, MessageId};
+use systemscope_contracts::event::EventKey;
+
 use crate::runtime::{Dispatched, Runtime, RuntimeError};
 use crate::script::{EventId, WakeId};
 
@@ -36,6 +42,9 @@ pub struct Recording {
     pub init: Range<u64>,
     /// Every dispatched event since, in order.
     pub steps: Vec<Step>,
+    /// The events pending when the run stopped, in dispatch order: empty until
+    /// [`Recording::stop`].
+    pub pending: Vec<(EventKey, EventId)>,
 }
 
 impl Recording {
@@ -45,6 +54,7 @@ impl Recording {
             start: 0,
             init: 0..rt.next_sequence(),
             steps: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -55,6 +65,7 @@ impl Recording {
             start: events,
             init: 0..rt.next_sequence(),
             steps: Vec::new(),
+            pending: Vec::new(),
         }
     }
 
@@ -69,6 +80,17 @@ impl Recording {
             scheduled: before..rt.next_sequence(),
         });
         Ok(self.steps.last())
+    }
+
+    /// Ends the recording where `rt`'s run reached its stop rule, keeping the events
+    /// still pending there.
+    pub fn stop(&mut self, rt: &Runtime) -> Result<(), ChoiceError> {
+        self.pending = rt
+            .queued()
+            .into_iter()
+            .map(|(key, id)| id.map(|id| (key, id)).ok_or(ChoiceError::Unscripted))
+            .collect::<Result<_, _>>()?;
+        Ok(())
     }
 
     /// The branch position of the event with `counter`: `start + i + 1` if step `i`
@@ -136,8 +158,8 @@ pub enum ChoiceError {
 
 /// The recording's choice points (`docs/m6-design.md` §8.1) whose branch points are
 /// after `after`, in branch-point order: its dispatches with a ready event other than the
-/// default, its messages on the links of `scope`, and the wakes of the components in
-/// `asynchronous`.
+/// default, and its messages on the links of `scope` and wakes of the components in
+/// `asynchronous`, dispatched or pending at the stop.
 pub fn choice_points(
     rec: &Recording,
     scope: LinkSet,
@@ -145,25 +167,34 @@ pub fn choice_points(
     after: Option<BranchPoint>,
 ) -> Result<Vec<ChoicePoint>, ChoiceError> {
     let steps = &rec.steps;
-    let ids: Vec<EventId> = steps
+    // The dispatched events, then the pending ones: their keys and identities.
+    let mut events: Vec<(EventKey, EventId)> = steps
         .iter()
-        .map(|s| s.event.id.ok_or(ChoiceError::Unscripted))
-        .collect::<Result<_, _>>()?;
+        .map(|s| s.event.id.map(|id| (s.event.key, id)))
+        .collect::<Option<_>>()
+        .ok_or(ChoiceError::Unscripted)?;
+    events.extend_from_slice(&rec.pending);
+    let ids: Vec<EventId> = events.iter().map(|e| e.1).collect();
     // A scripted session's sequences are its counters.
-    let counter = |i: usize| steps[i].event.key.sequence;
+    let counter = |i: usize| events[i].0.sequence;
     let mut out = Vec::new();
     let mut start = 0;
-    while start < steps.len() {
-        let key = steps[start].event.key;
+    while start < events.len() {
+        let key = events[start].0;
         let end = start
-            + steps[start..]
+            + events[start..]
                 .iter()
-                .take_while(|s| s.event.key.tick == key.tick && s.event.key.phase == key.phase)
+                .take_while(|e| e.0.tick == key.tick && e.0.phase == key.phase)
                 .count();
         for i in start..end {
+            let Some(step) = steps.get(i) else {
+                // Pending at the stop: no dispatch, but a delay or a shift.
+                push_deviation(rec, &mut out, ids[i], counter(i), scope, asynchronous);
+                continue;
+            };
             // Pending at step i: the group's events from i on scheduled before it ran.
             let pending: Vec<usize> = (i..end)
-                .filter(|&j| counter(j) < steps[i].scheduled.start)
+                .filter(|&j| counter(j) < step.scheduled.start)
                 .collect();
             let default = *pending
                 .iter()
@@ -188,23 +219,7 @@ pub fn choice_points(
                     },
                 });
             }
-            let choice = match ids[i] {
-                EventId::Msg { link, dir, ordinal } if scope.contains(link) => {
-                    Choice::Delay((link, dir, ordinal))
-                }
-                EventId::Wake { component, ordinal } if asynchronous.contains(&component) => {
-                    Choice::Shift((component, ordinal))
-                }
-                _ => continue,
-            };
-            out.push(ChoicePoint {
-                branch: BranchPoint {
-                    at: rec.scheduled_at(counter(i)),
-                    kind: 1,
-                    id: ids[i],
-                },
-                choice,
-            });
+            push_deviation(rec, &mut out, ids[i], counter(i), scope, asynchronous);
         }
         start = end;
     }
@@ -212,6 +227,35 @@ pub fn choice_points(
     out.sort_by_key(|c| c.branch);
     out.retain(|c| after.is_none_or(|a| c.branch > a));
     Ok(out)
+}
+
+/// Adds the delay of `id`, a message on a link of `scope`, or the shift of `id`, a wake of
+/// a component in `asynchronous`, with the event's `counter`.
+fn push_deviation(
+    rec: &Recording,
+    out: &mut Vec<ChoicePoint>,
+    id: EventId,
+    counter: u64,
+    scope: LinkSet,
+    asynchronous: &[u32],
+) {
+    let choice = match id {
+        EventId::Msg { link, dir, ordinal } if scope.contains(link) => {
+            Choice::Delay((link, dir, ordinal))
+        }
+        EventId::Wake { component, ordinal } if asynchronous.contains(&component) => {
+            Choice::Shift((component, ordinal))
+        }
+        _ => return,
+    };
+    out.push(ChoicePoint {
+        branch: BranchPoint {
+            at: rec.scheduled_at(counter),
+            kind: 1,
+            id,
+        },
+        choice,
+    });
 }
 
 /// Whether `id` is a message with an earlier message of its lane among `others`.

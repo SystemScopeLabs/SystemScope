@@ -40,7 +40,8 @@ fn scripted(script: Script) -> Perturbation {
 /// `subject`'s run under the empty script, recorded from `init` to the stop rule, the
 /// events of the whole run, and the choice points of the recording with the delay scope
 /// and the timer's wakes. The stop rule is the CPU's trap taken in M or its instruction
-/// limit (`m5.outcome`): the event whose handler emits either is the last one compared.
+/// limit (`m5.outcome`): the event whose handler emits either is the last one compared,
+/// and the recording keeps the events pending after it.
 fn recorded(f: &Fixture, subject: Subject) -> (Recording, usize, Vec<ChoicePoint>) {
     let mut disk = f.disk.clone();
     let defect = subject.0.and_then(Race::defect);
@@ -68,7 +69,14 @@ fn recorded(f: &Fixture, subject: Subject) -> (Recording, usize, Vec<ChoicePoint
             (r.kind == TRAP_KIND || r.kind == HALT_KIND).then_some(dispatched)
         })
         .unwrap_or_else(|| panic!("{}: no stop", subject.name()));
-    rec.steps.truncate(stop);
+    // Again up to the stop, for the events pending there.
+    let mut rt = m5ref::build(&f.firmware, &disk, &config).unwrap();
+    rt.init().unwrap();
+    let mut rec = Recording::after_init(&rt);
+    while rec.steps.len() < stop {
+        rec.step(&mut rt).unwrap().unwrap();
+    }
+    rec.stop(&rt).unwrap();
     let points = choice_points(&rec, LinkSet::of(&JITTER_LINKS), &[m5ref::TIMER.0], None).unwrap();
     (rec, run, points)
 }
@@ -276,6 +284,9 @@ fn measure_every_races_choice_points() {
         let mut tick = std::collections::BTreeMap::new();
         for s in steps {
             tick.insert(s.event.id.unwrap(), s.event.key.tick.0);
+        }
+        for &(key, id) in &rec.pending {
+            tick.insert(id, key.tick.0);
         }
         // Per kind: points, events after them.
         let mut kinds = [(0u64, 0u64); 3];

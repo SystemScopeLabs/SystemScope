@@ -296,6 +296,18 @@ impl Runtime {
         self.scheduler.peek_key()
     }
 
+    /// Every pending event's key and identity (`docs/m6-design.md` §7.1), the latter in
+    /// a scripted session only, in dispatch order.
+    pub fn queued(&self) -> Vec<(EventKey, Option<EventId>)> {
+        let mut queued: Vec<_> = self
+            .scheduler
+            .pending()
+            .map(|e| (e.key, e.payload.id))
+            .collect();
+        queued.sort_by_key(|q| q.0);
+        queued
+    }
+
     /// Key of the last dispatched event, if any.
     pub fn last_dispatched(&self) -> Option<EventKey> {
         self.scheduler.last_dispatched()

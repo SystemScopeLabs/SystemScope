@@ -562,6 +562,24 @@ fn a_recording_yields_its_picks_and_scoped_messages_in_branch_order() {
     );
 }
 
+#[test]
+fn the_queue_lists_every_pending_event_in_dispatch_order() {
+    let script = Some(Script::default());
+    let whole = run(script.clone());
+    let mut rt = platform(script);
+    rt.init().unwrap();
+    for k in 0..=whole.len() {
+        let queued = rt.queued();
+        let mut rest: Vec<_> = whole[k..].iter().map(|d| (d.key, d.id)).collect();
+        // Every pending event runs later in the run, in key order.
+        rest.retain(|r| queued.contains(r));
+        assert_eq!(rest, queued, "{k}");
+        if k < whole.len() {
+            rt.step().unwrap().unwrap();
+        }
+    }
+}
+
 /// The group at cycle 2 of every script reachable from `script` by picks after `after`,
 /// with the script that reached it.
 fn pick_orders(script: Script, after: Option<BranchPoint>, out: &mut Vec<(Vec<EventId>, Script)>) {

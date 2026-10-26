@@ -21,7 +21,7 @@ use systemscope_contracts::protocol::mem::{self, MemMsg, TxnId};
 use systemscope_contracts::snapshot::{RestoreError, SnapshotReader, SnapshotWriter};
 use systemscope_contracts::time::{ClockDomainId, Frequency, Rounding, SimulationClock, Tick};
 use systemscope_contracts::topology::LinkLatency;
-use systemscope_runtime::choice::{BranchPoint, Recording};
+use systemscope_runtime::choice::{BranchPoint, ChoicePoint, Recording, choice_points};
 use systemscope_runtime::jitter::LinkSet;
 use systemscope_runtime::runtime::{Dispatched, Runtime, SessionConfig};
 use systemscope_runtime::script::{EventId, Script};
@@ -744,6 +744,34 @@ fn check(topology: &Topology, bounds: (u64, i64), k: usize) -> (usize, usize, us
             }
             if k < before {
                 rt.step().unwrap().unwrap();
+            }
+        }
+    }
+    // A run stopped after `m` events, with the events pending there, has the whole run's
+    // choice points that branch at or before the stop.
+    for r in &reached {
+        let (whole, _) = record(topology, &r.script);
+        let points = choice_points(&whole, tree.scope, &tree.asynchronous, None).unwrap();
+        let mut rt = platform(topology, &r.script);
+        rt.init().unwrap();
+        let mut rec = Recording::after_init(&rt);
+        loop {
+            let mut stopped = rec.clone();
+            stopped.stop(&rt).unwrap();
+            let m = rec.steps.len() as u64;
+            let before: Vec<ChoicePoint> = points
+                .iter()
+                .filter(|p| p.branch.at <= m)
+                .cloned()
+                .collect();
+            assert_eq!(
+                choice_points(&stopped, tree.scope, &tree.asynchronous, None).unwrap(),
+                before,
+                "{:?} {m}",
+                r.script
+            );
+            if rec.step(&mut rt).unwrap().is_none() {
+                break;
             }
         }
     }
