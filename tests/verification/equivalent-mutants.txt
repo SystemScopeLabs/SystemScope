@@ -126,7 +126,7 @@ components/os/src/procop.rs:861:33: replace match guard self.m5.is_some() with f
 
 # Equivalent for any input: the rank is shifted above the counter's COUNTER_BITS, and the
 # counter is below 2^COUNTER_BITS, so `|` and `^` are the same.
-runtime/src/scheduler.rs:251:34: replace | with ^ in Scheduler<T>::schedule_ranked
+runtime/src/scheduler.rs:251:56: replace | with ^ in Scheduler<T>::schedule
 
 # m5-reference schedules no event into the (tick, phase) being dispatched under tie order,
 # so every rank's floor is 0. With floor 0, `- floor` and `+ floor` draw the same rank,
@@ -135,7 +135,7 @@ runtime/src/scheduler.rs:251:34: replace | with ^ in Scheduler<T>::schedule_rank
 # tests (runtime/tests/scheduler_props.rs).
 runtime/src/ties.rs:48:22: replace % with + in Ties::rank
 runtime/src/ties.rs:48:42: replace - with + in Ties::rank
-runtime/src/scheduler.rs:244:31: replace match guard last.tick == tick && last.phase == phase with false in Scheduler<T>::schedule_ranked
+runtime/src/scheduler.rs:246:35: replace match guard last.tick == tick && last.phase == phase with false in Scheduler<T>::schedule
 
 # m5-reference idles in S-mode and takes only interrupts there: no trap while idle is an
 # exception or comes from U-mode, so `&&` and `||` agree.
