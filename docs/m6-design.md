@@ -273,6 +273,10 @@ Before any bound is frozen, M6.2 measures on `m5-reference` and its races:
 
 Measured at M6.2 on the reference run under the empty script (`tests/acceptance/tests/m6_feasibility.rs`): 1,332,749 events in about 0.6 seconds of a release build, a final snapshot of 146,862 bytes, and 86,626 scoped sends, 81,090 of them on link 4 (bus to `blk`'s registers). 5,371 dispatches offer a pick, each exactly one other event. No `(tick, phase)` holds both a self-wake of a component and a message to it. Every scoped message runs at a later tick than its lane's previous message, so no lane clamps one: its base tick is the tick it runs at, and each delay of `1..=D` puts it at a distinct later tick, `D` effective delays per message and no duplicate. The timer's 99 wakes are each scheduled 80,000 cycles ahead, so no shift with `E` below that is raised, and each of `±1..=E` gives a distinct tick. The branch points lie early in the run. The events after a delay's branch point are 1,161,410 on average (172 to 1,332,575), 1.006 × 10^11 over all 86,626; after a pick's, 1,132,857 on average, 6.08 × 10^9 over all 5,371; after a timer wake's, 4.97 × 10^7 over all 99. At about 2.26 million events per second, running every depth-one child to its end takes about 12.4 hours of one core per unit of `D`, 45 minutes for the picks, and 22 seconds per shift value. Snapshots taken every 100,000 events are 19,079 to 147,424 bytes. The run's trace is 1,594,037 records, 242,690,394 bytes in its canonical encoding.
 
+Measured again to the stop rule of `m5.outcome`, the CPU's trap taken in M or its instruction limit, on the unpatched run and on every race (`measure_every_races_choice_points`). The unpatched run and R6–R8 stop at event 1,332,748, one before the queue drains; R1 at 1,335,307, R2 at 1,328,788, R3 at 1,355,393, and R5, whose kernel never shuts down, at its instruction limit at event 1,473,536. Each run offers 5,371 to 5,410 picks, each of exactly one other event, 86,626 to 86,722 scoped sends, none clamped by its lane, and 98 to 111 timer wakes, each scheduled 80,000 cycles ahead. R5's are the largest sums of events after branch points: 1.128 × 10^11 over its delays, 6.84 × 10^9 over its picks, and 6.45 × 10^7 over its timer wakes.
+
+Every single pick of each run was then judged against its unperturbed run under `m5.outcome` (`judge_every_single_pick`, about 21 minutes per run on 10 threads). No pick changes `outcome` on the unpatched run or on R1–R7. R8 diverges under 358 of its 5,371 picks, among them picks between events at components other than the bus, which change when its requests arrive. So at depth one, picks find only R8 (§19, risk 3).
+
 For one illustration, 1,000 scoped messages with `D = 2` make 2,000 depth-one scripts, about 50 minutes at M5's 1.5 seconds per full run, and depth two makes two million. Forks save the prefix, not the count. So CI exhausts small bounds on synthetic topologies, and searches `m5-reference` with a fixed budget unless its exhaustion is measured to fit.
 
 ## 10. Planted Order-Dependent Bugs (D9)
@@ -361,7 +365,7 @@ Picks, delays, shifts, and identities are runtime-internal, like C and B. Identi
 
 1. **State explosion.** With no pruning and no convergence cut, scripts grow with the run and with `k`. A pick decides one dispatch, so reversing a group of `n` events takes `n - 1` deviations. Mitigation: the feasibility gate (§9.7), forks, budgets with a reported frontier, coverage-guided order, and exhaustion required only where it is measured to fit.
 2. **A narrow race outside the bounds.** R6 and R7 need a preemption at one instruction. Delays cannot place one: the window sits at a fixed phase after the expiry that dispatched the process (§23.4). Mitigation: shifts of the timer's expiries (§7.6), which reach every instruction boundary of a slice when `E` is at least the slice, and witnesses before the bounds are frozen. The cost is a domain of `2E` shifts per expiry, searched with a budget on `m5-reference` (§9.7).
-3. **Tie choices stay ineffective.** If no pick changes a result on the reference workloads, picks find only R8. Mitigation: M6.2 measures it, and R8 checks that a pick can find a race at all.
+3. **Tie choices stay ineffective.** If no pick changes a result on the reference workloads, picks find only R8. Mitigation: M6.2 measures it, and R8 checks that a pick can find a race at all. Measured: at depth one, no pick changes `outcome` on the unpatched run or on R1–R7, and 358 picks find R8 (§9.7).
 4. **Bookkeeping costs time.** A scripted session counts every link and wake and keeps identities. Mitigation: only scripted sessions do, and M6.1 measures the cost.
 
 ## 20. Open Questions
@@ -380,9 +384,9 @@ Picks, delays, shifts, and identities are runtime-internal, like C and B. Identi
 
 | Step | Status | Scope | Changes |
 |---|---|---|---|
-| **M6.0** | in progress | Design freeze (this document) | docs |
-| **M6.1** | planned | Scripted schedules: identities and counts, scripted ranks and delays, admissibility, the `perturbation.bin` tags, the snapshot format (O2), fork; the empty script checked against the unscripted run; identity proven on every M0–M5 golden | code, tests |
-| **M6.2** | planned | Shifts (§7.6) in scripts, `perturbation.bin`, and snapshots; picks in place of M6.1's group orders (§7.2); choice points, the independent oracle on synthetic topologies, the feasibility gate (§9.7); R6–R8 fixtures and their witnesses (O4) | code, tests, fixtures |
+| **M6.0** | complete | Design freeze (this document) | docs |
+| **M6.1** | complete | Scripted schedules: identities and counts, scripted ranks and delays, admissibility, the `perturbation.bin` tags, the snapshot format (O2), fork; the empty script checked against the unscripted run; identity proven on every M0–M5 golden | code, tests |
+| **M6.2** | complete | Shifts (§7.6) in scripts, `perturbation.bin`, and snapshots; picks in place of M6.1's group orders (§7.2); choice points, the independent oracle on synthetic topologies, the feasibility gate (§9.7); R6–R8 fixtures and their witnesses (O4) | code, tests, fixtures |
 | **M6.3** | planned | The search: enumeration, classification, rounds, budgets, checkpoints, resumption; bounds frozen (O1, O3, O6) | code, CI |
 | **M6.4** | planned | Campaigns: every race found within the CI bounds or budget, the unpatched scenario agreeing on every run, findings pinned, the comparison with M5's campaigns | code, CI |
 | **M6.5** | planned | Schedule coverage and coverage-guided order; the report blessed (O5) | code, CI |

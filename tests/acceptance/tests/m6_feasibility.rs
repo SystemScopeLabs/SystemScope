@@ -1,15 +1,77 @@
 //! M6.2's feasibility gate on `m5-reference` (`docs/m6-design.md` §9.7): the choice
-//! points of the reference run under the empty script. A measurement, run on demand with
-//! `--ignored`; its numbers are recorded in the design.
+//! points of the reference run and of every race under the empty script, and every
+//! single pick of each judged against its unperturbed run (§19, risk 3). Measurements,
+//! run on demand with `--ignored`; their numbers are recorded in the design.
 
 use systemscope_acceptance::m5::Fixture;
-use systemscope_acceptance::m5::verify::{JITTER_LINKS, platform_config};
-use systemscope_runtime::choice::{Choice, Recording, choice_points};
+use systemscope_acceptance::m5::campaign::{Judged, Subject, judge, record, the_plan};
+use systemscope_acceptance::m5::races::Race;
+use systemscope_acceptance::m5::verify::{JITTER_LINKS, defective_config, platform_config};
+use systemscope_contracts::trace::DISPATCH_KIND;
+use systemscope_runtime::choice::{Choice, ChoicePoint, Recording, choice_points};
 use systemscope_runtime::jitter::LinkSet;
 use systemscope_runtime::script::{EventId, Script};
+use systemscope_rv32::m5::EVENT_BUDGET;
 use systemscope_rv32::m5ref;
 use systemscope_rv32::perturb::Perturbation;
 use systemscope_rv32::workspace_root;
+use systemscope_rv32i::cpu::{HALT_KIND, TRAP_KIND};
+use systemscope_verify::case::InputVariant;
+
+/// The unpatched scenario and every race.
+const SUBJECTS: [Subject; 8] = [
+    Subject(None),
+    Subject(Some(Race::R1)),
+    Subject(Some(Race::R2)),
+    Subject(Some(Race::R3)),
+    Subject(Some(Race::R5)),
+    Subject(Some(Race::R6)),
+    Subject(Some(Race::R7)),
+    Subject(Some(Race::R8)),
+];
+
+fn scripted(script: Script) -> Perturbation {
+    Perturbation {
+        script: Some(script),
+        ..Perturbation::default()
+    }
+}
+
+/// `subject`'s run under the empty script, recorded from `init` to the stop rule, the
+/// events of the whole run, and the choice points of the recording with the delay scope
+/// and the timer's wakes. The stop rule is the CPU's trap taken in M or its instruction
+/// limit (`m5.outcome`): the event whose handler emits either is the last one compared.
+fn recorded(f: &Fixture, subject: Subject) -> (Recording, usize, Vec<ChoicePoint>) {
+    let mut disk = f.disk.clone();
+    let defect = subject.0.and_then(Race::defect);
+    if let Some(race) = subject.0
+        && let InputVariant::Media(p) = race.variant(&f.disk).unwrap()
+    {
+        p.apply(&mut disk).unwrap();
+    }
+    let config = defective_config(&scripted(Script::default()), defect);
+    let mut rt = m5ref::build(&f.firmware, &disk, &config).unwrap();
+    rt.start_trace().unwrap();
+    rt.init().unwrap();
+    let mut rec = Recording::after_init(&rt);
+    while (rec.steps.len() as u64) < EVENT_BUDGET && rec.step(&mut rt).unwrap().is_some() {}
+    assert_eq!(rt.fault(), None, "{}", subject.name());
+    let run = rec.steps.len();
+    let mut dispatched = 0;
+    let stop = rt
+        .take_trace()
+        .unwrap()
+        .records
+        .iter()
+        .find_map(|r| {
+            dispatched += usize::from(r.kind == DISPATCH_KIND);
+            (r.kind == TRAP_KIND || r.kind == HALT_KIND).then_some(dispatched)
+        })
+        .unwrap_or_else(|| panic!("{}: no stop", subject.name()));
+    rec.steps.truncate(stop);
+    let points = choice_points(&rec, LinkSet::of(&JITTER_LINKS), &[m5ref::TIMER.0], None).unwrap();
+    (rec, run, points)
+}
 
 #[test]
 #[ignore = "a measurement, minutes long"]
@@ -118,7 +180,7 @@ fn measure_the_reference_choice_points() {
     // A scoped message is clamped by its lane if it runs at the tick of the lane's
     // previous message; otherwise its base tick is its tick, and every delay moves it to
     // a distinct later tick.
-    let mut tick = std::collections::HashMap::new();
+    let mut tick = std::collections::BTreeMap::new();
     for s in steps {
         tick.insert(s.event.id.unwrap(), s.event.key.tick);
     }
@@ -201,4 +263,137 @@ fn measure_the_reference_choice_points() {
         trace.records.len(),
         trace.canonical_bytes().len()
     );
+}
+
+#[test]
+#[ignore = "a measurement, minutes long"]
+fn measure_every_races_choice_points() {
+    let f = Fixture::read(&workspace_root()).unwrap_or_else(|e| panic!("{e}"));
+    for subject in SUBJECTS {
+        let (rec, run, points) = recorded(&f, subject);
+        let steps = &rec.steps;
+        let total = steps.len() as u64;
+        let mut tick = std::collections::BTreeMap::new();
+        for s in steps {
+            tick.insert(s.event.id.unwrap(), s.event.key.tick.0);
+        }
+        // Per kind: points, events after them.
+        let mut kinds = [(0u64, 0u64); 3];
+        let (mut clamped, mut offered, mut ahead) = (
+            0u64,
+            std::collections::BTreeMap::<usize, u64>::new(),
+            std::collections::BTreeMap::<u64, u64>::new(),
+        );
+        for p in &points {
+            let kind = match &p.choice {
+                Choice::Pick { ready, .. } => {
+                    *offered.entry(ready.len()).or_default() += 1;
+                    0
+                }
+                &Choice::Delay((link, dir, ordinal)) => {
+                    let me = tick[&EventId::Msg { link, dir, ordinal }];
+                    let previous = ordinal.checked_sub(1).map(|o| {
+                        tick[&EventId::Msg {
+                            link,
+                            dir,
+                            ordinal: o,
+                        }]
+                    });
+                    if previous == Some(me) {
+                        clamped += 1;
+                    }
+                    1
+                }
+                &Choice::Shift((component, ordinal)) => {
+                    let at = p.branch.at;
+                    let from = if at == 0 {
+                        0
+                    } else {
+                        steps[at as usize - 1].event.key.tick.0
+                    };
+                    let edge = from.div_ceil(1000) * 1000;
+                    *ahead
+                        .entry((tick[&EventId::Wake { component, ordinal }] - edge) / 1000)
+                        .or_default() += 1;
+                    2
+                }
+            };
+            kinds[kind].0 += 1;
+            kinds[kind].1 += total - p.branch.at;
+        }
+        println!(
+            "{}: events {total} of {run}; picks {:?} by count {offered:?}; delays {:?}, {clamped} clamped; \
+             shifts {:?}, by cycles ahead {ahead:?} (points, events after)",
+            subject.name(),
+            kinds[0],
+            kinds[1],
+            kinds[2],
+        );
+    }
+}
+
+#[test]
+#[ignore = "a measurement, hours of one core"]
+#[expect(
+    clippy::disallowed_types,
+    clippy::disallowed_methods,
+    reason = "a measurement reads wall-clock time around each subject, outside its runs"
+)]
+fn judge_every_single_pick() {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    let f = Fixture::read(&workspace_root()).unwrap_or_else(|e| panic!("{e}"));
+    let plan = the_plan(&f);
+    let threads =
+        std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(2).max(1));
+    for subject in SUBJECTS {
+        let started = Instant::now();
+        let (_, _, points) = recorded(&f, subject);
+        let picks: Vec<(EventId, EventId)> = points
+            .iter()
+            .filter_map(|p| match &p.choice {
+                Choice::Pick { default, ready } => Some(ready.iter().map(move |&r| (*default, r))),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let base = record(&f, subject, &Perturbation::default());
+        assert_eq!(base.failure, None, "{}", subject.name());
+        let next = AtomicUsize::new(0);
+        let found = Mutex::new(Vec::new());
+        std::thread::scope(|sc| {
+            for _ in 0..threads {
+                sc.spawn(|| {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(&(default, r)) = picks.get(i) else {
+                            break;
+                        };
+                        let script = Script {
+                            picks: vec![(default, vec![r])],
+                            ..Script::default()
+                        };
+                        let judged = judge(&plan, &base, &record(&f, subject, &scripted(script)));
+                        if judged != Judged::Agree {
+                            found.lock().unwrap().push((i, default, r, judged));
+                        }
+                    }
+                });
+            }
+        });
+        let mut found = found.into_inner().unwrap();
+        found.sort_by_key(|x| x.0);
+        println!(
+            "{}: {} picks, {} not agreeing, in {:?}",
+            subject.name(),
+            picks.len(),
+            found.len(),
+            started.elapsed()
+        );
+        for (i, default, r, judged) in found.iter().take(5) {
+            println!("  pick {i}: {r:?} ahead of {default:?}: {judged:?}");
+        }
+    }
 }
