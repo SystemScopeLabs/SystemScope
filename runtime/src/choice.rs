@@ -5,6 +5,11 @@
 //! A [`Recording`] is a run as the choice points need it: every dispatched event, with
 //! the counters of the events scheduled while it was dispatched. Which events were
 //! pending at a dispatch follows from the counters, and identities give the FIFO lanes.
+//!
+//! A recording may begin at a checkpoint of the search (§9.4), which is never inside a
+//! `(tick, phase)`: its choice points after a branch point past the checkpoint are those
+//! of the whole run, since every event scheduled before the checkpoint has a branch
+//! position at or before it.
 
 use std::ops::Range;
 
@@ -21,12 +26,15 @@ pub struct Step {
     pub scheduled: Range<u64>,
 }
 
-/// A scripted run, recorded from `init` on.
+/// A scripted run, recorded from `init` or from a checkpoint on.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recording {
-    /// The counters of the events `init` scheduled.
+    /// The events dispatched before the recording began: 0 from `init`.
+    pub start: u64,
+    /// The counters of the events scheduled before the first recorded step: by `init`,
+    /// and from a checkpoint, by everything before it.
     pub init: Range<u64>,
-    /// Every dispatched event, in order.
+    /// Every dispatched event since, in order.
     pub steps: Vec<Step>,
 }
 
@@ -34,6 +42,17 @@ impl Recording {
     /// Starts a recording of `rt`, which must have just run `init`.
     pub fn after_init(rt: &Runtime) -> Recording {
         Recording {
+            start: 0,
+            init: 0..rt.next_sequence(),
+            steps: Vec::new(),
+        }
+    }
+
+    /// Starts a recording of `rt`, which must have just been restored or forked from a
+    /// checkpoint after `events` events, taken where no `(tick, phase)` began before it.
+    pub fn after_checkpoint(rt: &Runtime, events: u64) -> Recording {
+        Recording {
+            start: events,
             init: 0..rt.next_sequence(),
             steps: Vec::new(),
         }
@@ -52,11 +71,12 @@ impl Recording {
         Ok(self.steps.last())
     }
 
-    /// The branch position of the event with `counter`: 0 if `init` scheduled it, and
-    /// `i + 1` if step `i` did. A checkpoint after `k` events precedes it if `k` is less.
+    /// The branch position of the event with `counter`: `start + i + 1` if step `i`
+    /// scheduled it, and `start` if it was scheduled before the recording began, at that
+    /// position or before. A checkpoint after `k` events precedes it if `k` is less.
     pub fn scheduled_at(&self, counter: u64) -> u64 {
         if self.init.contains(&counter) {
-            return 0;
+            return self.start;
         }
         let i = self.steps.partition_point(|s| s.scheduled.end <= counter);
         debug_assert!(
@@ -64,7 +84,7 @@ impl Recording {
                 .get(i)
                 .is_some_and(|s| s.scheduled.contains(&counter))
         );
-        i as u64 + 1
+        self.start + i as u64 + 1
     }
 }
 
@@ -72,8 +92,8 @@ impl Recording {
 /// order: by position, then a pick before a delay or a shift, then by identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BranchPoint {
-    /// The branch position: [`Recording::scheduled_at`] for a scheduling, and `i + 1`
-    /// for the dispatch of step `i`.
+    /// The branch position: [`Recording::scheduled_at`] for a scheduling, and
+    /// `start + i + 1` for the dispatch of step `i`.
     pub at: u64,
     /// 0 for a pick, 1 for a delay or a shift.
     pub kind: u8,
@@ -158,7 +178,7 @@ pub fn choice_points(
                 ready.sort();
                 out.push(ChoicePoint {
                     branch: BranchPoint {
-                        at: i as u64 + 1,
+                        at: rec.start + i as u64 + 1,
                         kind: 0,
                         id: ids[default],
                     },

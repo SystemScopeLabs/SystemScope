@@ -670,7 +670,7 @@ fn enumerate(topology: &Topology, bounds: (u64, i64), k: usize) -> BTreeSet<Orde
 // ---------------------------------------------------------------------------------------
 // The checks.
 
-fn check(topology: &Topology, bounds: (u64, i64), k: usize) -> (usize, usize) {
+fn check(topology: &Topology, bounds: (u64, i64), k: usize) -> (usize, usize, usize) {
     let mut reached = Vec::new();
     let mut duplicates = 0;
     let tree = Bounds {
@@ -704,7 +704,9 @@ fn check(topology: &Topology, bounds: (u64, i64), k: usize) -> (usize, usize) {
         "missing {missing:?}, extra {extra:?}"
     );
     // A fork of each script's parent just before its last branch point runs on as the
-    // script does from init.
+    // script does from init. So does one from each of the parent's tick boundaries
+    // before it (§9.4), and recorded from there it yields the script's children.
+    let mut boundaries = 0;
     for r in &reached {
         let Some(last) = r.last else { continue };
         let Some(before) = last.at.checked_sub(1) else {
@@ -714,23 +716,38 @@ fn check(topology: &Topology, bounds: (u64, i64), k: usize) -> (usize, usize) {
             .iter()
             .find(|p| p.script != r.script && is_parent(&p.script, &r.script))
             .unwrap();
+        let (whole, _) = record(topology, &r.script);
+        let expected = children(&r.script, r.last, &whole, &tree).unwrap();
         let mut rt = platform(topology, &parent.script);
         rt.init().unwrap();
-        for _ in 0..before {
-            rt.step().unwrap().unwrap();
+        for k in 0..=before {
+            let index = usize::try_from(k).unwrap();
+            let boundary = k == 0 || parent.order[index - 1].0 < parent.order[index].0;
+            if k == before || boundary {
+                let snapshot = rt.snapshot().unwrap();
+                let mut forked = platform(topology, &r.script);
+                forked.fork(&snapshot).unwrap();
+                let mut part = Recording::after_checkpoint(&forked, k);
+                while part.step(&mut forked).unwrap().is_some() {}
+                assert_eq!(part.scheduled_at(part.init.end - 1), k);
+                let rest: Vec<Dispatched> = part.steps.iter().map(|s| s.event.clone()).collect();
+                assert_eq!(order_of(&rest), r.order[index..], "{:?} {k}", r.script);
+                if boundary {
+                    assert_eq!(
+                        children(&r.script, r.last, &part, &tree).unwrap(),
+                        expected,
+                        "{:?} {k}",
+                        r.script
+                    );
+                    boundaries += usize::from(k > 0);
+                }
+            }
+            if k < before {
+                rt.step().unwrap().unwrap();
+            }
         }
-        let snapshot = rt.snapshot().unwrap();
-        let mut forked = platform(topology, &r.script);
-        forked.fork(&snapshot).unwrap();
-        let rest: Vec<Dispatched> = std::iter::from_fn(|| forked.step().unwrap()).collect();
-        assert_eq!(
-            order_of(&rest),
-            r.order[usize::try_from(before).unwrap()..],
-            "{:?}",
-            r.script
-        );
     }
-    (reached.len(), duplicates)
+    (reached.len(), duplicates, boundaries)
 }
 
 /// Whether `child` is `parent` with one deviation more.
@@ -753,18 +770,19 @@ fn is_parent(parent: &Script, child: &Script) -> bool {
 
 #[test]
 fn the_diamond_reaches_every_order_once() {
-    // Scripts reached and duplicates, a committed expectation for mutants (§17).
-    assert_eq!(check(&diamond(), (2, 0), 3), (34, 12));
+    // Scripts reached, duplicates, and forks from a tick boundary after init that a
+    // branch point follows: a committed expectation for mutants (§17).
+    assert_eq!(check(&diamond(), (2, 0), 3), (34, 12, 0));
 }
 
 #[test]
 fn the_conditional_wake_reaches_every_order_once() {
     // B, A, W and B, W, A, each with W's message delayed 0, 1, or 2 cycles; and A, B.
-    assert_eq!(check(&conditional(), (2, 0), 3), (7, 0));
+    assert_eq!(check(&conditional(), (2, 0), 3), (7, 0, 0));
 }
 
 #[test]
 fn a_periodic_wake_preempting_a_worker_reaches_every_order_once() {
     // Shifts of 3 cycles earlier go no earlier than 2 do: duplicates.
-    assert_eq!(check(&preemption(), (1, 3), 2), (169, 20));
+    assert_eq!(check(&preemption(), (1, 3), 2), (169, 20, 500));
 }
