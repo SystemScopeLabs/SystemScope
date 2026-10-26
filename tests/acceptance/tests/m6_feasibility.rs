@@ -30,6 +30,21 @@ fn measure_the_reference_choice_points() {
     let mut rec = Recording::after_init(&rt);
     while rec.step(&mut rt).unwrap().is_some() {}
     let ran = started.elapsed();
+    // Snapshot sizes through the run, from a second run so the timing above is clean.
+    let mut rt2 = m5ref::build(&f.firmware, &f.disk, &config).unwrap();
+    rt2.init().unwrap();
+    let mut sizes = Vec::new();
+    let mut n = 0u64;
+    loop {
+        if n.is_multiple_of(100_000) {
+            sizes.push(rt2.snapshot().unwrap().len());
+        }
+        if rt2.step().unwrap().is_none() {
+            break;
+        }
+        n += 1;
+    }
+    drop(rt2);
     let snapshot = rt.snapshot().unwrap().len();
     let points = choice_points(&rec, LinkSet::of(&JITTER_LINKS), &[], None).unwrap();
     let mut delays = [0u64; 14];
@@ -99,4 +114,91 @@ fn measure_the_reference_choice_points() {
         i = j;
     }
     println!("groups with a self-wake and a message to one component {both:?}");
+
+    // A scoped message is clamped by its lane if it runs at the tick of the lane's
+    // previous message; otherwise its base tick is its tick, and every delay moves it to
+    // a distinct later tick.
+    let mut tick = std::collections::HashMap::new();
+    for s in steps {
+        tick.insert(s.event.id.unwrap(), s.event.key.tick);
+    }
+    let mut clamped = [0u64; 14];
+    let mut unclamped = [0u64; 14];
+    for p in &points {
+        if let Choice::Delay((link, dir, ordinal)) = p.choice {
+            let me = tick[&EventId::Msg { link, dir, ordinal }];
+            let previous = ordinal.checked_sub(1).map(|o| {
+                tick[&EventId::Msg {
+                    link,
+                    dir,
+                    ordinal: o,
+                }]
+            });
+            if previous == Some(me) {
+                clamped[link as usize] += 1;
+            } else {
+                unclamped[link as usize] += 1;
+            }
+        }
+    }
+    println!("scoped messages clamped by link {clamped:?}");
+    println!("scoped messages unclamped by link {unclamped:?}");
+
+    // The timer's wakes: how many cycles ahead each was scheduled, from the cycle edge
+    // at or after its scheduling tick. A shift of -s with s above that is raised.
+    let shifts = choice_points(&rec, LinkSet::of(&[]), &[m5ref::TIMER.0], None).unwrap();
+    let mut ahead = std::collections::BTreeMap::<u64, u64>::new();
+    let (mut wakes, mut wake_after) = (0u64, 0u64);
+    for p in &shifts {
+        if let Choice::Shift((component, ordinal)) = p.choice {
+            let at = p.branch.at;
+            wakes += 1;
+            wake_after += steps.len() as u64 - at;
+            let from = if at == 0 {
+                0
+            } else {
+                steps[at as usize - 1].event.key.tick.0
+            };
+            let edge = from.div_ceil(1000) * 1000;
+            *ahead
+                .entry((tick[&EventId::Wake { component, ordinal }].0 - edge) / 1000)
+                .or_default() += 1;
+        }
+    }
+    println!("timer wakes {wakes}, events after: sum {wake_after}, by cycles ahead {ahead:?}");
+
+    // Events after each branch point, by kind.
+    let total = steps.len() as u64;
+    for kind in 0..2u8 {
+        let after: Vec<u64> = points
+            .iter()
+            .filter(|p| p.branch.kind == kind)
+            .map(|p| total - p.branch.at)
+            .collect();
+        let sum: u64 = after.iter().sum();
+        println!(
+            "kind {kind}: {} points, events after: sum {sum}, mean {}, min {:?}, max {:?}",
+            after.len(),
+            sum.checked_div(after.len() as u64).unwrap_or(0),
+            after.iter().min(),
+            after.iter().max(),
+        );
+    }
+    println!(
+        "snapshot bytes every 100000 events: min {:?}, max {:?}, all {sizes:?}",
+        sizes.iter().min(),
+        sizes.iter().max()
+    );
+
+    // The full trace of the run.
+    let mut rt = m5ref::build(&f.firmware, &f.disk, &config).unwrap();
+    rt.start_trace().unwrap();
+    rt.init().unwrap();
+    while rt.step().unwrap().is_some() {}
+    let trace = rt.take_trace().unwrap();
+    println!(
+        "trace: {} records, {} canonical bytes",
+        trace.records.len(),
+        trace.canonical_bytes().len()
+    );
 }
