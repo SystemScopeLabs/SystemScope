@@ -25,7 +25,7 @@ The nightly random-seed tests are ignored by default. To reproduce a nightly fai
 M0_SEED=0x1234 cargo nextest run -p systemscope-acceptance --run-ignored only
 ```
 
-The same night's seed is also `M1_PROGEN_SEED` (the generated RV32I program), `M4_FAULT_SEED` (the register fault the M4 locator and the naive oracle must find alike), and `M5_CAMPAIGN_SEED` (the perturbation seed under which the unpatched `m5-reference` scenario must agree). `.github/workflows/nightly.yml` prints all four. The offline minimization search, `m5_minimize`'s `search`, is ignored too but is not a seeded test; the nightly skips it.
+The same night's seed is also `M1_PROGEN_SEED` (the generated RV32I program), `M4_FAULT_SEED` (the register fault the M4 locator and the naive oracle must find alike), and `M5_CAMPAIGN_SEED` (the perturbation seed under which the unpatched `m5-reference` scenario must agree). `.github/workflows/nightly.yml` prints all four. The offline minimization search, `m5_minimize`'s `search`, is ignored too but is not a seeded test; the nightly skips it and the M6 feasibility measurements in `m6_feasibility`.
 
 ## Golden Files
 

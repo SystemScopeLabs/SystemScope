@@ -82,7 +82,7 @@ jobs:
       # AT-1 step 1 (two processes), AT-2, and AT-3 for the random seed, the M4 fault, and
       # the M5 campaign seed. The offline minimization search is not a seeded test.
       - name: Random-seed acceptance
-        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --run-ignored only -E 'not (binary(m5_minimize) & test(=search))'
+        run: cargo nextest run -p systemscope-acceptance --locked --profile ci --no-fail-fast --run-ignored only -E 'not (binary(m5_minimize) & test(=search)) & not binary(m6_feasibility)'
       # The generated program for the same seed passes, deterministically.
       - name: Random-seed generated program
         run: cargo nextest run -p systemscope-rv32 --locked --profile ci --no-fail-fast --run-ignored only
