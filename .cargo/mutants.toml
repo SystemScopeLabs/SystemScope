@@ -1,5 +1,6 @@
-# cargo-mutants (https://mutants.rs): weekly exploration of mutations nobody thought
-# of. Targeted mutation checks written for each design rule stay in the regular tests.
+# cargo-mutants (https://mutants.rs): mutations nobody thought of, on each pull request's
+# changed lines and in full at a milestone's exit audit. Targeted mutation checks written
+# for each design rule stay in the regular tests.
 test_tool = "nextest"
 # The acceptance harness and xtask are checked by targeted mutations and fault-injection
 # self-tests (docs/m0-design.md §9); mutating them here would only slow the run. The

@@ -1,17 +1,13 @@
 name: Mutants
-# Weekly and on demand only: exploratory, never a PR gate. Missed and timed-out mutants
-# are reported in the summary; the run fails only when a tool, a baseline, or a runner
-# fails, or when a shard leaves no mutants.out behind for a pass.
+# On a pull request, a gate: the mutants of the lines it changes (--in-diff); a missed or
+# timed-out one fails the run. On demand, the full sweep of a milestone's exit audit:
+# missed and timed-out mutants are reported in the summary, and the run fails only when a
+# tool, a baseline, or a runner fails, or when a shard leaves no mutants.out behind for a
+# pass.
 on:
-  schedule:
-    # Saturday 18:17 UTC (Sunday 03:17 KST); off the hour, where scheduled runs queue.
-    - cron: "17 18 * * 6"
+  pull_request:
   workflow_dispatch:
     inputs:
-      force:
-        description: Run even if nothing mutated changed since the last successful scheduled run
-        type: boolean
-        default: false
       shard_count:
         description: Number of shards (every shard of one run uses the same count)
         default: "20"
@@ -20,34 +16,50 @@ on:
         default: ""
 permissions:
   contents: read
-  # The gate reads earlier scheduled runs to skip when nothing mutated changed.
-  actions: read
 concurrency:
-  group: mutants
-  cancel-in-progress: false
+  group: mutants-${{ github.event.pull_request.number || 'audit' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 env:
   CARGO_TERM_COLOR: always
+  # Set on a pull request: mutate only its changes, the merge commit against the base.
+  DIFF: ${{ github.event_name == 'pull_request' && 'true' || '' }}
 jobs:
   gate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
     outputs:
       run: ${{ steps.decide.outputs.run }}
       shard_count: ${{ steps.decide.outputs.shard_count }}
       shards: ${{ steps.decide.outputs.shards }}
     steps:
       - uses: actions/checkout@v7
-        with: { path: systemscope, fetch-depth: 0 }
+        with: { path: systemscope, fetch-depth: 2 }
+      - uses: ./systemscope/.github/actions/setup
+        if: env.DIFF
+        with:
+          save-cache: false
+      - uses: taiki-e/install-action@v2
+        if: env.DIFF
+        with: { tool: cargo-mutants }
       - id: decide
         working-directory: systemscope
         env:
-          GH_TOKEN: ${{ github.token }}
-          FORCE: ${{ inputs.force }}
           SHARD_COUNT: ${{ inputs.shard_count || '20' }}
           SHARD: ${{ inputs.shard }}
-          # What the run mutates, and what decides which mutants exist.
-          WATCHED: runtime components elf reference Cargo.lock .cargo/mutants.toml
         run: |
+          run=true
+          if [ -n "$DIFF" ]; then
+            git diff HEAD^1 HEAD > "$RUNNER_TEMP/pr.diff"
+            n=$( { cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" --workspace -e 'runtime/**'
+                   cargo mutants --list --in-diff "$RUNNER_TEMP/pr.diff" -p systemscope-runtime
+                 } | grep -c . || true)
+            echo "$n mutants in the changed lines." >> "$GITHUB_STEP_SUMMARY"
+            [ "$n" -gt 0 ] || run=false
+            # About 20 mutants a shard, each a build and a test run of a minute or two.
+            SHARD_COUNT=$(( n / 20 + 1 ))
+            [ "$SHARD_COUNT" -le 10 ] || SHARD_COUNT=10
+            SHARD=
+          fi
           case "$SHARD_COUNT" in ''|*[!0-9]*|0) echo "::error::shard_count must be a positive integer"; exit 1 ;; esac
           if [ -z "$SHARD" ]; then
             shards=$(jq -cn --argjson n "$SHARD_COUNT" '[range($n)]')
@@ -55,20 +67,6 @@ jobs:
             case "$SHARD" in *[!0-9]*) echo "::error::shard must be an integer"; exit 1 ;; esac
             if [ "$SHARD" -ge "$SHARD_COUNT" ]; then echo "::error::shard must be below shard_count"; exit 1; fi
             shards="[$SHARD]"
-          fi
-          # Skip when nothing watched changed since the last successful scheduled run on
-          # this branch. A skipped run counts too: nothing changed before it either.
-          run=true
-          if [ "$FORCE" != true ]; then
-            last=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow mutants.yml \
-              --branch "$GITHUB_REF_NAME" --event schedule --status success --limit 1 \
-              --json headSha --jq '.[0].headSha // empty')
-            # shellcheck disable=SC2086 # WATCHED is a list of paths
-            if [ -n "$last" ] && git cat-file -e "$last^{commit}" 2>/dev/null \
-              && git diff --quiet "$last" HEAD -- $WATCHED; then
-              run=false
-              echo "Nothing mutated changed since ${last:0:7}, the last successful scheduled run; skipping." >> "$GITHUB_STEP_SUMMARY"
-            fi
           fi
           {
             echo "run=$run"
@@ -93,7 +91,7 @@ jobs:
         working-directory: systemscope
     steps:
       - uses: actions/checkout@v7
-        with: { path: systemscope }
+        with: { path: systemscope, fetch-depth: 2 }
       - uses: ./systemscope/.github/actions/setup
         with:
           save-cache: ${{ strategy.job-index == 0 }}
@@ -109,6 +107,11 @@ jobs:
               echo "::group::resources $(date -u +%H:%M:%S)"; free -m; df -h /; echo "::endgroup::"
             done ) &
           monitor=$!
+          diff=()
+          if [ -n "$DIFF" ]; then
+            git diff HEAD^1 HEAD > "$RUNNER_TEMP/pr.diff"
+            diff=(--in-diff "$RUNNER_TEMP/pr.diff")
+          fi
           # A memory-hungry mutant is killed inside this cgroup instead of taking the
           # whole runner down; the mutant is then recorded as a failed test. OOMPolicy=continue
           # keeps systemd from stopping the whole scope, cargo-mutants included, after that kill.
@@ -119,14 +122,16 @@ jobs:
               systemd-run --scope --quiet --uid="$(id -u)" --gid="$(id -g)" \
                 -p MemoryMax=12G -p MemorySwapMax=0 -p OOMPolicy=continue \
               cargo mutants --in-place --no-shuffle \
-                --shard "$SHARD" --sharding round-robin --timeout 180 "$@"
+                --shard "$SHARD" --sharding round-robin --timeout 180 "${diff[@]}" "$@"
           }
           # 0: all caught; 2: missed mutants; 3: timeouts. Both are findings, shown by
-          # the summary job. 1 (usage), 4 (baseline failed), and anything else fail.
+          # the summary job, and fail a pull request. 1 (usage), 4 (baseline failed), and
+          # anything else fail.
           failed=0
           check() {
             case "$2" in
-              0|2|3) echo "cargo-mutants ($1) exited $2" ;;
+              0) echo "cargo-mutants ($1) exited 0" ;;
+              2|3) echo "cargo-mutants ($1) exited $2"; [ -z "$DIFF" ] || failed=1 ;;
               *) echo "::error::cargo-mutants ($1) exited $2"; failed=1 ;;
             esac
           }
@@ -166,21 +171,28 @@ jobs:
         env:
           SHARDS: ${{ needs.gate.outputs.shards }}
           SHARD_COUNT: ${{ needs.gate.outputs.shard_count }}
+          SHARDS_RESULT: ${{ needs.mutants.result }}
         run: |
           mkdir -p shards
           failed=0
+          # On a pull request this job is the one check to require: it fails with any shard.
+          if [ -n "$DIFF" ] && [ "$SHARDS_RESULT" != success ]; then
+            echo "::error::a shard failed: $SHARDS_RESULT"
+            failed=1
+          fi
           {
             echo "## Mutants at ${GITHUB_SHA:0:7}, $(jq length <<<"$SHARDS") of $SHARD_COUNT shards"
             echo
             echo "| Shard | Caught | Missed | Timeout | Unviable |"
             echo "|---|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
-          # Each shard holds a mutants.out per pass: main/ and runtime/.
+          # Each shard holds a mutants.out per pass: main/ and runtime/. A pull request's
+          # pass with no mutants in its shard writes none.
           count() { cat "$1"/*/mutants.out/"$2".txt 2>/dev/null | grep -c . || true; }
           for k in $(jq -r '.[]' <<<"$SHARDS"); do
             d="shards/mutants.out-$k"
-            if [ ! -f "$d/main/mutants.out/outcomes.json" ] \
-              || [ ! -f "$d/runtime/mutants.out/outcomes.json" ]; then
+            if [ -z "$DIFF" ] && { [ ! -f "$d/main/mutants.out/outcomes.json" ] \
+              || [ ! -f "$d/runtime/mutants.out/outcomes.json" ]; }; then
               echo "::error::shard $k left no mutants.out for a pass"
               echo "| $k | no mutants.out | | | |" >> "$GITHUB_STEP_SUMMARY"
               failed=1
