@@ -158,6 +158,8 @@ jobs:
           if-no-files-found: ignore
 
   summary:
+    # Named apart from the source-mutant workflows' summary jobs, to be required alone.
+    name: mutants summary
     needs: [gate, mutants]
     if: always() && needs.gate.outputs.run == 'true'
     runs-on: ubuntu-24.04
